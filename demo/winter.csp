@@ -1,0 +1,148 @@
+// wintersbone -- SMS alarm node: two temperatures, mains or battery, four
+// 230 V relays, optional water pressure.
+//
+//   ./csp apps/wintersbone/main.csp
+//
+// THE APPLICATION, NOT THE BOARD. What it reads and drives comes from the
+// board's pins.csp, found through the `board` root: a board directory names
+// this file in its PROG, and the build hands it --root=board=<that dir>.
+//
+//   boards/wintersbone      Arduino MKR NB 1500
+//   boards/wintersbone_s3   LilyGO T-SIM7080G-S3
+//
+// A board's pins.csp provides the same names with the same meaning: Rel1..4,
+// Batt with BATT_MV_MUL / BATT_MV_DIV to make it millivolts, Press, PwrGood
+// and Pmic (the power manager's status byte, for the report), TinRaw / ToutRaw -- and whatever its own parts need at INIT, in an `#in
+// INIT` block of its own (the MKR's charger watchdog, the S3's ADC). On the
+// host -- the tests here -- apps/wintersbone/pins.csp stands in for one.
+//
+// EVERYTHING IS PRINTED, and that is the SMS interface: the modem is routed
+// through the interpreter (see the end of this file), so
+//
+//   a message from a number in Owners   runs as a command, and what it
+//                                       prints is the answer, to that number
+//   a rule's println                    is an event, to every number
+//
+// A message may read and may set a #param; nothing else. The same commands
+// work at the console:
+//
+//   > R1On = 1              relay 1 on (remembered across a restart)
+//   TinC                    one value, back to whoever asked
+//   > Status = 1            the status report -- printed by a rule, so it is
+//                           an event and goes to every number
+//
+// Temperatures are in TENTHS of a degree, voltage in mV, pressure in mbar:
+// integers read fine in an SMS and need no float on the board.
+#import "winter_pins.csp"
+#import alarm
+
+// Who may command the node, and who is told its alarms. Spaces or commas
+// between numbers; change it in the field with `> Owners = "..."` and /save.
+#param Owners string = "+46700000000"
+// The SIM's PIN, if it has one: `> SimPin = "1234"` and /save on the node,
+// never in the source. Empty is a card without.
+#param SimPin string = ""
+
+// What the relays should be doing. #param, so a command survives a restart
+// through the settings store.
+#param R1On:1 unsigned = 0
+#param R2On:1 unsigned = 0
+#param R3On:1 unsigned = 0
+#param R4On:1 unsigned = 0
+
+// Limits. Patchable from an SMS like anything else.
+#param FrostLim  = 50       // inside below 5.0 °C
+#param BattLow   = 3500     // mV: time for a last message
+#param PressOn:1 unsigned = 0   // is there a pressure transducer at all
+#param PressMin  = 1500     // mbar
+
+// How long a condition must hold before it is an alarm, in ms. Set through
+// rules rather than as instance arguments: an argument is applied when the
+// instance starts and would undo a `>` patch made before it.
+#param PwrDelay   = 30000
+#param PwrBack    = 60000    // ...and gone, before "power back"
+#param PwrGone    = 10000    // power-good away this long before it counts as off
+#param FrostDelay = 600000
+#param PressDelay = 60000
+
+// The active-low relay module. On battery the coils have no supply (they run
+// off the USB 5 V), so the relays drop out by themselves and come back in the
+// commanded state when the mains returns.
+Rel1 = !R1On
+Rel2 = !R2On
+Rel3 = !R3On
+Rel4 = !R4On
+
+// Measurements.
+#variable TinC   = 0        // 0.1 °C
+#variable ToutC  = 0
+#variable BattmV = 0
+#variable Pmbar  = 0
+#variable Mains:1 unsigned = 0
+
+TinC   = TinRaw * 5 / 8             // 1/16 degree a step, in tenths
+ToutC  = ToutRaw * 5 / 8
+BattmV = Batt * BATT_MV_MUL / BATT_MV_DIV
+// 0.5-4.5 V is 0-10 bar; the divider makes 4.5 V read as 3.0 V of 3.3.
+Pmbar  = (Press * 4950 / 1023 - 500) * 5 / 2
+
+// MAINS IS NOT THE POWER-GOOD BIT. On a weak supply the charger drops PG for
+// a second every few seconds and finds the input again -- a Raspberry Pi's USB
+// port behind a hub did, with the charger held at 100 mA. Read straight, every
+// drop restarted the alarm's PwrBack and "Power back" never went out, while the
+// repeat said POWER OFF again every six hours. So the mains is gone only when
+// PG has stayed away PwrGone, and back the moment it is seen. Written on the
+// edges only: a timer written every cycle would keep the board awake.
+#timer PgAway 10000
+PgAway.period = PwrGone ? PgAway.period != PwrGone
+PgAway = 1 ? !PwrGood && Mains && PgAway == 0   // it went: start counting
+PgAway = 0 ? PwrGood && PgAway != 0             // back in time: forget it
+Mains  = 0 ? timeout(PgAway)
+Mains  = 1 ? PwrGood
+
+// Alarms. lib/alarm.csp: the condition must hold OnDelay before it counts and
+// be gone OffDelay before it releases; Repeat bounds the re-sends.
+#Alarm pwr   Repeat=21600000
+#Alarm batt  OnDelay=60000  OffDelay=600000 Repeat=86400000
+#Alarm press OffDelay=300000 Repeat=3600000
+#Alarm frost OffDelay=600000 Repeat=21600000
+
+pwr.OnDelay   = PwrDelay
+pwr.OffDelay  = PwrBack
+press.OnDelay = PressDelay
+frost.OnDelay = FrostDelay
+
+pwr.In   = !Mains
+batt.In  = !Mains && BattmV < BattLow
+press.In = PressOn && Pmbar < PressMin
+frost.In = TinC < FrostLim
+
+// How many messages have gone out -- what a test checks, and what a person
+// asks for when the bill looks wrong.
+#variable Sent = 0
+Sent = Sent + 1 ? pwr.Send || pwr.Clear || batt.Send || press.Send || press.Clear || frost.Send || frost.Clear
+
+println("POWER OFF, battery ", BattmV, " mV") ? pwr.Send
+println("Power back")                       ? pwr.Clear
+println("BATTERY LOW ", BattmV, " mV")       ? batt.Send
+println("PRESSURE DROP ", Pmbar, " mbar")    ? press.Send
+println("Pressure back ", Pmbar, " mbar")    ? press.Clear
+println("FROST inside ", TinC)               ? frost.Send
+println("Frost over ", TinC)                 ? frost.Clear
+
+// The status report, on request: `> Status = 1`.
+#variable Status:1 unsigned in = 0   // `in`: an SMS may set it
+println("in ", TinC, " out ", ToutC)            ? Status
+println("mains ", Mains, " batt ", BattmV)      ? Status
+println("pmic ", Pmic)                          ? Status   // the charger's status byte
+println("relays ", R1On + R2On * 2 + R3On * 4 + R4On * 8) ? Status
+println("pressure ", Pmbar)                     ? Status && PressOn
+Status = 0 ? Status
+
+// The modem, through the interpreter. In: a message is a line typed at the
+// prompt. Out: what the interpreter prints, sorted by the console into
+// answers and events (csp_transport.c).
+#buffer Sms:160 inout sms Owners SimPin
+#buffer Rp:160  inout repl
+#route  Sms Rp
+#route  Rp  Sms

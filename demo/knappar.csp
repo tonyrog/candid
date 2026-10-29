@@ -1,0 +1,22 @@
+// Tre växlande knappar och tre lysdioder.
+//   röd  : någon knapp är hög
+//   gul  : exakt en knapp är hög
+//   grön : alla tre knapparna är höga
+
+#digital B1 in pulldown 2
+#digital B2 in pulldown 3
+#digital B3 in pulldown 4
+#digital Red    out 11
+#digital Yellow out 12
+#digital Green  out 13
+
+#annotate panel B1 kind=toggle
+#annotate panel B2 kind=toggle
+#annotate panel B3 kind=toggle
+#annotate panel Red    color=red
+#annotate panel Yellow color=yellow
+#annotate panel Green  color=green
+
+Red    = B1 || B2 || B3
+Yellow = B1 + B2 + B3 == 1
+Green  = B1 && B2 && B3

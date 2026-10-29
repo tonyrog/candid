@@ -1,0 +1,19 @@
+// The same two pins, and one character different: `? Button` makes the
+// assignment CONDITIONAL.
+//
+//      Led = Button        assigns every cycle -- Led follows
+//      Led = 1 ? Button    assigns WHEN Button is true -- Led latches
+//
+// When the guard is false the rule does nothing at all, so Led keeps whatever
+// it had. Press Button and let go: the lamp stays lit. That is not a bug, it
+// is what `?` means, and it is the first thing about candyspeak that catches
+// people out. Watch it on the trace: Button returns to zero, Led does not.
+//
+// To turn it off you have to say so:
+//
+//      Led = 0 ? !Button
+
+#digital Button in pullup 2
+#digital Led    out       13
+
+Led = 1 ? Button

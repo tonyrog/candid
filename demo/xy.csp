@@ -1,0 +1,6 @@
+
+#analog xin:10 in unsigned 0
+#analog yin:10 in unsigned 1
+
+#annotate panel xin  kind=plot axis=x id=plot1 scale=0.000976 unit="ms"
+#annotate panel yin  kind=plot axis=y id=plot1 scale=0.000976 unit="V"

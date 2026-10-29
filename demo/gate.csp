@@ -1,0 +1,10 @@
+// The smallest complete loop: Led follows Button, one cycle later.
+//
+// That one-cycle delay is what the trace is for. The rule is re-evaluated
+// every cycle -- it does not run where it is written -- so the edge on Led
+// sits one sample to the right of the edge on Button.
+
+#digital Button in pullup 2
+#digital Led    out       13
+
+Led = Button

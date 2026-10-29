@@ -1,0 +1,17 @@
+
+#analog xout:10 out unsigned 0
+#analog yout1:10 out unsigned 1
+#analog yout2:10 out unsigned 2
+
+#timer TSweep 4000 = 1
+#analog yin1:10 in unsigned 11
+#analog yin2:10 in unsigned 12
+
+xout = progress(TSweep)*1023 ? 1
+yout1 = yin1 + (trunc(progress(TSweep)*2*2) % 2)*200 ? 1
+yout2 = yin2 + (trunc(progress(TSweep)*2*3) % 2)*200 ? 1
+TSweep = 1 ? timeout(TSweep)
+
+#annotate panel xout   kind=plot axis=x id=plot1 shape=round clip=on scale=0.000976 unit="ms"
+#annotate panel yout1  kind=plot color=amber axis=y id=plot1 scale=0.000976 unit="V"
+#annotate panel yout2  kind=plot color=red axis=y id=plot1 scale=0.000976 unit="V"

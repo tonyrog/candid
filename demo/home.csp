@@ -1,0 +1,208 @@
+// A small house, as a worked example of specifying automation in candyspeak.
+//
+// Read it as three sections: what the house HAS, what should HAPPEN, and what
+// must NEVER happen. The third is the one other automation systems do not ask
+// for, and it is what a model checker can later be pointed at.
+//
+// Timer values are shortened so the panel is watchable -- they are #param, so
+// `> HallHold = 120` at the prompt sets two minutes without a rebuild.
+
+// ---------------------------------------------------------------- the house
+
+// sensors
+#digital HallMotion   in pulldown 2      // 1 = someone in the hall
+#digital BathMotion   in pulldown 3
+#digital FrontDoor    in pulldown 4      // 1 = open
+#digital LivingWindow in pulldown 5      // 1 = open
+#digital NightButton  in pulldown 6      // by the bed: goodnight
+#digital ArmButton    in pulldown 7      // arm / disarm the alarm
+
+#analog  Daylight:10  in 0:0             // outdoor light sensor
+#analog  IndoorTemp:10 in 0:1            // 0..1023, tenths of a degree
+
+// lights
+#digital HallLight    out 8
+#digital KitchenLight out 9
+#digital LivingLight  out 10
+#digital BedLight     out 11
+#digital BathLight    out 12
+#digital OutdoorLamp  out 13
+#digital ArmedLed     out 18
+
+// the rest of the house
+#digital BathFan__Blue   out 14
+#digital Heater__Orange  out 15
+#digital Siren__Red      out 16
+#digital CoffeeMaker  out 17
+
+// ---- how the panel should show it -------------------------------------
+//
+// Presentation is NOT in the language: nothing in `#digital NightButton in 6'
+// says whether that is a momentary button or a latching switch, and it should
+// not. #annotate says it next to the declaration, the compiler skips the line
+// entirely, and the panel is the tool that owns these keys.
+
+#annotate panel NightButton  kind=toggle
+#annotate panel ArmButton    kind=toggle
+#annotate panel HallMotion   kind=toggle  // motion is a pulse, not a switch
+#annotate panel BathMotion   kind=push
+
+#annotate panel Siren__Red   kind=action   // it sounds; it does not indicate
+#annotate panel BathFan__Blue kind=action
+#annotate panel Heater__Orange kind=action
+
+#annotate panel IndoorTemp   kind=dial unit="0.1C"
+#annotate panel Daylight     kind=slider
+
+// what an operator is allowed to tune, live, without a rebuild
+#param HallHold   = 3           // seconds the hall stays lit
+#param FanRun     = 5           // seconds the fan runs on after the bathroom
+#param SetPoint   = 210         // wanted indoor temperature, tenths
+#param Hysteresis = 10          // +/- band, so the heater does not chatter
+#param DarkBelow  = 300         // daylight reading that counts as dark
+
+#timer HallTimer  3000
+#timer FanTimer   5000
+
+#variable Armed:1 = 0
+#variable WinWas:1 = 0           // last cycle's window and alarm, for the net
+#variable ArmWas:1  = 0
+// FAILSAFE is NOT declared here: INIT=0, NORMAL=1 and FAILSAFE=2 are built in,
+// installed by csp_rt_init, and user states are numbered from 3 up. Naming it
+// again would be redundant -- `State = FAILSAFE` already resolves to the
+// built-in one.
+#states Home Night Away
+
+// ------------------------------------------------------------ what happens
+
+#in INIT
+    State = Home
+    HallTimer.period = HallHold * 1000
+    FanTimer.period  = FanRun * 1000
+#end
+
+// The hall lights on movement and stays lit for a while after it stops.
+//
+// TWO things about this shape, both of which were got wrong first:
+//
+//   `= 1 ?` is deliberate. A guarded rule does nothing when its guard is
+//   false, so the light LATCHES on and something else has to put it out.
+//
+//   The timer starts when the motion STOPS, not when it starts. `T = 1` only
+//   arms a STOPPED timer, so arming it on every cycle of a held signal does
+//   not extend it -- it expires while you are still standing there, and
+//   timeout() is edge-triggered so the chance does not come back. Counting
+//   down from the moment the room goes quiet is both what works and what a
+//   person means by "stays on for a few seconds after".
+#in Home Night Away
+    HallLight = 1 ? HallMotion
+    HallTimer = 1 ? !HallMotion && HallLight
+    HallLight = 0 ? timeout(HallTimer)
+
+    // The bathroom fan runs on after you leave -- the point of the timer.
+    BathLight = 1 ? BathMotion
+    BathFan__Blue = 1 ? BathMotion
+    FanTimer  = 1 ? !BathMotion && BathFan__Blue
+    BathLight = 0 ? timeout(FanTimer)
+    BathFan__Blue = 0 ? timeout(FanTimer)
+
+    // Outdoor lamp on darkness, with a band so dusk does not flicker it.
+    OutdoorLamp = 1 ? Daylight < DarkBelow
+    OutdoorLamp = 0 ? Daylight > DarkBelow + 50
+
+    // Heating, likewise banded.
+    Heater__Orange = 1 ? IndoorTemp < SetPoint - Hysteresis
+    Heater__Orange = 0 ? IndoorTemp > SetPoint + Hysteresis
+
+    // The alarm is a toggle on one button.
+    Armed = 1, ArmedLed=1 ? ArmButton && !Armed
+    Armed = 0, ArmedLed=0 ? !ArmButton && Armed
+#end
+
+// Goodnight: everything social goes off, the bedroom keeps a reading light.
+//
+// INSIDE a block, because a loose rule -- one with no #in at all -- runs only in
+// INIT and NORMAL. Written outside these braces this transition never fired:
+// the house was in Home, so the rule was never even evaluated. Same trap as the
+// window guard, one file apart.
+#in Home
+    State = Night ? NightButton
+#end
+
+#in Night
+    KitchenLight = 0
+    LivingLight  = 0
+    CoffeeMaker  = 0
+#end
+
+#in Home
+    // Morning coffee is a convenience, not a rule that fights you: it only
+    // comes on when the house is Home and someone is actually up.
+    CoffeeMaker = 1 ? HallMotion && Daylight > DarkBelow
+#end
+
+// ------------------------------------------------- what must never happen
+//
+// These are the invariants. candyspeak has no `#invariant` yet, so for now they
+// are written as rules that FORCE the safe value.
+//
+// TWO things make that fragile, and both bit this file while it was written:
+//
+//  1. They must come LAST, because a later rule in the same cycle wins.
+//  2. They must be INSIDE an #in block naming every state. A loose rule -- one
+//     with no #in at all -- runs only in INIT and NORMAL, so written outside
+//     these braces the window check never ran in Home and the heater happily
+//     warmed the street.
+//
+// Which is the argument for `#invariant` as its own declaration: a property
+// should not depend on where in the file it sits or which states someone
+// remembered to list.
+
+#in Home Night Away
+    // No heating into an open window.
+    Heater__Orange = 0 ? LivingWindow
+
+    // The siren sounds only while armed, and only a door does it.
+    Siren__Red = 1 ? Armed && FrontDoor
+    Siren__Red = 0 ? !Armed
+#end
+
+// ------------------------------------------------------- the safety net
+//
+// The rules above PREVENT the two unsafe combinations. These DETECT them, and
+// go to FAILSAFE rather than patching the output.
+//
+// That is the shape worth having, because it turns three scattered guards into
+// ONE property: "FAILSAFE is unreachable". That is a sentence a model checker
+// takes -- varp's `invariant State != FAILSAFE` -- and proving it proves the
+// prevention above is complete. Patched outputs prove nothing: they hide the
+// violation instead of ruling it out.
+// ONE CYCLE OF GRACE, and it is not optional.
+//
+// Rules read the COMMITTED state. In the cycle the window opens, prevention
+// sets Heater to 0 -- but this rule still sees the 1 that was committed at the
+// end of the previous cycle, so a plain `Heater && LivingWindow` fires FAILSAFE
+// every single time the window is opened in a warm house. It did, first try.
+//
+// So the net only closes on a violation that PERSISTS: the condition has to
+// hold now AND to have held last cycle, by which time prevention has had its
+// turn. WinWas/ArmWas are written last in the block, so reading them gives the
+// previous cycle's value.
+#in Home Night Away
+    State = FAILSAFE ? Heater__Orange && LivingWindow && WinWas
+    State = FAILSAFE ? Siren__Red && !Armed && !ArmWas
+
+    WinWas = LivingWindow
+    ArmWas = Armed
+#end
+
+// And if we do land here, land softly: everything that can hurt goes off,
+// everything that helps you find your way goes on. A failsafe that simply
+// stops is not safe in a dark house.
+#in FAILSAFE
+    Heater__Orange = 0
+    Siren__Red     = 0
+    CoffeeMaker    = 0
+    HallLight      = 1
+    OutdoorLamp    = 1
+#end

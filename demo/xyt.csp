@@ -1,0 +1,27 @@
+
+#analog xout:10 out unsigned 0
+#analog yout1:10 out unsigned 1
+#analog yout2:10 out unsigned 2
+#analog yout3:10 out unsigned 3
+#analog yout4:10 out unsigned 4
+
+#timer TSweep 1000 = 1
+#analog yin1:10 in unsigned 11
+#analog yin2:10 in unsigned 12
+#buffer data:4 in tcp 5555
+#field yin3:10 big unsigned data[6..15]
+#field yin4:10 big unsigned data[22..31]
+
+xout = progress(TSweep)*1023 ? 1
+yout1 = yin1 + (trunc(progress(TSweep)*2*2) % 2)*200 ? 1
+yout2 = yin2 + (trunc(progress(TSweep)*2*3) % 2)*200 ? 1
+TSweep = 1 ? timeout(TSweep)
+yout3 = yin3 ? 1
+yout4 = yin4 ? 1
+
+#annotate panel xout   kind=plot axis=x id=plot1 scale=0.000976 unit="ms"
+#annotate panel yout1  kind=plot color=amber axis=y id=plot1 scale=0.000976 unit="V"
+#annotate panel yout2  kind=plot color=red axis=y id=plot1 scale=0.000976 unit="V"
+#annotate panel yout3  kind=plot color=orange axis=y id=plot1 scale=0.000976 unit="V"
+#annotate panel yout4  kind=plot color=green axis=y id=plot1 scale=0.000976 unit="V"
+
