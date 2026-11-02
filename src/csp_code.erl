@@ -58,7 +58,9 @@
 
 -module(csp_code).
 
--export([new/4, refresh/3, fired/3, tick/2, control/3, model/3, actions/1]).
+-export([new/4, refresh/2, fired/2, tick/1, control/2, model/2, actions/1]).
+-export([assign/1, bind/1, chain/2, cols/1, tr_id/2, col_name/1,
+	 signed/3]).                                     % for the renderers
 -export([goal_text/1, contact_of/3, state_name/2, sig_expr/2,
 	 look_values/1, look_text/1]).                   % tests
 -export([split/1]).
@@ -80,82 +82,6 @@
 		   unwant => "#f55"}).      % marked: should not
 
 colours(Cfg) -> maps:merge(?COLOURS, maps:with(maps:keys(?COLOURS), Cfg)).
-
-css(C) ->
-    Fill = fun(K) -> ["color-mix(in srgb,", maps:get(K, C), " 25%,#111)"] end,
-    Ink = fun(K) -> ["color-mix(in srgb,", maps:get(K, C), " 35%,#fff)"] end,
-    Col = fun(K) -> maps:get(K, C) end,
-    lists:flatten(
-      [".cv{font:13px monospace;color:#bbb}"
-       ".cv .bar button{font:12px monospace;padding:2px 8px;margin:0 4px 8px 0;"
-       "  border:1px solid #555;background:#333;color:#ccc}"
-       ".cv .bar button.sel{background:#3af;color:#111;font-weight:bold}"
-       %% A table: the cells share their borders, one line between two.
-       ".vals{display:grid;grid-template-columns:repeat(auto-fill,"
-       "  minmax(150px,1fr));margin:0 1px 10px 0;color:#888;"
-       "  font:13px monospace}"
-       ".vals span{border:1px solid #3a3a3a;margin:0 -1px -1px 0;"
-       "  padding:2px 8px}"
-       ".vals b{color:#ddd;font-weight:normal;float:right}"
-       ".vals i{color:#8ab}"
-       %% The model frame, in the panel's top: goal, solve, the answer.
-       ".md{font:13px monospace;color:#bbb}"
-       ".md button,.md select{font:12px monospace;padding:2px 8px;"
-       "  margin-left:4px;border:1px solid #555;background:#333;color:#ccc}"
-       ".md .goal{display:inline-block;min-width:320px;padding:3px 10px;"
-       "  border:2px solid ", Col(want), ";border-radius:3px;color:#eee;"
-       "  background:", Fill(want), "}"
-       ".md .goal.none{border-style:dashed;color:#888;background:none}"
-       ".md .res{margin:6px 0 4px 0;white-space:pre-wrap;color:#aaa;"
-       "  max-height:30vh;overflow:auto}"
-       ".md .res.bad{color:", Col(unwant), "}"
-       ".md .res.ok{color:", Col(true), "}"
-       ".md table{border-collapse:collapse;margin:2px 0 8px 0}"
-       ".md td,.md th{border:1px solid #3a3a3a;padding:1px 8px;"
-       "  text-align:right}"
-       ".md th{color:#8ab;font-weight:normal}"
-       ".md td.g{color:", Col(want), "}"
-       ".md td.any{color:#555}"
-       ".md .hid{display:none}"
-       ".md td.cur,.md th.cur{background:", Fill(want), "}"
-       ".md td.bad{background:", Fill(unwant), ";color:", Ink(unwant), "}"
-       "[data-sig]{cursor:pointer}"
-       ".sgt{outline:2px solid ", Col(want), ";outline-offset:1px}"
-       ".sgf{outline:2px dashed ", Col(unwant), ";outline-offset:1px}"
-       ".cv .bind{color:#8ab;margin-bottom:8px}"
-       ".cv .rw{display:flex;align-items:center;margin:3px 0;flex-wrap:nowrap}"
-       ".cv .ln{color:#555;width:3.2em;text-align:right;margin-right:10px;"
-       "  flex:none}"
-       ".cv .and{display:flex;align-items:center}"
-       ".cv .or{display:flex;flex-direction:column;border-left:2px solid #666;"
-       "  border-right:2px solid #666;padding:1px 0}"
-       ".cv .br{display:flex;align-items:center;justify-content:space-between}"
-       ".cv .br>.w:last-child{flex:1}"
-       ".cv .w{display:inline-block;height:2px;min-width:10px;background:#666}"
-       ".cv .ct{border:1px solid #555;padding:1px 6px;border-radius:3px;"
-       "  background:#1e1e1e;color:#999;white-space:nowrap;cursor:pointer}"
-       ".cv .ct.t{background:", Fill(true), ";border-color:", Col(true),
-       ";color:", Ink(true), ";box-shadow:0 0 6px ", Col(true), "}"
-       ".cv .ct.u{border-style:dashed;color:#666}"
-       %% A mark is the frame: the fill still says what holds now.
-       ".cv .ct.mt{outline:2px solid ", Col(want), ";outline-offset:2px}"
-       ".cv .ct.mf{outline:2px dashed ", Col(unwant), ";outline-offset:2px}"
-       ".cv .co{border:1px solid #555;border-radius:10px;padding:1px 9px;"
-       "  color:#999;white-space:nowrap}"
-       ".cv .co.nx{border-color:", Col(next), ";color:", Ink(next), "}"
-       ".cv .co.on{background:", Fill(fired), ";border-color:", Col(fired),
-       ";color:", Ink(fired), ";box-shadow:0 0 7px ", Col(fired), "}"
-       ".cv .hd{color:#68a;margin:10px 0 2px 0}"
-       ".cv .rw.off{opacity:0.35}"
-       ".cv .hd.e{color:#456;margin:2px 0 8px 0}"
-       ".cv .hd.t{color:", Col(block), ";font-weight:bold}"
-       ".cv.code .ct{border:none;padding:0 2px;background:none;box-shadow:none}"
-       ".cv.code .ct.t{color:", Col(true), ";text-shadow:0 0 5px ", Col(true), "}"
-       ".cv.code .ct.u{color:#666;text-decoration:underline dotted}"
-       ".cv.code .co{border:none;padding:0 2px}"
-       ".cv.code .co.on{background:", Fill(fired), "}"
-       ".cv.code .op{color:#777}"
-       ".cv .tx{white-space:pre}"]).
 
 %%% ------------------------------------------------------------- the rules
 
@@ -290,115 +216,48 @@ number([], _N)           -> [].
 %% Hidden until control/3 says ladder or code. Ast is candyspeak:parse/2 of
 %% File with `sources'; Cfg is candid.config's say, today the colours.
 %%
-%% Where: #{code => the code view's column, status => the top frame's row of
-%% boxes (the goal and solve go there), top => the top frame below it (the
-%% answer and the program's values)}.
-new(Ws, Where, {Ast, File}, Cfg) ->
-    #{code := Parent, status := Row, top := Top} = Where,
-    Style = wse:createElement(Ws, "style"),
-    wse:set(Ws, Style, "textContent", css(colours(Cfg))),
-    wse:appendChild(Ws, Parent, Style),
-    {ok, Ev} = wse:create_event(Ws),
-    Notify = fun(Tag) -> wse:newf(Ws, "", "{ Wse.notify(" ++
-				      integer_to_list(Ev) ++ ", " ++ Tag ++
-				      "); }")
-	     end,
-    Box = wse:createElement(Ws, "div"),
-    wse:setStyle(Ws, Box, "display:none"),
+%% C is the renderer, {Module, Handle} (csp_code_wse and wse's handle for
+%% the browser). Where: #{code => the code view's column, status => the top
+%% frame's row of boxes (the goal and solve go there), top => the top frame
+%% below it (the answer and the program's values)} -- the renderer's own,
+%% handed on.
+new(C, Where, {Ast, File}, Cfg) ->
     Tabs = tabs(Ast, File),
-    Bar = wse:createElement(Ws, "div"),
-    wse:set(Ws, Bar, "className", "bar"),
-    Btns = case Tabs of
-	       [_] -> [];
-	       _ ->
-		   [begin
-			B = wse:createElement(Ws, "button"),
-			wse:appendChild(Ws, B, wse:createTextNode(Ws, Name)),
-			wse:set(Ws, B, "onclick",
-				Notify("'tab=" ++ integer_to_list(I) ++ "'")),
-			wse:appendChild(Ws, Bar, B),
-			B
-		    end || {I, #{name := Name}} <- enum(Tabs)]
-	   end,
-    Body = wse:createElement(Ws, "div"),
-    wse:appendChild(Ws, Box, Bar),
-    wse:appendChild(Ws, Box, Body),
-    wse:appendChild(Ws, Parent, Box),
-    %% The model frame: goal, clear, solve within k, and below them the answer
-    %% and the values.
-    Md = wse:createElement(Ws, "span"),
-    wse:set(Ws, Md, "className", "md"),
-    Goal = wse:createElement(Ws, "span"),
-    wse:appendChild(Ws, Md, Goal),
-    [begin
-	 B = wse:createElement(Ws, "button"),
-	 wse:appendChild(Ws, B, wse:createTextNode(Ws, Label)),
-	 wse:set(Ws, B, "onclick", Notify("'" ++ Label ++ "'")),
-	 wse:appendChild(Ws, Md, B)
-     end || Label <- ["clear", "solve"]],
-    Sel = wse:createElement(Ws, "select"),
-    [begin
-	 O = wse:createElement(Ws, "option"),
-	 wse:set(Ws, O, "value", K),
-	 wse:appendChild(Ws, O, wse:createTextNode(
-				  Ws, "k \x{2264} " ++ integer_to_list(K))),
-	 K =:= ?K andalso wse:set(Ws, O, "selected", true),
-	 wse:appendChild(Ws, Sel, O)
-     end || K <- ?KS],
-    wse:set(Ws, Sel, "onchange", Notify("'k=' + this.value")),
-    wse:appendChild(Ws, Md, Sel),
-    wse:appendChild(Ws, Row, Md),
-    Res = wse:createElement(Ws, "div"),
-    wse:set(Ws, Res, "className", "md"),
-    wse:appendChild(Ws, Top, Res),
-    #{vars := MainVars} = hd(Tabs),
-    Vals = wse:createElement(Ws, "div"),
-    wse:set(Ws, Vals, "innerHTML", lists:flatten(vals("m_", none, MainVars))),
-    wse:appendChild(Ws, Top, Vals),
-    Paint = wse:newf(Ws, "a,b",
-		     "{ for (var i = 0; i < a.length; i += 2) {"
-		     "    var e = document.getElementById(a[i]);"
-		     "    if (e) e.className = a[i+1]; }"
-		     "  for (var i = 0; i < b.length; i += 2) {"
-		     "    var e = document.getElementById(b[i]);"
-		     "    if (e) e.textContent = b[i+1]; } }"),
-    %% Any element with data-sig is a signal to mark: the devices' labels and
-    %% the value cells. One handler on the panel, since the cells come and go
-    %% with the tabs.
-    Sig = wse:newf(Ws, "",
-		   "{ document.getElementById('panel').onclick = function(e) {"
-		   "    var t = e.target.closest('[data-sig]');"
-		   "    if (t) Wse.notify(" ++ integer_to_list(Ev) ++
-		       ", 'sig=' + t.dataset.sig); }; }"),
-    wse:cast(Ws, Sig, "call", [null]),
-    V = #{box => Box, body => Body, tab_buttons => Btns, event => Ev,
-	  paint => Paint, tabs => Tabs, tab => 0, file => File,
+    H = cui(C, new, [Where, Tabs, #{colours => colours(Cfg), ks => ?KS,
+				   k => ?K}]),
+    V = #{ui => C, h => H, event => maps:get(event, H),
+	  tabs => Tabs, tab => 0, file => File,
 	  mode => hide, shown => #{}, fired => [], glow => #{}, last => #{},
-	  goal => Goal, res => Res, marks => #{}, sigs_seen => [], k => ?K,
+	  marks => #{}, sigs_seen => [], k => ?K,
 	  states => state_names(hd(Tabs)), trace => none, at => none,
 	  bad => #{}, acts => [], look => none, tshow => false},
-    goal(Ws, V),
+    goal(V),
     V.
 
-enum(L) -> lists:zip(lists:seq(0, length(L) - 1), L).
+%% The renderer's function F on its handle, C = {Module, Handle}: csp_code_wse
+%% for the browser.
+cui({M, H}, F, A) -> apply(M, F, [H | A]).
+
+%% And on the view's own handles too.
+vui(#{ui := C, h := H}, F, A) -> cui(C, F, [H | A]).
 
 %% hide | ladder | code from the panel's bar, tab=N from the view's own.
-control(_Ws, undefined, _Tag) -> undefined;
-control(Ws, V = #{box := Box}, "hide") ->
-    wse:setStyle(Ws, Box, "display:none"),
+control(undefined, _Tag) -> undefined;
+control(V, "hide") ->
+    vui(V, shown, [false]),
     V#{mode := hide};
-control(Ws, V = #{box := Box}, Tag) when Tag =:= "ladder"; Tag =:= "code" ->
-    wse:setStyle(Ws, Box, "display:block"),
-    render(Ws, V#{mode := list_to_atom(Tag)});
-control(Ws, V = #{mode := Mode}, "tab=" ++ I) ->
+control(V, Tag) when Tag =:= "ladder"; Tag =:= "code" ->
+    vui(V, shown, [true]),
+    render(V#{mode := list_to_atom(Tag)});
+control(V = #{mode := Mode}, "tab=" ++ I) ->
     V1 = V#{tab := list_to_integer(I)},
     case Mode of
 	hide -> V1;
-	_    -> render(Ws, V1)
+	_    -> render(V1)
     end;
 %% A click on a contact: holds, does not hold, forgotten. Marks survive a
 %% change of tab.
-control(Ws, V = #{marks := Ms, tab := I}, "ct=" ++ Id) ->
+control(V = #{marks := Ms, tab := I}, "ct=" ++ Id) ->
     Key = {I, Id},
     Ms1 = case maps:find(Key, Ms) of
 	      error            -> Ms#{Key => {true, contact_of(V, I, Id)}};
@@ -406,10 +265,10 @@ control(Ws, V = #{marks := Ms, tab := I}, "ct=" ++ Id) ->
 	      {ok, {false, _}} -> maps:remove(Key, Ms)
 	  end,
     V1 = V#{marks := Ms1},
-    goal(Ws, V1),
-    paint(Ws, V1);
+    goal(V1),
+    paint(V1);
 %% A signal: on / off for one bit, == / != its value now for more.
-control(Ws, V = #{marks := Ms, sigs_seen := Seen}, "sig=" ++ N) ->
+control(V = #{marks := Ms, sigs_seen := Seen}, "sig=" ++ N) ->
     Key = {sig, N},
     Ms1 = case maps:find(Key, Ms) of
 	      error            -> Ms#{Key => {true, sig_expr(V, N)}};
@@ -417,16 +276,16 @@ control(Ws, V = #{marks := Ms, sigs_seen := Seen}, "sig=" ++ N) ->
 	      {ok, {false, _}} -> maps:remove(Key, Ms)
 	  end,
     V1 = V#{marks := Ms1, sigs_seen := lists:usort([N | Seen])},
-    goal(Ws, V1),
-    paint(Ws, V1);
+    goal(V1),
+    paint(V1);
 %% From the start of the trace: csp back to its initial values, paused, and
 %% its clock held -- the trace says how much time passes, not the person. The
 %% code view goes back to csp's own values, which the replay is checking.
-control(Ws, V = #{trace := {_, _}}, "replay") ->
-    paint(Ws, V#{at := 0, bad := #{}, look := none,
+control(V = #{trace := {_, _}}, "replay") ->
+    paint(V#{at := 0, bad := #{}, look := none,
 		 acts := [pause, reset, {clock, 0}]});
 %% Walk the trace's cycles in the code view, csp left as it is.
-control(Ws, V = #{trace := {Rows, _}, look := L}, Dir)
+control(V = #{trace := {Rows = [_, _ | _], _}, look := L}, Dir)
   when Dir =:= "up"; Dir =:= "down" ->
     Last = length(Rows) - 2,
     L1 = case {L, Dir} of
@@ -434,15 +293,15 @@ control(Ws, V = #{trace := {Rows, _}, look := L}, Dir)
 	     {_, "up"}    -> max(0, L - 1);
 	     {_, "down"}  -> min(Last, L + 1)
 	 end,
-    paint(Ws, V#{look := L1});
-control(Ws, V, "live") ->
-    paint(Ws, V#{look := none});
-control(Ws, V = #{tshow := T}, "table") ->
-    paint(Ws, V#{tshow := not T});
+    paint(V#{look := L1});
+control(V, "live") ->
+    paint(V#{look := none});
+control(V = #{tshow := T}, "table") ->
+    paint(V#{tshow := not T});
 %% One step of the trace: its inputs and the time before it, then the step.
 %% A frame goes out a step AHEAD: csp takes it in during one cycle and the
 %% rules see .rx in the next.
-control(Ws, V = #{trace := {Rows, M}, at := T}, "rstep")
+control(V = #{trace := {Rows, M}, at := T}, "rstep")
   when is_integer(T), T + 1 < length(Rows) ->
     Row = lists:nth(T + 2, Rows),
     Fs = maps:get(frames, M),
@@ -467,32 +326,32 @@ control(Ws, V = #{trace := {Rows, M}, at := T}, "rstep")
 	     D when is_integer(D) -> [{clock, D}];
 	     _ -> []
 	 end,
-    paint(Ws, V#{at := T + 1, look := none,
+    paint(V#{at := T + 1, look := none,
 		 acts := Sets ++ Out ++ Dt ++ [step]});
 %% Drop the marks and look at the model itself.
-control(Ws, V, "clear") ->
+control(V, "clear") ->
     V1 = V#{marks := #{}},
-    goal(Ws, V1),
-    ask(Ws, V1, check),
-    paint(Ws, V1);
-control(Ws, V = #{marks := Ms}, "solve") ->
+    goal(V1),
+    ask(V1, check),
+    paint(V1);
+control(V = #{marks := Ms}, "solve") ->
     case maps:size(Ms) of
-	0 -> answer(Ws, V, "", "click a contact or a signal to say what "
+	0 -> answer(V, "", "click a contact or a signal to say what "
 		    "should hold");
-	_ -> ask(Ws, V, {solve, goal_text(Ms), maps:get(k, V)})
+	_ -> ask(V, {solve, goal_text(Ms), maps:get(k, V)})
     end,
     V;
-control(_Ws, V, "k=" ++ K) ->
+control(V, "k=" ++ K) ->
     V#{k := list_to_integer(K)};
-control(_Ws, V, _Tag) -> V.
+control(V, _Tag) -> V.
 
 %%% ------------------------------------------------------------ the model
 %%%
 %%% varp runs for a second or more, so it runs beside the panel: the answer
 %%% comes back as {csp_model, Answer} and the panel hands it to model/3.
 
-ask(Ws, #{file := File} = V, Q) ->
-    answer(Ws, V, "", "asking varp ..."),
+ask(#{file := File} = V, Q) ->
+    answer(V, "", "asking varp ..."),
     Self = self(),
     spawn(fun() -> Self ! {csp_model, run(File, Q)} end),
     ok.
@@ -502,9 +361,9 @@ run(File, Q) ->
 	       check            -> [{params, fixed}];
 	       {solve, G, _}    -> [{reach, G}, {params, fixed}]
 	   end,
-    case {candyspeak_varp:model(File, Opts), varp_sh()} of
+    case {candyspeak_varp:model(File, Opts), candyspeak_varp:varp_cmd()} of
 	{_, none} ->
-	    {error, "varp not found: set VARP_SH to its varp.sh"};
+	    {error, "varp not found: put varp on the code path, or set VARP_SH"};
 	{{ok, M = #{text := Text, name := Name}}, Sh} ->
 	    T = " --timeout " ++ integer_to_list(?VARP_TIMEOUT) ++ " bmc ",
 	    case Q of
@@ -521,16 +380,6 @@ run(File, Q) ->
 	    {error, why(Error)}
     end.
 
-varp_sh() ->
-    F = case os:getenv("VARP_SH") of
-	    false -> filename:join(os:getenv("HOME"), "erlang/varp/priv/varp.sh");
-	    Sh    -> Sh
-	end,
-    case filelib:is_regular(F) of
-	true  -> F;
-	false -> none
-    end.
-
 why({error, {instances_not_modelled, Ms}}) ->
     "no #module for " ++ string:join(Ms, ", ");
 why({error, {varp_annotate, Loc, _Kind, {not_modelled, _T, Names}}}) ->
@@ -540,46 +389,49 @@ why({error, {varp_annotate, Loc, _Kind, Why}}) ->
 why(Error) ->
     lists:flatten(io_lib:format("~p", [Error])).
 
-model(_Ws, undefined, _A) -> undefined;
-model(Ws, V0, {error, Why}) ->
+model(undefined, _A) -> undefined;
+model(V0, {error, Why}) ->
     V = V0#{trace := none, at := none},
-    answer(Ws, V, "bad", Why), V;
-model(Ws, V, {check, M, {found, _, _}}) ->
-    answer(Ws, V, "ok", "the model runs." ++ free_text(M)), V;
-model(Ws, V, {check, _M, {none, _}}) ->
-    answer(Ws, V, "bad", no_transitions()), V;
-model(Ws, V, {solve, Goal, _K, M, {found, At, Rows}}) ->
-    answer(Ws, V, "ok",
+    answer(V, "bad", Why), V;
+model(V, {check, M, {found, _, _}}) ->
+    answer(V, "ok", "the model runs." ++ free_text(M)), V;
+model(V, {check, _M, {none, _}}) ->
+    answer(V, "bad", no_transitions()), V;
+model(V, {solve, Goal, _K, M, {found, At, Rows}}) ->
+    answer(V, "ok",
 	   lists:flatten([io_lib:format("reached at step ~w: ~s", [At, Goal]),
 			  frames(Rows, M)]),
-	   ["\n", buttons(V, ["up", "down", "live", "table", "replay", "rstep"]),
-	    " <span id='tr_ev'></span>",
-	    "<div id='tr_tab'>", table(Rows, M, V), "</div>"]),
-    paint(Ws, V#{trace := {Rows, M}, at := none, bad := #{}, shown := #{},
-		 look := 0});
+	   {Rows, M, maps:get(states, V)}),
+    paint(V#{trace := {Rows, M}, at := none, bad := #{}, shown := #{},
+		 look := first_cycle(Rows)});
 %% No trace, and a proof there never is one: by the rules alone with
 %% 0-induction, by the history that leads up to it with more.
-model(Ws, V0, {solve, Goal, _K, _M, {proved, 0}}) ->
+model(V0, {solve, Goal, _K, _M, {proved, 0}}) ->
     V = V0#{trace := none, at := none},
-    answer(Ws, V, "ok", "never: " ++ Goal ++ " -- no step can lead into it, "
+    answer(V, "ok", "never: " ++ Goal ++ " -- no step can lead into it, "
 	   "whatever came before (proved by 0-induction)"), V;
-model(Ws, V0, {solve, Goal, _K, _M, {proved, N}}) ->
+model(V0, {solve, Goal, _K, _M, {proved, N}}) ->
     V = V0#{trace := none, at := none},
-    answer(Ws, V, "ok",
+    answer(V, "ok",
 	   lists:flatten(io_lib:format("never: ~s -- no run reaches it "
 				       "(proved by ~w-induction)", [Goal, N]))), V;
-model(Ws, V0, {solve, Goal, K, _M, {none, _}}) ->
+model(V0, {solve, Goal, K, _M, {none, _}}) ->
     V = V0#{trace := none, at := none},
-    answer(Ws, V, "bad",
+    answer(V, "bad",
 	   lists:flatten(io_lib:format("not reachable within ~w steps, and "
 				       "not proved for ever: ~s", [K, Goal]))), V;
-model(Ws, V0, {solve, _Goal, _K, _M, no_transitions}) ->
+model(V0, {solve, _Goal, _K, _M, no_transitions}) ->
     V = V0#{trace := none, at := none},
-    answer(Ws, V, "bad", no_transitions()), V;
-model(Ws, V, {_, _, {error, Out}}) ->
-    answer(Ws, V, "bad", "varp: " ++ Out), V;
-model(Ws, V, {_, _, _, _, {error, Out}}) ->
-    answer(Ws, V, "bad", "varp: " ++ Out), V.
+    answer(V, "bad", no_transitions()), V;
+model(V, {_, _, {error, Out}}) ->
+    answer(V, "bad", "varp: " ++ Out), V;
+model(V, {_, _, _, _, {error, Out}}) ->
+    answer(V, "bad", "varp: " ++ Out), V.
+
+%% The walk shows a cycle, step L to L+1: a trace reached at step 0 -- the
+%% goal holds at once, over the inputs alone -- has none.
+first_cycle([_, _ | _]) -> 0;
+first_cycle(_)          -> none.
 
 no_transitions() ->
     "the model has NO transitions: every goal would come back unreachable, "
@@ -621,15 +473,6 @@ frames(Rows, #{frames := Fs}) ->
 %% What the panel is to send to csp for the view, oldest first.
 actions(undefined) -> {[], undefined};
 actions(V = #{acts := As}) -> {As, V#{acts := []}}.
-
-buttons(#{event := Ev}, Tags) ->
-    [["<button onclick=\"Wse.notify(", integer_to_list(Ev), ",'", T, "')\">",
-      case T of
-	  "rstep" -> "step";
-	  "up"    -> "&#9650;";
-	  "down"  -> "&#9660;";
-	  _       -> T
-      end, "</button>"] || T <- Tags].
 
 %%% ------------------------------------------------------- walking the trace
 %%%
@@ -706,6 +549,10 @@ look_text(#{trace := {Rows, M}, look := L, states := Names})
 look_text(#{trace := {_, _}}) -> "live: csp's own values";
 look_text(_) -> "".
 
+answer(V, Cls, Text) -> answer(V, Cls, Text, none).
+
+answer(V, Cls, Text, Trace) -> vui(V, answer, [Cls, Text, Trace]).
+
 %% A signal as a condition: on, or equal to what it is now.
 sig_expr(#{tabs := [#{env := Env} | _], last := Last}, N) ->
     F = {field, 0, {'WORD', 0, N}},
@@ -722,27 +569,6 @@ sig_expr(#{tabs := [#{env := Env} | _], last := Last}, N) ->
 		  end,
 	    {'==', 0, F, Lit}
     end.
-
-answer(Ws, V, Cls, Text) -> answer(Ws, V, Cls, Text, "").
-
-answer(Ws, #{res := R}, Cls, Text, Table) ->
-    wse:set(Ws, R, "className", "md res " ++ Cls),
-    wse:set(Ws, R, "innerHTML", lists:flatten([esc(Text), Table])).
-
-%% The trace, a column per step. The abstracted guards become `L26?', the
-%% choice of whether that rule may fire; St is shown by name.
-table(Rows, M = #{states := Sts}, #{states := Names}) ->
-    Cols = cols(Rows),
-    Steps = lists:seq(0, length(Rows) - 1),
-    Id = fun(C, I) -> [" id='", tr_id(C, I), "'"] end,
-    ["<table><tr><th></th>",
-     [["<th", Id(step, I), ">", integer_to_list(I), "</th>"] || I <- Steps],
-     "</tr>",
-     [["<tr><th>", esc(col_name(C)), "</th>",
-       [cell(C, signed(C, proplists:get_value(C, R), M), Sts, Names, Id(C, I))
-	|| {I, R} <- lists:zip(Steps, Rows)],
-       "</tr>"] || C <- Cols],
-     "</table>"].
 
 cols(Rows) -> [N || {N, _} <- hd(Rows), N =/= "input"].
 
@@ -811,17 +637,6 @@ col_name("u_free" ++ T) ->
     end;
 col_name(C) -> C.
 
-cell(_C, '-', _Sts, _Names, Id) -> ["<td class='any'", Id, ">-</td>"];
-cell("St", V, Sts, Names, Id) ->
-    ["<td", Id, ">", case lists:keyfind(V, 2, Sts) of
-			 {N, V} -> N;
-			 false  -> maps:get(V, Names, integer_to_list(V))
-		     end, "</td>"];
-cell(_C, V, _Sts, _Names, Id) when is_integer(V) ->
-    ["<td", Id, ">", integer_to_list(V), "</td>"];
-cell(_C, V, _Sts, _Names, Id) ->
-    ["<td", Id, ">", esc(V), "</td>"].
-
 %%% ------------------------------------------------------------ the marks
 
 %% The contact k<N>_<J> of tab I, with an object's own names made whole.
@@ -870,16 +685,11 @@ paren(T) ->
 	false -> T
     end.
 
-goal(Ws, #{goal := G, marks := Ms}) ->
-    case maps:size(Ms) of
-	0 ->
-	    wse:set(Ws, G, "className", "goal none"),
-	    wse:set(Ws, G, "textContent",
-		    "goal: click a contact -- holds, does not, forget");
-	_ ->
-	    wse:set(Ws, G, "className", "goal"),
-	    wse:set(Ws, G, "textContent", "goal: " ++ goal_text(Ms))
-    end.
+goal(V = #{marks := Ms}) ->
+    vui(V, goal, [case maps:size(Ms) of
+		      0 -> none;
+		      _ -> goal_text(Ms)
+		  end]).
 
 %% The program's state names by number, as the runtime numbers them: the
 %% built-ins, then the rest from 3 in order, a repeat or a built-in taking no
@@ -897,107 +707,26 @@ state_names(#{env := #{states := Ss}}) ->
     maps:from_list([{0, "INIT"}, {1, "NORMAL"}, {2, "FAILSAFE"} |
 		    lists:zip(lists:seq(3, 2 + length(User)), User)]).
 
+%% The tab's rungs drawn afresh, and every class sent again.
+render(V = #{mode := Mode, tab := I, tabs := Tabs}) ->
+    vui(V, rungs, [Mode, I, lists:nth(I + 1, Tabs)]),
+    paint(V#{shown := #{}}).
+
 %%% ----------------------------------------------------------------- updates
 
-refresh(_Ws, undefined, _Last) -> undefined;
-refresh(Ws, V, Last)           -> paint(Ws, V#{last := Last}).
+refresh(undefined, _Last) -> undefined;
+refresh(V, Last)           -> paint(V#{last := Last}).
 
-fired(_Ws, undefined, _Rules) -> undefined;
-fired(Ws, V = #{glow := G}, Rules) ->
+fired(undefined, _Rules) -> undefined;
+fired(V = #{glow := G}, Rules) ->
     Now = erlang:monotonic_time(millisecond),
     G1 = maps:filter(fun(_, T) -> Now - T < ?GLOW end, G),
-    paint(Ws, V#{fired := Rules,
+    paint(V#{fired := Rules,
 		 glow := maps:merge(G1, maps:from_list([{R, Now} || R <- Rules]))}).
 
 %% On the panel's tick: let what has stopped firing go out.
-tick(_Ws, undefined) -> undefined;
-tick(Ws, V)          -> paint(Ws, V).
-
-render(Ws, V = #{box := Box, body := Body, mode := Mode, tab := I,
-		 tab_buttons := Btns}) ->
-    Tab = lists:nth(I + 1, maps:get(tabs, V)),
-    wse:set(Ws, Box, "className", case Mode of
-				      ladder -> "cv";
-				      code   -> "cv code"
-				  end),
-    [wse:set(Ws, B, "className", case J of I -> "sel"; _ -> "" end)
-     || {J, B} <- enum(Btns)],
-    Html = lists:flatten([head(Tab), html(maps:get(rules, Tab), Mode,
-					   V#{env => maps:get(env, Tab),
-					      prefix => maps:get(prefix, Tab)})]),
-    wse:set(Ws, Body, "innerHTML", Html),
-    paint(Ws, V#{shown := #{}}).
-
-
-%% An object's bindings and its values. The program's own values are in the
-%% top frame, where they stay in view.
-head(#{binds := none}) ->
-    "";
-head(Tab = #{binds := {M, Bs}, vars := Vars, prefix := P}) ->
-    [["<div class='bind'>#", M, " ", maps:get(name, Tab), " ",
-      esc(lists:join("  ", [bind(B) || B <- Bs])), "</div>"],
-     vals("v_", P, Vars)].
-
-%% The values with no widget of their own, as a table; a #local in italics.
-%% A cell is a signal to mark (data-sig), by its whole name.
-vals(_Pre, _Obj, []) -> "";
-vals(Pre, Obj, Vars) ->
-    ["<div class='vals'>",
-     [begin
-	  Full = case Obj of none -> N; _ -> Obj ++ "." ++ N end,
-	  ["<span data-sig='", Full, "' id='sv_", Full, "'>",
-	   case K of local -> ["<i>", N, "</i>"]; var -> N end,
-	   "<b id='", Pre, N, "'></b></span>"]
-      end || {K, N} <- Vars],
-     "</div>"].
-
-%%% ----------------------------------------------------------------- html
-%%%
-%%% Ids: a rule's coil is k<N>, its contacts k<N>_<I> in walk order, a gate
-%%% header g<I>. paint/2 sets classes by id, so the html is written once.
-
-html(Rules, Mode, V) ->
-    {Out, _} = lists:mapfoldl(fun(R, G) -> row(R, G, Mode, V) end, 0, Rules),
-    Out.
-
-row({gate, 'end', _}, G, _Mode, _V) ->
-    {"<div class='hd e'>#end</div>", G};
-row({gate, Kind, Arg}, G, _Mode, _V) ->
-    T = case Kind of
-	    in      -> ["#in ", lists:join(" ", Arg)];
-	    'when'  -> ["#when ", candyspeak_eval:text(Arg)]
-	end,
-    {["<div class='hd' id='g", integer_to_list(G), "'>", esc(T), "</div>"],
-     G + 1};
-row(R = #{no := N, line := Ln, guard := Gd, assigns := As}, G, Mode, V) ->
-    K = "k" ++ integer_to_list(N),
-    Label = case {Mode, R} of
-		{ladder, #{coil := Tgt}} -> candyspeak_eval:text(Tgt);
-		{code, #{coil := Tgt}}   -> [candyspeak_eval:text(Tgt), " ="];
-		_ -> lists:join(", ", [assign(A) || A <- As])
-	    end,
-    Coil = ["<span class='co' id='", K, "'>", esc(Label), "</span>"],
-    Ln1 = ["<span class='ln'>", integer_to_list(Ln), "</span>"],
-    Body = case {Mode, Gd} of
-	       {ladder, undefined} ->
-		   [Ln1, "<span class='w' style='width:40px'></span>", Coil];
-	       {ladder, _} ->
-		   {L, _} = ladder(Gd, K, 0, V),
-		   [Ln1, "<span class='w'></span>", L,
-		    "<span class='w'></span>", Coil];
-	       {code, undefined} ->
-		   [Ln1, "<span class='tx'>", Coil, "</span>"];
-	       {code, _} ->
-		   {T, _} = code(Gd, K, 0, 0, V),
-		   Sep = case R of
-			     #{coil := _} -> "&nbsp;";
-			     _ -> "<span class='op'>&nbsp;?&nbsp;</span>"
-			 end,
-		   %% one inline run: as flex items the operators would
-		   %% lose the spaces around them
-		   [Ln1, "<span class='tx'>", Coil, Sep, T, "</span>"]
-	   end,
-    {["<div class='rw' id='r", integer_to_list(N), "'>", Body, "</div>"], G}.
+tick(undefined) -> undefined;
+tick(V)          -> paint(V).
 
 assign({'=', _, T, X}) -> [candyspeak_eval:text(T), " = ", candyspeak_eval:text(X)];
 assign({'<-', _, T, X}) -> [candyspeak_eval:text(T), " <- ", candyspeak_eval:text(X)];
@@ -1009,61 +738,18 @@ assign(X)              -> candyspeak_eval:text(X).   % println("ON")
 bind({'=', _, T, X}) -> [candyspeak_eval:text(T), "=", candyspeak_eval:text(X)];
 bind(B)              -> assign(B).
 
-%% AND horizontal, OR vertical. Returns {Html, NextContact}.
-ladder(X = {'&&', _, _, _}, K, I, V) ->
-    {Hs, I1} = lists:mapfoldl(fun(C, J) -> ladder(C, K, J, V) end, I,
-			      chain('&&', X)),
-    {["<span class='and'>", lists:join("<span class='w'></span>", Hs),
-      "</span>"], I1};
-ladder(X = {'||', _, _, _}, K, I, V) ->
-    {Hs, I1} = lists:mapfoldl(fun(C, J) -> ladder(C, K, J, V) end, I,
-			      chain('||', X)),
-    {["<span class='or'>",
-      [["<span class='br'>", H, "<span class='w'></span></span>"] || H <- Hs],
-      "</span>"], I1};
-ladder(X, K, I, V) ->
-    {contact(X, K, I, V), I + 1}.
-
-%% The same walk as text: the contacts in order, the operators between.
-code(X = {Op, _, _, _}, K, I, P, V) when Op =:= '&&'; Op =:= '||' ->
-    Q = case Op of '||' -> 1; '&&' -> 2 end,
-    {Ts, I1} = lists:mapfoldl(fun(C, J) -> code(C, K, J, Q + 1, V) end, I,
-			      chain(Op, X)),
-    T = lists:join(["<span class='op'> ", atom_to_list(Op), " </span>"], Ts),
-    {case Q < P of
-	 true  -> ["<span class='op'>(</span>", T, "<span class='op'>)</span>"];
-	 false -> T
-     end, I1};
-code(X, K, I, _P, V) ->
-    {contact(X, K, I, V), I + 1}.
-
 chain(Op, {Op, _, L, R}) -> chain(Op, L) ++ chain(Op, R);
 chain(_Op, X)            -> [X].
-
-%% A contact. A click marks it, see control/3.
-contact(X, K, I, #{event := Ev}) ->
-    Id = [K, "_", integer_to_list(I)],
-    ["<span class='ct' id='", Id, "' onclick=\"Wse.notify(",
-     integer_to_list(Ev), ",'ct=", Id, "')\">",
-     esc(candyspeak_eval:text(X)), "</span>"].
-
-esc(T) ->
-    lists:flatmap(fun($<) -> "&lt;";
-		     ($>) -> "&gt;";
-		     ($&) -> "&amp;";
-		     (C)  -> [C]
-		  end, lists:flatten(T)).
-
 %%% ---------------------------------------------------------------- paint
 
 %% Every id's class from the current state; only what changed is sent, in one
 %% cast -- a setStyle per contact would be a round trip each. The top frame's
 %% values and State are painted with the view hidden too.
-paint(Ws, V = #{last := Last}) ->
-    paint1(Ws, judge(V, Last)).
+paint(V = #{last := Last}) ->
+    paint1(judge(V, Last)).
 
-paint1(Ws, V = #{tabs := Tabs, tab := I, last := Live, fired := Now0,
-		 glow := Glow, shown := Shown, paint := F, marks := Marks,
+paint1(V = #{tabs := Tabs, tab := I, last := Live, fired := Now0,
+		 glow := Glow, shown := Shown, marks := Marks,
 		 mode := Mode, look := Look}) ->
     Ms = erlang:monotonic_time(millisecond),
     {Last0, Fired0} =
@@ -1117,7 +803,7 @@ paint1(Ws, V = #{tabs := Tabs, tab := I, last := Live, fired := Now0,
     Ts = lists:append([[Id, T] || {{t, Id}, T} <- Changed]),
     case Cs ++ Ts of
 	[] -> ok;
-	_  -> wse:cast(Ws, F, "call", [null, wse:array(Cs), wse:array(Ts)])
+	_  -> vui(V, paint, [Cs, Ts])
     end,
     V#{shown := New}.
 

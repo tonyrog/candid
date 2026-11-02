@@ -2,14 +2,37 @@
 
 The candyspeak panel.
 
-The smallest complete loop: a switch, a lamp, and a trace, in a browser, driving
-a real `csp` process.
+The smallest complete loop: a switch, a lamp, and a trace, driving a real
+`csp` process -- in a browser, or in a window of its own.
 
     make            # build (parser included, only when the .xrl/.yrl change)
     make test       # run the whole loop with no browser
     make run        # start both servers and print the URL
+    make wx         # the same panel in a desktop window (wx), no browser
+    make test-wx    # the loop through a real window, in xvfb-run
 
-Then open <http://localhost:8080/panel.html> and pick a program from the menu.
+For the browser, open <http://localhost:8080/panel.html> and pick a program
+from the menu.
+
+## The core and its renderers
+
+`candid` is the core: what a program's panel has, the loop, the target, run and
+step, solve and replay. It draws nothing. A **renderer** does, called with the
+handle it works on, `U = {Module, Handle}`:
+
+| what            | browser (wse)   | desktop (wx)   | the logic  |
+|-----------------|-----------------|----------------|------------|
+| the panel       | `candid_wse`    | `candid_wx`    | `candid`   |
+| the code view   | `csp_code_wse`  | `csp_code_wx`  | `csp_code` |
+| the chat        | `csp_chat_wse`  | `csp_chat_wx`  | `csp_chat` |
+
+What the person does comes back as messages -- wse's notifies, wx's events --
+and `Module:event/2` reads them into what the core acts on: `{pick, File}`,
+`{bar, Tag}`, `{code, Tag}`, `{widget, Data}`. The code view names its pieces
+(`k3_1` is rule 3's second contact) and paints them by class (`ct t`: it
+holds); the browser finds them by element id, the window by its id table. The
+trace and the plots are computed in `candid.hrl`'s pixels; a renderer only
+puts the dots there.
 
 **Two servers, and they are not interchangeable.** `wse_server` speaks websocket
 on `/websession` and nothing else -- ask it for a page over plain HTTP and its
@@ -24,7 +47,7 @@ socket.
 
 `demo/gate.csp` is three lines:
 
-    #digital Button in pullup 2
+    #digital Button in pulldown 2
     #digital Led    out       13
 
     Led = Button

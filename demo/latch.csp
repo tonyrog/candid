@@ -13,7 +13,7 @@
 //
 //      Led = 0 ? !Button
 
-#digital Button in pullup 2
+#digital Button in pulldown 2
 #digital Led    out       13
 
 Led = 1 ? Button

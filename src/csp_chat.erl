@@ -2,8 +2,8 @@
 %%% compiler, varp and the running csp or node at hand, through ellm.
 %%%
 %%% Its own process, so it outlives the panel being rebuilt -- which `load'
-%%% does, and so does connecting a node. Its pane hangs off document.body
-%%% for the same reason: render/3 clears the panel's root.
+%%% does, and so does connecting a node. Its pane is a renderer's
+%%% (csp_chat_wse), made by this process, so the pane's events come here.
 %%%
 %%% The model works on SOURCE TEXT, numbered: that is what it reads best, and
 %%% `check' answers with the compiler's own file:line. No AST.
@@ -29,9 +29,6 @@
 
 -define(VARP_TIMEOUT, 60).
 -define(MAX_READ, 60000).
--define(PANE, "position:fixed;top:0;right:0;bottom:0;width:38em;"
-	"max-width:100vw;z-index:10;flex-direction:column;background:#1b1b1b;"
-	"color:#ddd;border-left:1px solid #444;font:13px monospace;").
 
 -define(SYSTEM, <<"You help write, understand and debug CandySpeak programs "
 "in a live panel. CandySpeak is a rule language for small controllers: "
@@ -67,13 +64,15 @@ opt(Key, Def) ->
 	_ -> Def
     end.
 
-%% One per panel connection, linked to it. Info: #{root, exe, demo_dir}.
-start(Ws, Info) ->
+%% One per panel connection, linked to it. C is its pane's renderer,
+%% {Module, Handle} (csp_chat_wse for the browser). Info: #{root, exe,
+%% demo_dir}.
+start(C, Info) ->
     case available() of
 	false -> undefined;
 	true ->
 	    Panel = self(),
-	    spawn_link(fun() -> init(Ws, Panel, Info) end)
+	    spawn_link(fun() -> init(C, Panel, Info) end)
     end.
 
 %% The panel was (re)built: what it shows now. Info: #{file, target, local}.
@@ -83,117 +82,55 @@ attach(Chat, Info) -> Chat ! {attach, self(), Info}, ok.
 toggle(undefined) -> ok;
 toggle(Chat) -> Chat ! toggle, ok.
 
-init(Ws, Panel, Info) ->
-    Pane = pane(Ws),
-    loop(#{ws => Ws, panel => Panel, pane => Pane, shown => false,
+init(C, Panel, Info) ->
+    Pane = cui(C, pane, ["chat  " ++ model_name()]),
+    loop(#{ui => C, panel => Panel, pane => Pane, shown => false,
 	   info => Info, msgs => [], worker => none, made => []}).
 
-loop(S = #{ws := Ws, pane := Pane}) ->
-    Send = maps:get(send, Pane),
-    Close = maps:get(close, Pane),
+%% The renderer's function F on its handle and the pane.
+cui({M, H}, F, A) -> apply(M, F, [H | A]).
+
+pui(#{ui := C, pane := P}, F, A) -> cui(C, F, [P | A]).
+
+loop(S = #{ui := {M, _}, pane := Pane}) ->
     receive
 	{attach, Panel, Info} ->
 	    loop(S#{panel := Panel, info := maps:merge(maps:get(info, S), Info)});
 	toggle ->
 	    loop(show(S, not maps:get(shown, S)));
-	{notify, Close, _, _} ->
-	    loop(show(S, false));
-	{notify, Send, _, Text0} ->
-	    Text = string:trim(Text0),
-	    case {Text, maps:get(worker, S)} of
-		{"", _} -> loop(S);
-		{_, none} ->
-		    say(Ws, Pane, user, Text),
-		    loop(ask(S, Text));
-		_ ->
-		    say(Ws, Pane, note, "busy -- wait for the answer"),
-		    loop(S)
-	    end;
 	{chat_note, Text} ->
-	    say(Ws, Pane, note, Text),
+	    pui(S, say, [note, Text]),
 	    loop(S);
 	{chat_made, File} ->
 	    loop(S#{made := [File | maps:get(made, S)]});
 	{chat_done, Msgs, New} ->
-	    [say(Ws, Pane, assistant, C)
+	    [pui(S, say, [assistant, C])
 	     || #{role := assistant, content := C} <- New, C =/= <<>>],
-	    busy(Ws, Pane, false),
+	    pui(S, busy, [false]),
 	    loop(S#{msgs := Msgs, worker := none});
 	{chat_error, Why} ->
-	    say(Ws, Pane, error, io_lib:format("~p", [Why])),
-	    busy(Ws, Pane, false),
+	    pui(S, say, [error, io_lib:format("~p", [Why])]),
+	    pui(S, busy, [false]),
 	    loop(S#{worker := none});
-	_ ->
-	    loop(S)
+	Msg ->
+	    case M:event(Pane, Msg) of
+		close -> loop(show(S, false));
+		{send, Text0} -> loop(send(S, string:trim(Text0)));
+		none -> loop(S)
+	    end
     end.
 
-show(S = #{ws := Ws, pane := #{box := Box}}, On) ->
-    wse:setStyle(Ws, Box, ?PANE ++ case On of
-				       true -> "display:flex";
-				       false -> "display:none"
-				   end),
+send(S, "") -> S;
+send(S = #{worker := none}, Text) ->
+    pui(S, say, [user, Text]),
+    ask(S, Text);
+send(S, _Text) ->
+    pui(S, say, [note, "busy -- wait for the answer"]),
+    S.
+
+show(S, On) ->
+    pui(S, show, [On]),
     S#{shown := On}.
-
-%%% -------------------------------------------------------------------- pane
-
-
-pane(Ws) ->
-    Box = wse:createElement(Ws, "div"),
-    wse:setStyle(Ws, Box, ?PANE ++ "display:none"),
-    Head = el(Ws, Box, "div", "display:flex;align-items:center;gap:8px;"
-	      "padding:6px 8px;border-bottom:1px solid #333"),
-    Title = el(Ws, Head, "span", "flex:1;color:#9cf"),
-    wse:appendChild(Ws, Title, wse:createTextNode(Ws, "chat  " ++ model_name())),
-    {ok, Close} = wse:create_event(Ws),
-    X = el(Ws, Head, "button", "font:12px monospace"),
-    wse:appendChild(Ws, X, wse:createTextNode(Ws, "close")),
-    wse:set(Ws, X, "onclick", notify_f(Ws, Close, "'x'")),
-    Log = el(Ws, Box, "div", "flex:1;overflow:auto;padding:8px;"
-	     "white-space:pre-wrap;word-break:break-word"),
-    Foot = el(Ws, Box, "div", "display:flex;gap:6px;padding:6px 8px;"
-	      "border-top:1px solid #333"),
-    In = el(Ws, Foot, "textarea", "flex:1;height:5em;resize:vertical;"
-	    "font:13px monospace;background:#111;color:#eee;"
-	    "border:1px solid #555;padding:4px"),
-    wse:set(Ws, In, "placeholder", "Enter sends, shift+Enter is a new line"),
-    {ok, Send} = wse:create_event(Ws),
-    %% Enter sends and clears; shift+Enter is a line break.
-    wse:set(Ws, In, "onkeydown",
-	    wse:newf(Ws, "e", "{ if (e && e.key == 'Enter' && !e.shiftKey) {"
-		     " e.preventDefault(); Wse.notify(" ++ integer_to_list(Send) ++
-		     ", this.value); this.value = ''; } }")),
-    Busy = el(Ws, Foot, "span", "color:#fb3;align-self:center;min-width:2em"),
-    Attach = wse:newf(Ws, "e", "{ document.body.appendChild(e); }"),
-    wse:cast(Ws, Attach, "call", [null, Box]),
-    Scroll = wse:newf(Ws, "e", "{ e.scrollTop = e.scrollHeight; }"),
-    #{box => Box, log => Log, input => In, send => Send, close => Close,
-      busy => Busy, scroll => Scroll}.
-
-el(Ws, Parent, Tag, Style) ->
-    E = wse:createElement(Ws, Tag),
-    wse:setStyle(Ws, E, Style),
-    wse:appendChild(Ws, Parent, E),
-    E.
-
-notify_f(Ws, Id, Arg) ->
-    wse:newf(Ws, "", "{ Wse.notify(" ++ integer_to_list(Id) ++ ", " ++ Arg ++
-		 "); }").
-
-say(Ws, #{log := Log, scroll := Scroll}, Who, Text) ->
-    Style = case Who of
-		user -> "color:#9cf;margin:10px 0 4px";
-		assistant -> "color:#eee;margin:4px 0";
-		note -> "color:#888;margin:0";
-		error -> "color:#f66;margin:4px 0"
-	    end,
-    D = el(Ws, Log, "div", Style),
-    Prefix = case Who of user -> "> "; note -> "  · "; _ -> "" end,
-    wse:appendChild(Ws, D, wse:createTextNode(
-			     Ws, Prefix ++ unicode:characters_to_list(Text))),
-    wse:cast(Ws, Scroll, "call", [null, Log]).
-
-busy(Ws, #{busy := B}, On) ->
-    wse:set(Ws, B, "textContent", case On of true -> "..."; false -> "" end).
 
 model_name() ->
     try ellm:default_backend() of
@@ -204,8 +141,8 @@ model_name() ->
 
 %%% ------------------------------------------------------------------ asking
 
-ask(S = #{ws := Ws, pane := Pane, msgs := Msgs0}, Text) ->
-    busy(Ws, Pane, true),
+ask(S = #{msgs := Msgs0}, Text) ->
+    pui(S, busy, [true]),
     Chat = self(),
     Msgs = case Msgs0 of
 	       [] -> [#{role => system, content => ?SYSTEM}];
@@ -500,8 +437,8 @@ prove(File, Args) ->
 			      maps:get(<<"expr">>, Args, <<>>))}];
 	       _ -> []
 	   end,
-    case {candyspeak_varp:model(File, Opts), varp_sh()} of
-	{_, none} -> "varp not found: set VARP_SH to its varp.sh";
+    case {candyspeak_varp:model(File, Opts), candyspeak_varp:varp_cmd()} of
+	{_, none} -> "varp not found: put varp on the code path, or set VARP_SH";
 	{{ok, M = #{name := Name}}, Sh} ->
 	    Prop = case Kind of
 		       <<"reach">> -> "--property " ++ Name ++ "_reach";
@@ -573,16 +510,6 @@ free(M) ->
 	maps:get(free, M, []) of
 	[] -> "";
 	Fs -> io_lib:format("~nleft free in the model: ~p", [Fs])
-    end.
-
-varp_sh() ->
-    F = case os:getenv("VARP_SH") of
-	    false -> filename:join(os:getenv("HOME"), "erlang/varp/priv/varp.sh");
-	    Sh -> Sh
-	end,
-    case filelib:is_regular(F) of
-	true -> F;
-	false -> none
     end.
 
 %%% ------------------------------------------------------------------ manual

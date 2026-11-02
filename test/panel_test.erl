@@ -380,7 +380,7 @@ look_check() ->
 	  "#analog  Temp:10 in 0\n"
 	  "#analog  Level:8 out unsigned 1\n"
 	  "#analog  Gone:8 out unsigned 2\n"
-	  "#analog  Swing:10 out 3\n"
+	  "#analog  Swing:10 out integer 3\n"
 	  "#annotate panel Lamp color=amber label=\"Kök\"\n"
 	  "#annotate panel Btn  color=\"#0f0\" kind=push\n"
 	  "#annotate panel Temp kind=dial min=-200 max=0x3FF scale=0.1 "
@@ -403,10 +403,12 @@ look_check() ->
     expect("min= may be negative and max= hex",
 	   {Get("Temp", min), Get("Temp", max)} =:= {-200, 1023},
 	   {Get("Temp", min), Get("Temp", max)}),
-    expect("a signed analog swings both ways without being told",
+    expect("an analog that says integer swings both ways, one that does not "
+	   "0..full",
 	   {Get("Swing", min), Get("Swing", max)} =:= {-512, 511} andalso
 	   {Get("Level", min), Get("Level", max)} =:= {0, 255},
 	   {Get("Swing", min), Get("Swing", max)}),
+    pullup_check(),
     Eng = lists:flatten(candid:eng(215, maps:get("Temp", L))),
     expect("scale= and unit= on a dial, not only on a plot",
 	   Eng =:= "215  21.500 \x{b0}C", Eng),
@@ -514,7 +516,7 @@ field_check() ->
     %% arrive on tcp and the fields are the window onto them.
     Plot = "#buffer In:4 in tcp 5557\n"
 	   "#field  Px:16 unsigned In[0..15]\n"
-	   "#field  Py:16 In[16..31]\n"
+	   "#field  Py:16 integer In[16..31]\n"
 	   "#annotate panel Px kind=plot axis=x id=scope\n"
 	   "#annotate panel Py kind=plot axis=y id=scope color=cyan\n",
     Tmp2 = "/tmp/csp_field_plot.csp",
@@ -526,7 +528,7 @@ field_check() ->
     [G] = candid:plots(A2),
     X = maps:get(x, G),
     [Y] = maps:get(ys, G),
-    %% ...and the SWING is the declared one. `Py' has no `unsigned', so it is
+    %% ...and the SWING is the declared one. `Py' says `integer', so it is
     %% signed -- 0..65535 would draw the top half of the picture and clip
     %% everything below zero into the bottom edge.
     expect("an unsigned field swings 0..full, a signed one both ways",
@@ -624,7 +626,7 @@ varp_model_check() ->
     %% varp compares exactly, so an unwrapped `next(N) == N + 1' has no
     %% successor at 255 and every path through it is cut off.
     {Tmp5, T5} = Gen("wrap", "#variable N:8 unsigned = 255\n"
-		     "#variable S:8 = 127\nN = N + 1\nS = S + 1\n", []),
+		     "#variable S:8 integer = 127\nN = N + 1\nS = S + 1\n", []),
     expect("a store wraps at the declared width",
 	   Has(T5, "> 255 ? ((N) + (1)) - 256") andalso
 	   Has(T5, "> 127 ? ((S) + (1)) - 256"), T5),
@@ -717,7 +719,7 @@ code_view_check() ->
 	   Pix),
 
     Src = "#digital Go in 4\n#variable Phase:2 unsigned = 0\n"
-	"#variable Red:1 = 0\n#variable S:8 = 0\n#timer T 100\n"
+	"#variable Red:1 = 0\n#variable S:8 integer = 0\n#timer T 100\n"
 	"#local Odd:1 = Phase == 1\n"
 	"Phase = (Phase + 1) % 3 ? Go\n"
 	"Red = Phase == 0\n"
@@ -1551,6 +1553,28 @@ first_event() ->
 %% to a painter function created once in the browser. See candid:painter/1 --
 %% wse:set/4 is rsync, so the old shape cost a round trip per trace per tick.
 samples(L) -> [X || X <- L, lists:prefix("ASYNC cast call", X)].
+
+%% A button to ground (pullup) rests at 1: its look says so, and its push
+%% sends 0 while held and 1 on release; one pulled down is the other way.
+pullup_check() ->
+    F = "/tmp/csp_pullup_panel.csp",
+    ok = file:write_file(F, "#digital K in pullup 2\n#digital J in pulldown 3\n"
+			 "#annotate panel K kind=push\n"
+			 "#annotate panel J kind=push\n"),
+    {ok, A} = candyspeak:parse(F),
+    L = candid:looks(A),
+    expect("a pullup input's look rests at 1, a pulldown's has no idle",
+	   maps:get(idle, maps:get("K", L), 0) =:= 1 andalso
+	   not maps:is_key(idle, maps:get("J", L)), L),
+    Before = calls(),
+    _ = candid_wse:panel(fake_ws, root,
+			 #{rows => [{{push, N, 1}, maps:get(N, L)} || N <- ["K", "J"]],
+			   pixels => [], plots => [], traces => []}),
+    New = calls() -- Before,
+    Has = fun(T) -> lists:any(fun(C) -> string:find(C, T) =/= nomatch end, New) end,
+    expect("a pullup push sends K=0 held and K=1 released, a pulldown J=1 and J=0",
+	   Has("'K=0'") andalso Has("'K=1'") andalso Has("'J=1'") andalso
+	   Has("'J=0'"), New).
 
 calls() ->
     wse_log ! {calls, self()},

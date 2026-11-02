@@ -82,6 +82,10 @@ Variables, constants and rules do not get widgets yet.
 | `pixel`   | a colour swatch, decoded as RGB565   | hover for the name              | (none)                |
 | `plot`    | one channel of an XY picture         | drag on the canvas (inputs only)| `X = <count>` per axis|
 
+An input declared `pullup` is a button to ground: it rests at 1, so `toggle`
+and `push` show it lit when it is **0**, and `push` sends `X = 0` while held and
+`X = 1` on release.
+
 `action` is for outputs that *do* something, like a siren, a pump or a valve. A
 small dot does not tell you "the pump is running"; a word does.
 
@@ -581,3 +585,19 @@ and `{candid, [{chat, off}]}` takes the button away.
   something the language says.
 * **`hidden` is per tool.** `#annotate varp X hidden` belongs to the model
   checker and does not hide anything in the panel.
+
+## The desktop window (wx)
+
+`make wx` opens the same panel in a window of its own, through `candid_wx`;
+nothing in a program or its annotations changes. What differs is the drawing:
+
+* **The bar is two rows**: what runs and how (program, target, run, pause,
+  step, tick), then what is shown (trace, code, theme, chat). The chat is a
+  window of its own beside the panel.
+* **Light** is the dark panel's lightness turned over with each hue kept, as
+  the browser's css filter does it. The trace and the plots stay dark: they are
+  screens.
+* **A mark** is the frame round a contact or a label, in the mark's colour; wx
+  has no outline.
+* **Not there yet**: `glow` and `clip` on a plot (the beam is drawn, not
+  bloomed, and a round glass does not clip its corners), and a lamp is square.

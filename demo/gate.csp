@@ -4,7 +4,7 @@
 // every cycle -- it does not run where it is written -- so the edge on Led
 // sits one sample to the right of the edge on Button.
 
-#digital Button in pullup 2
+#digital Button in pulldown 2
 #digital Led    out       13
 
 Led = Button

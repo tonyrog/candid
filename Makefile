@@ -13,11 +13,12 @@ WSE    ?= $(HOME)/erlang/wse
 UART   ?= $(HOME)/erlang/uart
 ELLM   ?= $(HOME)/erlang/ellm
 RESTER ?= $(HOME)/erlang/rester
+VARP   ?= $(HOME)/erlang/varp
 
 ERLC   = erlc
 EBIN   = ebin
 PA     = -pa $(EBIN) -pa $(CANDYSPEAK)/ebin -pa $(WSE)/ebin -pa $(UART)/ebin \
-	 -pa $(ELLM)/ebin -pa $(RESTER)/ebin
+	 -pa $(ELLM)/ebin -pa $(RESTER)/ebin -pa $(VARP)/ebin
 export CANDYSPEAK
 
 all: csp_tools
@@ -31,6 +32,10 @@ csp_tools:
 run: all
 	erl -s can $(PA) -s candid -config candid.config
 
+# The same panel in a window of its own (wx), no browser.
+wx: all
+	erl -s can $(PA) -s candid_wx -config candid.config
+
 # The stub wse must shadow the real one. Each -pa prepends, so the LAST one
 # given wins -- test/ebin goes at the end, not the front.
 test: all
@@ -38,6 +43,46 @@ test: all
 	$(ERLC) -o test/ebin test/wse.erl test/panel_test.erl test/fake_llm.erl
 	CSP_EXE=$(CANDYSPEAK)/csp \
 	  erl -noshell $(PA) -pa test/ebin -s panel_test run
+
+# A standalone candid, as varp makes its own (servator, which packages the
+# running system): an AppImage on Linux, a .app and a .dmg on macOS. The
+# package's csp is the one in csp_tools' priv/ -- the host's build.
+APP      = candid
+APPL     = Candid
+VSN      = $(shell git describe --always --tags)
+MACHINE  = $(shell uname -m)
+SERVATOR ?= $(HOME)/erlang/servator
+PACK     = erl -noshell $(PA) -pa $(SERVATOR)/ebin -s candid_wx start0 \
+	   -s servator
+
+appimage: all
+	$(PACK) make_appimage $(APP) -s erlang halt
+	for b in beam.smp epmd erlc erl_child_setup erlexec escript heart \
+		 inet_gethost; do \
+	    [ -f $(APP).AppDir/bin/$$b ] && strip $(APP).AppDir/bin/$$b || true; \
+	done
+	appimagetool -n $(APP).AppDir
+	mv $(APPL)-$(MACHINE).AppImage $(APPL)-$(VSN)-$(MACHINE).AppImage
+
+osxapp: all
+	$(PACK) make_osxapp $(APP) -s erlang halt
+	mkdir -p tmpdist
+	rm -rf tmpdist/$(APPL).app
+	mv $(APPL).app tmpdist/
+	(cd tmpdist/; $(SERVATOR)/priv/make_icns ../priv/$(APP).png)
+	rm -rf tmpdist/AppIcon.iconset
+	mv tmpdist/AppIcon.icns tmpdist/$(APPL).app/Contents/Resources/
+	hdiutil create tmp.dmg -ov -volname "$(APPL)" -fs HFS+ -srcfolder "./tmpdist/"
+	hdiutil convert -format UDZO -o $(APPL)-$(VSN).dmg tmp.dmg
+	rm tmp.dmg
+
+# candid_wx in a virtual display: the loop through a real window.
+test-wx: all
+	mkdir -p test/ebin
+	$(ERLC) -o test/ebin test/wx_test.erl
+	@CSP_EXE=$(CANDYSPEAK)/csp xvfb-run -a -s "-screen 0 1440x940x24" \
+	  erl -noshell $(PA) -pa test/ebin -s wx_test run > test/wx.out 2>&1; \
+	  s=$$?; grep -v 'Gtk-WARNING' test/wx.out | grep -v '^$$'; exit $$s
 
 # Generate a varp model from a .csp and check it has transitions at all. The
 # consistency probe is not optional: an inconsistent `next' makes every property
@@ -59,4 +104,4 @@ varp-check: all
 clean:
 	rm -f $(EBIN)/*.beam $(EBIN)/*.app test/ebin/*.beam
 
-.PHONY: all csp_tools run test varp varp-check clean
+.PHONY: all csp_tools run wx test test-wx appimage osxapp varp varp-check clean

@@ -10,13 +10,27 @@
 %%% ("> Button = 1"), which is what makes it debuggable: when the panel does
 %%% something surprising, type the same line yourself and see who is wrong.
 
+%%%
+%%% THE CORE AND ITS RENDERER. This module decides what the panel shows and
+%%% runs it; what puts it on a screen is a renderer module -- candid_wse for
+%%% the browser -- called through ui/3 with the handle it works on, U =
+%%% {Module, Handle}. What a renderer creates comes back as handles kept here
+%%% and given back to it; what the person does comes back as messages, which
+%%% Module:event/2 reads into {pick, File}, {bar, Tag}, {code, Tag} or
+%%% {widget, Data}. The trace and the plots are computed here in candid.hrl's
+%%% pixels, and the renderer only puts the dots there.
+
 -module(candid).
 
 -export([start/0, start/2]).
--export([run/2, run/3]).
+-export([run/2, run/3, run_ui/2, run_ui/3]).
+-export([frac/2, drivable/2, shorten/1, priv_dir/0]).  % for the renderers
 -export([widgets/1, rgb565/1, hue/1, label_of/1]).   % tests, introspection
 -export([plots/1, eng/2, period/0, keep/2]).         % tests, introspection
 -export([looks/1, colour/3]).                        % tests, introspection
+
+-include("candid.hrl").
+-include_lib("kernel/include/file.hrl").
 
 -define(PERIOD,    100).   % ms between cycles -- the DEFAULT, see period/0
 %% What the tick rate may be set to, from the bar. 100 ms was chosen for lamps;
@@ -24,35 +38,10 @@
 %% a 2 s sweep gives twenty points at 100 ms. The top of the range is honest
 %% about what it costs: every tick is a /commit plus one cast per plot.
 -define(PERIODS,   [10, 25, 50, 100, 250]).
--define(TRACE_BOX, "flex:none;max-height:35vh;overflow:auto;").  % at the bottom
--define(TRACE_W,   720).   % trace width, px, right of the labels
--define(GUTTER,    110).   % px of labels at the left of the trace -- the
-			   % same width as a row's label, so they line up
--define(ROW_H,      34).   % px per trace row
--define(STEP,        3).   % px per sample
--define(LAMP,     "display:inline-block;width:18px;height:18px;"
-		  "border-radius:9px;border:1px solid #555;").
--define(PIXEL,    "display:inline-block;width:22px;height:22px;"
-		  "border:1px solid #444;margin-right:2px;"
-		  "vertical-align:middle;").
--define(LAMP_ON,  "background:#3f3;box-shadow:0 0 8px #3f3").
--define(LAMP_OFF, "background:#252525").
-%% The XY plot. SQUARE, because an XY picture is only honest when both axes
-%% are the same length -- a circle in a wide box is an ellipse, and you cannot
-%% tell which it was. Dark green because the afterglow is a phosphor.
--define(PLOT_W,   240).            % px, square
--define(PLOT_BG,  {16, 20, 16}).
--define(PAD,        4).            % inset, so a full-scale dot is a whole dot
+-define(VIEWS, [{"trace", ["hide", "show"]},
+		{"code",  ["hide", "ladder", "code"]},
+		{"theme", ["dark", "light"]}]).
 -define(PHOSPHOR, "#5f9").  % the beam, when the annotation names no colour
-%% The glass. `shape=round' is a CRT face: the corners of the value range fall
-%% outside it, which is a choice and not a bug -- a channel at both extremes at
-%% once is off the glass. shape=square keeps all of it, and is the default for
-%% that reason.
--define(GLASS,    "vertical-align:top;cursor:crosshair;background:").
--define(FLAT,     "border:1px solid #333;").
--define(ROUND,    "border-radius:50%;border:3px solid #2b2b2b;"
-		  "box-shadow:0 0 0 4px #141414,"
-		  "0 0 18px rgba(90,255,160,0.13);").
 -define(PERSIST,  0.90).           % how much of the last frame survives 100 ms
 -define(BEAM_W,   1.6).            % px, line width of the beam
 %% The kinds that show a number, and so take unit, scale, min and max.
@@ -60,44 +49,10 @@
 			orelse K =:= meter orelse K =:= value
 			orelse K =:= plot orelse K =:= plotin)).
 
-%%% --------------------------------------------------------------- starting
-%%%
-%%% wse_server speaks websocket on /websession and NOTHING else -- a plain GET
-%%% for the page falls out of its handshake with a case_clause. So the page needs
-%%% an ordinary web server: inets serves priv/ for panel.html, and ALIASES
-%%% wse's own priv/ at /js for ej.js and wse.js. Copying those two in would
-%%% work and is what one usually does, but then they silently diverge from the
-%%% wse that is actually serving the websocket.
-
+%% The browser panel: wse's websocket and a web server for the page.
 start() -> start(1234, 8080).
 
-start(WsPort, HttpPort) ->
-    ok = ensure_inets(),
-    {ok, _} = inets:start(httpd,
-			  [{port, HttpPort},
-			   {server_name, "candid"},
-			   {server_root, priv_dir()},
-			   {document_root, priv_dir()},
-			   {alias, {"/js", wse_priv()}},
-			   {bind_address, {127,0,0,1}},
-			   {mime_types, [{"html","text/html"},
-					 {"js","application/javascript"},
-					 {"css","text/css"}]}]),
-    application:ensure_all_started(rester),
-    application:load(wse),
-    application:start(ellm),
-    {ok, _} = wse_server:start(WsPort),
-    io:format("panel:  http://localhost:~w/panel.html~n", [HttpPort]),
-    io:format("wse:    ws://localhost:~w/websession~n", [WsPort]),
-    io:format("js from ~s~n", [wse_priv()]),
-    ok.
-
-ensure_inets() ->
-    case application:ensure_all_started(inets) of
-	{ok, _}                       -> ok;
-	{error, {already_started, _}} -> ok;
-	Err                           -> Err
-    end.
+start(WsPort, HttpPort) -> candid_wse:start(WsPort, HttpPort).
 
 %% The tick the panel starts at. Settable from the bar while it runs; the
 %% environment is for starting it somewhere other than the default, the way
@@ -116,29 +71,50 @@ period() ->
 
 %%% -------------------------------------------------------------------- entry
 
+%% wse's entry: the page calls Wse.start('candid', 'run', [Where, ...]).
 run(Ws, Where) ->
     run(Ws, Where, default_file()).
 
 run(Ws, Where, File) ->
+    run_ui({candid_wse, Ws}, Where, File).
+
+%% Any renderer's entry, U = {Module, Handle}: candid_wx calls this from the
+%% process that owns its window.
+run_ui(U, Where) ->
+    run_ui(U, Where, default_file()).
+
+run_ui(U, Where, File) ->
     %% The chat, when ellm is there: its own process, so it lives through
     %% every rebuild below.
-    Chat = csp_chat:start(Ws, #{root => root(), exe => csp_exe(),
-				demo_dir => demo_dir()}),
-    render(Ws, Where, File, Chat).
+    Chat = csp_chat:start(chat_ui(U), #{root => root(), exe => csp_exe(),
+				       demo_dir => work_dir()}),
+    render(U, Where, File, Chat).
 
 %% Also the restart path: picking another file in the chooser comes back here,
 %% so the whole panel is rebuilt from that file's declarations.
-render(Ws, Where, File, Chat) ->
-    Root = wse:id(Where),
-    wse:set(Ws, Root, "innerHTML", ""),
+render(U, Where, File, Chat) ->
+    Root = ui(U, clear, [Where]),
     case candyspeak:parse(File) of
 	{ok, Ast} ->
-	    build(Ws, Where, Root, File, widgets(Ast), Ast, Chat);
+	    build(U, Where, Root, File, widgets(Ast), Ast, Chat);
 	Error ->
-	    chooser(Ws, Root, File, Chat),
-	    text(Ws, Root, io_lib:format("~n~p cannot be parsed: ~p",
-					 [File, Error]))
+	    ui(U, chooser, [Root, bar(File, Chat)]),
+	    ui(U, message, [Root, io_lib:format("~n~p cannot be parsed: ~p",
+						[File, Error])])
     end.
+
+%% The renderer's function F on its handle.
+ui({M, H}, F, A) -> apply(M, F, [H | A]).
+
+%% The code view's and the chat pane's renderers, on the same handle.
+code_ui({M, H}) -> {M:code_view(), H}.
+chat_ui({M, H}) -> {M:chat_view(), H}.
+
+%% What the bar is built from.
+bar(File, Chat) ->
+    #{file => File, files => available(File), target => target_text(),
+      period => period(), periods => ?PERIODS, views => ?VIEWS,
+      chat => Chat =/= undefined}.
 
 %%% ------------------------------------------------------------------ widgets
 
@@ -161,6 +137,27 @@ widgets(Ast) ->
 	       {ok, Body} <- [maps:find(M, Mods)],
 	       {K, N, W} <- Decls(Body)],
     [apply_ann(W, Ann) || W <- Decls(Main) ++ Objs].
+
+%% The inputs pulled up, named as widgets/1 names them: a button to ground,
+%% 1 while nobody presses it.
+pullups(Ast) ->
+    {Main, Mods} = csp_code:split(Ast),
+    P = fun(Ds) -> [N || {digital, _, {'WORD', _, N}, scalar, _, Opts, _} <- Ds,
+			 proplists:get_value(dir, Opts, in) =:= in,
+			 proplists:get_value(pull, Opts) =:= pullup]
+	end,
+    P(Main) ++ [O ++ "." ++ N
+		|| {object, _, {'WORD', _, M}, {'WORD', _, O}, _} <- Main,
+		   {ok, Body} <- [maps:find(M, Mods)], N <- P(Body)].
+
+%% A pulled-up input's look says so: its widget sends 0 while held and shows
+%% it lit when it is not at rest.
+idle(Looks, Pulled) ->
+    maps:map(fun(N, L) -> case lists:member(N, Pulled) of
+			      true  -> L#{idle => 1};
+			      false -> L
+			  end
+	     end, Looks).
 
 %% Which buffer each #field looks into, and what that buffer is: its direction,
 %% and whether anything is wired to it. A field cannot be read from its own
@@ -381,7 +378,7 @@ rgb565(V) ->
 %%% the count, and the readout beside it says what that is in the world.
 
 looks(Ast) ->
-    looks(widgets(Ast), annotations(Ast), ranges(Ast)).
+    idle(looks(widgets(Ast), annotations(Ast), ranges(Ast)), pullups(Ast)).
 
 looks(Widgets, Ann, Rng) ->
     maps:from_list([{N, look(W, kv(N, Ann), Rng)} || W = {_, N, _} <- Widgets]).
@@ -532,13 +529,11 @@ plots(Ast) ->
 
 %%% What a channel's full swing IS, taken from the declaration.
 %%%
-%%% An #analog or a #field without `unsigned' is SIGNED, and a plot that assumes
-%%% 0..full-scale then draws the top half of the picture and clips everything
-%%% below zero into the bottom edge. A sixteen-bit signed field fed from a socket
-%%% is exactly that case.
-%%%
-%%% A one-bit field is the exception: typeless leaves are signed except at :1.
-%%% The annotation's min/max still wins over all of it.
+%%% An #analog or a #field is unsigned unless it says `integer' -- counts, and
+%%% bits of a frame. One that says it is SIGNED, and a plot that assumed
+%%% 0..full-scale would draw the top half of the picture and clip everything
+%%% below zero into the bottom edge: a sixteen-bit signed field fed from a
+%%% socket is exactly that case. The annotation's min/max still wins.
 ranges(Ast) ->
     lists:foldl(
       fun({analog, _Ln, {'WORD', _, N}, scalar, Res, Opts, _E}, M) ->
@@ -549,7 +544,7 @@ ranges(Ast) ->
       end, #{}, Ast).
 
 swing(W, Opts) ->
-    case W =:= 1 orelse proplists:get_value(type, Opts) =:= unsigned of
+    case W =:= 1 orelse proplists:get_value(type, Opts) =/= integer of
 	true  -> {0, full(W)};
 	false -> {-(1 bsl (W - 1)), (1 bsl (W - 1)) - 1}
     end.
@@ -727,57 +722,32 @@ eng(V, #{scale := S, unit := U}) ->
 
 %%% ---------------------------------------------------------------- rendering
 
-build(Ws, Where, Root, File, [], Ast, Chat) ->
+build(U, Where, Root, File, [], Ast, Chat) ->
     %% Parsed fine, but nothing in it is a widget yet. Say which declarations
     %% it does have -- an empty panel otherwise looks like a failure.
-    {_SelId, _Sel, _Run} = chooser(Ws, Root, File, Chat),
-    text(Ws, Root, io_lib:format(
-		     "nothing to show in ~s.~n~n"
-		     "it declares: ~s~n~n"
-		     "widgets come from #digital, #analog and #field; variables "
-		     "and rules are not shown yet.",
-		     [shorten(File), kinds(Ast)])),
-    wait_for_pick(Ws, Where, Chat);
-build(Ws, Where, Root, File, Widgets0, Ast, Chat) ->
-    {SelId, _Sel, Run} = chooser(Ws, Root, File, Chat),
-    %% Everything in one window. The TOP frame is where the program is: State,
-    %% cycle and clock, the goal and solve, varp's answer, the values. Under
-    %% it the devices on the left and the code view on the right, each
-    %% scrolling on its own, and the trace at the bottom -- so the rule that
-    %% lights and the lamp it drives are side by side, and neither scrolls
-    %% the other out of view.
-    style(Ws, Root, "display:flex;flex-direction:column;"
-	  "height:calc(100vh - 24px)"),
-    Top = box(Ws, Root, "flex:none;border-bottom:1px solid #333;"
-	      "padding-bottom:4px;margin-bottom:8px"),
-    Status = box(Ws, Top, "display:flex;align-items:center;gap:10px;"
-		 "flex-wrap:wrap;margin-bottom:6px"),
-    StateBox = status_box(Ws, Status, "csp_st"),
-    Clock = status_box(Ws, Status, "csp_clock"),
-    LinkBox = status_box(Ws, Status, "csp_link"),
-    Main = box(Ws, Root, "flex:1;min-height:0;display:flex;gap:32px"),
-    Left = box(Ws, Main, "flex:none;overflow:auto;padding-right:8px"),
-    Right = box(Ws, Main, "flex:1;min-width:0;overflow:auto"),
-    TraceBox = box(Ws, Root, ?TRACE_BOX "display:none"),
+    {SelId, _Run} = ui(U, chooser, [Root, bar(File, Chat)]),
+    ui(U, message, [Root, io_lib:format(
+			    "nothing to show in ~s.~n~n"
+			    "it declares: ~s~n~n"
+			    "widgets come from #digital, #analog and #field; "
+			    "variables and rules are not shown yet.",
+			    [shorten(File), kinds(Ast)])]),
+    wait_for_pick(U, Where, Chat, SelId);
+build(U, Where, Root, File, Widgets0, Ast, Chat) ->
+    {SelId, Run} = ui(U, chooser, [Root, bar(File, Chat)]),
     Ann = annotations(Ast),
     Rng = ranges(Ast),
-    Looks = looks(Widgets0, Ann, Rng),
+    Looks = idle(looks(Widgets0, Ann, Rng), pullups(Ast)),
     [warn_misplaced(W, Ann) || W <- Widgets0],
     %% hidden: no row, no trace, not a channel of any plot. csp still has it;
     %% the panel just does not show it.
     Widgets = [W || W = {_, N, _} <- Widgets0,
 		    not maps:get(hidden, maps:get(N, Looks))],
-    %% Two kinds do not get a row of their own: pixels are one strip (strip/3)
-    %% and a plot's channels are one picture (plot_panel/4).
+    %% Two kinds do not get a row of their own: pixels are one strip and a
+    %% plot's channels are one picture.
     {Pixels, Rest0} = lists:partition(fun({K, _, _}) -> K =:= pixel end,
 				      Widgets),
     {Plots, Rest} = lists:partition(fun is_plot/1, Rest0),
-    RestNodes = [{Name, row(Ws, Left, W, maps:get(Name, Looks))}
-		 || W = {_, Name, _} <- Rest],
-    PixNodes = strip(Ws, Left, [{N, maps:get(N, Looks)}
-				|| {_, N, _} <- Pixels]),
-    {Groups, PlotNodes} = plot_panels(Ws, Left,
-				      plot_groups(Plots, Ann, Rng)),
     %% A plot channel still gets a TIME trace below. The XY picture says where
     %% the beam is and nothing about when it got there -- which of the two you
     %% need depends on what is wrong, so the panel shows both.
@@ -786,46 +756,49 @@ build(Ws, Where, Root, File, Widgets0, Ast, Chat) ->
     %% for a logic analyser underneath it.
     Ordered = [T || T = {_, N, _} <- Rest ++ Pixels ++ Plots,
 		    maps:get(trace, maps:get(N, Looks))],
-    {Ctx, Paint} = canvas(Ws, TraceBox, [maps:get(N, Looks)
-					 || {_, N, _} <- Ordered]),
+    P = ui(U, panel, [Root, #{rows => [{W, maps:get(N, Looks)}
+				       || W = {_, N, _} <- Rest],
+			      pixels => [{N, maps:get(N, Looks)}
+					 || {_, N, _} <- Pixels],
+			      plots => plot_groups(Plots, Ann, Rng),
+			      traces => [maps:get(N, Looks)
+					 || {_, N, _} <- Ordered]}]),
     {ok, Src} = candyspeak:parse(File, [sources]),
-    Code = csp_code:new(Ws, #{code => Right, status => Status, top => Top},
-			{Src, File}, colours()),
+    Code = csp_code:new(code_ui(U), maps:get(code, P), {Src, File}, colours()),
     {ok, Link} = csp_link:open(target(), csp_exe(), [File]),
     erlang:send_after(period(), self(), tick),
+    TraceBox = maps:get(trace_box, P),
     S0 = #{trace_box => TraceBox, code => Code, run => Run},
-    S1 = lists:foldl(fun({K, V}, Si) -> view(Ws, Si, K, V) end, S0,
+    S1 = lists:foldl(fun({K, V}, Si) -> view(U, Si, K, V) end, S0,
 		     maps:to_list(views())),
-    S2 = #{nodes  => maps:from_list(RestNodes ++ PixNodes ++
-						  PlotNodes),
-		     traces => [{N, K, maps:get(N, Looks)} || {K, N, _} <- Ordered],
-		     ctx    => Ctx,
-		     paint  => Paint,
-		     plots  => Groups,
-		     period => period(),
-		     x      => 0,
-		     last   => #{},
-		     sel_id => SelId,
-		     run    => Run,
-		     mode   => run,
-		     clock  => {0, undefined},
-		     code   => maps:get(code, S1),
-		     trace_box => TraceBox,
-		     state_box => StateBox,
-		     clock_box => Clock,
-		     link_box => LinkBox,
-		     file   => File,
-		     chat   => Chat,
-		     where  => Where},
+    S2 = #{nodes  => maps:get(nodes, P),
+	   traces => [{N, K, maps:get(N, Looks)} || {K, N, _} <- Ordered],
+	   trace  => maps:get(trace, P),
+	   plots  => maps:get(plots, P),
+	   period => period(),
+	   x      => 0,
+	   last   => #{},
+	   sel_id => SelId,
+	   run    => Run,
+	   mode   => run,
+	   clock  => {0, undefined},
+	   code   => maps:get(code, S1),
+	   trace_box => TraceBox,
+	   state_box => maps:get(state_box, P),
+	   clock_box => maps:get(clock_box, P),
+	   link_box => maps:get(link_box, P),
+	   file   => File,
+	   chat   => Chat,
+	   where  => Where},
     csp_chat:attach(Chat, chat_info(File)),
-    loop(Ws, Link, start_mode(Ws, Link, S2)).
+    loop(U, Link, start_mode(U, Link, S2)).
 
 %% {mode, pause} in candid.config: start stopped, ready to step. Not a node: it
 %% was running before we looked, and connecting is not a reason to stop it.
-start_mode(Ws, Link, S) ->
+start_mode(U, Link, S) ->
     case {config(mode), target()} of
-	{pause, {{local, _}, _}} -> control(Ws, Link, S, "mode=step");
-	_ -> light_mode(Ws, S#{mode := run}), S#{mode := run}
+	{pause, {{local, _}, _}} -> control(U, Link, S, "mode=step");
+	_ -> light_mode(U, S#{mode := run}), S#{mode := run}
     end.
 
 %% What the panel is connected to, csp_link:target/1's reading of the field.
@@ -845,7 +818,7 @@ target_text() ->
 %% A new target from the field: let go of this one and connect to that, the
 %% widgets and the code view as they are. A field that does not read stays
 %% connected where it was, and says why.
-retarget(Ws, Link, S, Text) ->
+retarget(U, Link, S, Text) ->
     case csp_link:target(Text) of
 	{ok, T} ->
 	    csp_link:close(Link),
@@ -853,9 +826,9 @@ retarget(Ws, Link, S, Text) ->
 	    put(candid_target, T),
 	    put(candid_target_text, Text),
 	    {ok, Link1} = csp_link:open(T, csp_exe(), [maps:get(file, S)]),
-	    {Link1, start_mode(Ws, Link1, S#{last := #{}})};
+	    {Link1, start_mode(U, Link1, S#{last := #{}})};
 	{error, Why} ->
-	    show_link(Ws, S, Why),
+	    show_link(U, S, Why),
 	    {Link, S}
     end.
 
@@ -877,24 +850,10 @@ node_file(Target) ->
 				"/")],
     filename:join([os:getenv("TMPDIR", "/tmp"), "csp_node", Name ++ ".csp"]).
 
-show_link(Ws, #{link_box := {B, F}}, Text) ->
-    wse:cast(Ws, F, "call", [null, B, lists:flatten(Text)]);
-show_link(_Ws, _S, _Text) ->
+show_link(U, #{link_box := B}, Text) ->
+    ui(U, status, [B, Text]);
+show_link(_U, _S, _Text) ->
     ok.
-
-status_box(Ws, Row, Id) ->
-    B = wse:createElement(Ws, "span"),
-    wse:set(Ws, B, "id", Id),
-    wse:setStyle(Ws, B, "padding:3px 10px;border:1px solid #555;color:#ddd;"
-		 "font:13px monospace;white-space:pre"),
-    wse:appendChild(Ws, Row, B),
-    {B, wse:newf(Ws, "e,t", "{ e.textContent = t; }")}.
-
-box(Ws, Parent, Style) ->
-    D = wse:createElement(Ws, "div"),
-    wse:setStyle(Ws, D, Style),
-    wse:appendChild(Ws, Parent, D),
-    D.
 
 %%% What is shown: the trace (hide | show), the code view (hide | ladder |
 %%% code) and the theme (dark | light). Both views start hidden unless
@@ -905,9 +864,6 @@ box(Ws, Parent, Style) ->
 %%% Kept per browser session in the process dictionary, so picking another
 %%% program keeps them -- render/3 starts the page over, and the choice is the
 %%% person's, not the program's.
--define(VIEWS, [{"trace", ["hide", "show"]},
-		{"code",  ["hide", "ladder", "code"]},
-		{"theme", ["dark", "light"]}]).
 
 views() ->
     case get(candid_views) of
@@ -949,126 +905,22 @@ colours() ->
 	_                 -> #{}
     end.
 
-view(Ws, S, "trace", V) ->
-    style(Ws, maps:get(trace_box, S),
-	  [?TRACE_BOX, case V of "show" -> "display:block";
-			   _      -> "display:none"
-		       end]),
-    view_done(Ws, S, "trace", V);
-view(Ws, S, "code", V) ->
-    S1 = S#{code := csp_code:control(Ws, maps:get(code, S), V)},
-    view_done(Ws, S1, "code", V);
-view(Ws, S, "theme", V) ->
-    theme(Ws, V),
-    view_done(Ws, S, "theme", V);
-view(_Ws, S, _K, _V) ->
+view(U, S, "trace", V) ->
+    ui(U, trace_view, [maps:get(trace_box, S), V =:= "show"]),
+    view_done(U, S, "trace", V);
+view(U, S, "code", V) ->
+    S1 = S#{code := csp_code:control(maps:get(code, S), V)},
+    view_done(U, S1, "code", V);
+view(U, S, "theme", V) ->
+    ui(U, theme, [V]),
+    view_done(U, S, "theme", V);
+view(_U, S, _K, _V) ->
     S.
 
-view_done(Ws, S, K, V) ->
+view_done(U, S, K, V) ->
     put(candid_views, maps:put(K, V, views())),
-    [style(Ws, B, btn_style(Val =:= V))
-     || {{K1, Val}, B} <- maps:to_list(maps:get(views, maps:get(run, S))),
-	K1 =:= K],
+    ui(U, view_buttons, [maps:get(run, S), K, V]),
     S.
-
-%% LIGHT is the dark panel inverted and turned back to its own hues, on a pale
-%% blue page: every colour in the panel is written inline, and one filter on
-%% the root is the change that reaches all of them, the canvases included. A
-%% lamp stays red; a glow becomes a shade instead, which reads fine on white.
-theme(Ws, T) ->
-    {Bg, Filter} = case T of
-		       "light" -> {"#dce6f2", "invert(0.92) hue-rotate(180deg) saturate(1.8)"};
-		       _       -> {"#121212", "none"}
-		   end,
-    F = wse:newf(Ws, "bg,f",
-		 "{ document.body.style.background = bg;"
-		 "  document.getElementById('panel').style.filter = f; }"),
-    wse:cast(Ws, F, "call", [null, Bg, Filter]).
-
-%% Lists every .csp under demo/ and the tree's examples/, so another program is
-%% a pick rather than an edit of the page.
-chooser(Ws, Root, Current, Chat) ->
-    Bar = wse:createElement(Ws, "div"),
-    wse:setStyle(Ws, Bar, "font:14px monospace;color:#888;margin-bottom:12px"),
-    Sel = wse:createElement(Ws, "select"),
-    wse:setStyle(Ws, Sel, "font:14px monospace;background:#222;color:#eee;"
-		 "border:1px solid #555;padding:3px"),
-    lists:foreach(
-      fun(F) ->
-	      O = wse:createElement(Ws, "option"),
-	      wse:set(Ws, O, "value", F),
-	      wse:appendChild(Ws, O, wse:createTextNode(Ws, shorten(F))),
-	      case F =:= Current of
-		  true  -> wse:set(Ws, O, "selected", true);
-		  false -> ok
-	      end,
-	      wse:appendChild(Ws, Sel, O)
-      end, available(Current)),
-    {ok, Id} = wse:create_event(Ws),
-    %% `this` in an onchange assigned this way is the select, so the new
-    %% filename rides along and the loop needs no reverse map.
-    Func = wse:newf(Ws, "", "{ Wse.notify(" ++ integer_to_list(Id) ++
-			", this.value); }"),
-    wse:set(Ws, Sel, "onchange", Func),
-    wse:appendChild(Ws, Bar, Sel),
-    Run = runstep(Ws, Bar, Chat),
-    wse:appendChild(Ws, Root, Bar),
-    {Id, Sel, Run}.
-
-%% Run or step, and they are not the same clock.
-%%
-%% RUNNING: the panel sends /commit on a timer, and a `> X = 1' from a widget
-%% runs a cycle of its own -- which is what you want while poking at a thing.
-%%
-%% STEPPING: /pause, so nothing moves until asked. Values set from widgets go in
-%% WITHOUT running a cycle, and one /step runs exactly one with all of them
-%% committed together -- the way a board commits every DIN at the top of a cycle.
-%% That is also what a replayed model trace needs, since a trace step carries
-%% several inputs belonging to the same instant.
-runstep(Ws, Bar, Chat) ->
-    Wrap = wse:createElement(Ws, "span"),
-    wse:setStyle(Ws, Wrap, "margin-left:16px"),
-    {ok, Id} = wse:create_event(Ws),
-    Mk = fun(Label, Tag) ->
-		 B = wse:createElement(Ws, "button"),
-		 wse:setStyle(Ws, B, lists:flatten(btn_style(false))),
-		 wse:appendChild(Ws, B, wse:createTextNode(Ws, Label)),
-		 F = wse:newf(Ws, "", "{ Wse.notify(" ++ integer_to_list(Id) ++
-				  ", '" ++ Tag ++ "'); }"),
-		 wse:set(Ws, B, "onclick", F),
-		 wse:appendChild(Ws, Wrap, B),
-		 B
-	 end,
-    target_field(Ws, Wrap, Id),
-    RunB  = Mk("run",   "mode=run"),
-    PauseB = Mk("pause", "mode=step"),
-    OneB  = Mk("step",  "step=1"),
-    %% The tick, on the SAME event as the buttons: the loop already tells the
-    %% bar's events from a widget's by the id, and tags its payloads, so this
-    %% needs no second wire. `period=25' lands in control/4 beside `mode=run'.
-    tick_select(Ws, Wrap, Id),
-    %% What is shown, on the same event: `trace=show' and the like.
-    Group = fun(Label, Key, Vals) ->
-		    L = wse:createElement(Ws, "span"),
-		    wse:setStyle(Ws, L, "margin:0 6px 0 16px;color:#888;"
-				 "font:12px monospace"),
-		    wse:appendChild(Ws, L, wse:createTextNode(Ws, Label)),
-		    wse:appendChild(Ws, Wrap, L),
-		    [{{Key, V}, Mk(V, Key ++ "=" ++ V)} || V <- Vals]
-	    end,
-    Views = lists:append([Group(case K of "theme" -> ""; _ -> K end, K, Vals)
-			  || {K, Vals} <- ?VIEWS]),
-    %% Only when there is a chat to open: ellm on the path, not switched off.
-    Chat =/= undefined andalso
-	begin
-	    L = wse:createElement(Ws, "span"),
-	    wse:setStyle(Ws, L, "margin-left:16px"),
-	    wse:appendChild(Ws, Wrap, L),
-	    Mk("chat", "chat=toggle")
-	end,
-    wse:appendChild(Ws, Bar, Wrap),
-    #{event => Id, run => RunB, pause => PauseB, one => OneB,
-      views => maps:from_list(Views)}.
 
 %% Where the program is: its cycle and its own clock, which stand still while
 %% paused.
@@ -1078,290 +930,10 @@ clock_text(Cycle, Prog) ->
 secs(undefined) -> "-";
 secs(Ms)        -> io_lib:format("~.1f s", [Ms / 1000]).
 
-%% Where the program runs: a csp of our own, or a node. Read by
-%% csp_link:target/1, sent on Enter.
-target_field(Ws, Wrap, Id) ->
-    In = wse:createElement(Ws, "input"),
-    wse:set(Ws, In, "type", "text"),
-    wse:set(Ws, In, "value", target_text()),
-    wse:set(Ws, In, "placeholder",
-	    "local | can0 | host:port | /dev/ttyUSB0@115200  [rom|eeprom] "
-	    "[image=A]"),
-    wse:set(Ws, In, "title",
-	    "local, or a can interface: a csp of our own on that bus\n"
-	    "host:port or /dev/tty...[@baud]: a node's console\n"
-	    "rom | eeprom: without or with the EEPROM patch\n"
-	    "image=SLOT: read a node's program from that flash slot"),
-    wse:setStyle(Ws, In, "width:24em;margin-right:12px;font:12px monospace;"
-		 "background:#222;color:#eee;border:1px solid #555;"
-		 "padding:3px"),
-    F = wse:newf(Ws, "", "{ Wse.notify(" ++ integer_to_list(Id) ++
-		     ", 'target=' + this.value); }"),
-    wse:set(Ws, In, "onchange", F),
-    wse:appendChild(Ws, Wrap, In),
-    In.
-
-tick_select(Ws, Wrap, Id) ->
-    Lbl = wse:createElement(Ws, "span"),
-    wse:setStyle(Ws, Lbl, "margin-left:12px;color:#888;font:12px monospace"),
-    wse:appendChild(Ws, Lbl, wse:createTextNode(Ws, "tick")),
-    wse:appendChild(Ws, Wrap, Lbl),
-    Sel = wse:createElement(Ws, "select"),
-    wse:setStyle(Ws, Sel, "margin-left:6px;font:12px monospace;background:#222;"
-		 "color:#eee;border:1px solid #555;padding:2px"),
-    Now = period(),
-    lists:foreach(
-      fun(Ms) ->
-	      O = wse:createElement(Ws, "option"),
-	      wse:set(Ws, O, "value", Ms),
-	      wse:appendChild(Ws, O, wse:createTextNode(
-					Ws, integer_to_list(Ms) ++ " ms")),
-	      case Ms =:= Now of
-		  true  -> wse:set(Ws, O, "selected", true);
-		  false -> ok
-	      end,
-	      wse:appendChild(Ws, Sel, O)
-      end, lists:usort([Now | ?PERIODS])),
-    F = wse:newf(Ws, "", "{ Wse.notify(" ++ integer_to_list(Id) ++
-	    ", 'period=' + this.value); }"),
-    wse:set(Ws, Sel, "onchange", F),
-    wse:appendChild(Ws, Wrap, Sel),
-    Sel.
-
-btn_style(Active) ->
-    ["font:13px monospace;padding:3px 9px;margin-right:4px;"
-     "border:1px solid #555;",
-     case Active of
-	 true  -> "background:#3af;color:#111;font-weight:bold";
-	 false -> "background:#333;color:#ccc"
-     end].
-
-%% A row per widget: the label, then the control. The lamp node is what we
-%% restyle when the value changes, so it is what we keep -- together with the
-%% look, which says what colour to restyle it with and how to print the number.
-row(Ws, Root, {Kind, Name, _W}, Look) ->
-    Row = wse:createElement(Ws, "div"),
-    wse:setStyle(Ws, Row, "margin:6px 0;font:14px monospace"),
-    Label = wse:createElement(Ws, "span"),
-    wse:setStyle(Ws, Label, "display:inline-block;width:110px;color:#ccc"),
-    wse:appendChild(Ws, Label, wse:createTextNode(Ws, maps:get(label, Look))),
-    %% The label is the signal, to mark for the model view (csp_code).
-    wse:set(Ws, Label, "id", "sl_" ++ Name),
-    wse:cast(Ws, Label, "setAttribute", ["data-sig", Name]),
-    wse:appendChild(Ws, Row, Label),
-    Node = case Kind of
-	       toggle  -> switch(Ws, Row, Name, Look);
-	       push    -> push(Ws, Row, Name, Look);
-	       lamp    -> lamp(Ws, Row, Look);
-	       action  -> action(Ws, Row, Look);
-	       slider  -> slider(Ws, Row, Name, Look);
-	       dial    -> dial(Ws, Row, Name, Look);
-	       invalue -> invalue(Ws, Row, Name, Look);
-	       meter   -> meter(Ws, Row, Look);
-	       value   -> value_out(Ws, Row, Look)
-	   end,
-    wse:appendChild(Ws, Root, Row),
-    Node.
-
-%% An input's value has to travel with the name, so the notify carries
-%% "Name=Value" and the loop splits on the first '='. A switch sends the bare
-%% name, which is how the two are told apart.
-%% The range is the look's min..max: a signed channel goes below zero, and a
-%% narrowed one gives the whole travel to the part that matters.
-slider(Ws, Row, Name, Look = #{min := Min, max := Max, colour := {On, _}}) ->
-    S = wse:createElement(Ws, "input"),
-    wse:set(Ws, S, "type", "range"),
-    wse:set(Ws, S, "min", n(Min)),
-    wse:set(Ws, S, "max", n(Max)),
-    wse:set(Ws, S, "value", n(min(max(0, Min), Max))),
-    style(Ws, S, ["width:200px;vertical-align:middle;accent-color:", On]),
-    {ok, Id} = wse:create_event(Ws),
-    Func = wse:newf(Ws, "", "{ Wse.notify(" ++ integer_to_list(Id) ++
-			", '" ++ Name ++ "=' + this.value); }"),
-    wse:set(Ws, S, "oninput", Func),
-    wse:appendChild(Ws, Row, S),
-    Out = readout(Ws, Row),
-    {slider, S, Out, Look}.
-
-%% Held down rather than latched: mousedown sends 1, mouseup sends 0. Reuses the
-%% slider wire format (Name=Value) rather than inventing a second one.
-push(Ws, Row, Name, #{colour := Hue}) ->
-    B = wse:createElement(Ws, "button"),
-    wse:setStyle(Ws, B, "width:60px;padding:4px;font:14px monospace;"
-		 "background:#333;color:#eee;border:1px solid #555"),
-    wse:appendChild(Ws, B, wse:createTextNode(Ws, "0")),
-    {ok, Id} = wse:create_event(Ws),
-    Down = wse:newf(Ws, "", "{ Wse.notify(" ++ integer_to_list(Id) ++
-			", '" ++ Name ++ "=1'); }"),
-    Up = wse:newf(Ws, "", "{ Wse.notify(" ++ integer_to_list(Id) ++
-		      ", '" ++ Name ++ "=0'); }"),
-    wse:set(Ws, B, "onmousedown", Down),
-    wse:set(Ws, B, "onmouseup", Up),
-    wse:set(Ws, B, "onmouseleave", Up),     % dragging off must not leave it held
-    wse:appendChild(Ws, Row, B),
-    {switch, B, Hue}.
-
-%% Something that DOES rather than indicates: a siren, a motor, a valve. Shown as
-%% text that lights up, because a 18px dot does not say "the pump is running".
-action(Ws, Row, #{colour := Hue}) ->
-    A = wse:createElement(Ws, "span"),
-    style(Ws, A, action_style(0, Hue)),
-    wse:appendChild(Ws, A, wse:createTextNode(Ws, "off")),
-    wse:appendChild(Ws, Row, A),
-    {action, A, Hue}.
-
-action_style(V, {On, Off}) ->
-    ["display:inline-block;min-width:54px;text-align:center;padding:3px 8px;"
-     "border-radius:3px;font:12px monospace;border:1px solid #555;",
-     case V of
-	 0 -> ["background:", Off, ";color:#777"];
-	 _ -> ["background:", On, ";color:#111;font-weight:bold"]
-     end].
-
-%% A dial is a slider for the hand and a needle for the eye: the same range
-%% input, plus a rotating pointer that reads at a glance.
-dial(Ws, Row, Name, Look) ->
-    Face = wse:createElement(Ws, "span"),
-    wse:setStyle(Ws, Face, "display:inline-block;width:38px;height:38px;"
-		 "border-radius:19px;border:2px solid #555;background:#252525;"
-		 "position:relative;vertical-align:middle;margin-right:8px"),
-    Needle = wse:createElement(Ws, "span"),
-    style(Ws, Needle, needle_style(maps:get(min, Look), Look)),
-    wse:appendChild(Ws, Face, Needle),
-    wse:appendChild(Ws, Row, Face),
-    {slider, S, Out, Look} = slider(Ws, Row, Name, Look),
-    {dial, Needle, S, Out, Look}.
-
-%% -135..+135 degrees, the usual instrument sweep, over min..max.
-needle_style(V, Look = #{colour := {On, _}}) ->
-    Deg = -135 + trunc(270 * frac(V, Look)),
-    ["position:absolute;left:50%;top:50%;width:2px;height:15px;"
-     "background:", On, ";transform-origin:50% 100%;"
-     "transform:translate(-50%,-100%) rotate(", integer_to_list(Deg), "deg)"].
-
 %% Where V sits between min and max, 0.0..1.0, clamped: a reading outside the
 %% range pins the needle rather than spinning it round the back.
 frac(V, #{min := Min, max := Max}) ->
     (min(max(V, Min), Max) - Min) / max(Max - Min, 1).
-
-%% An editable field, for an input whose value is a number rather than a level.
-invalue(Ws, Row, Name, #{colour := {On, _}}) ->
-    I = wse:createElement(Ws, "input"),
-    wse:set(Ws, I, "type", "text"),
-    wse:set(Ws, I, "size", 8),
-    style(Ws, I, ["font:13px monospace;background:#222;color:", On, ";"
-		  "border:1px solid #555;padding:2px 4px"]),
-    {ok, Id} = wse:create_event(Ws),
-    %% on Enter, not on every keystroke: half a number is not a value
-    Func = wse:newf(Ws, "e", "{ if (e && e.key == 'Enter') Wse.notify(" ++
-			integer_to_list(Id) ++ ", '" ++ Name ++
-			"=' + this.value); }"),
-    wse:set(Ws, I, "onkeydown", Func),
-    wse:appendChild(Ws, Row, I),
-    {invalue, I}.
-
-%% Just the number, for an output nobody wants a bar for.
-value_out(Ws, Row, Look = #{colour := {On, _}}) ->
-    T = wse:createElement(Ws, "span"),
-    style(Ws, T, ["font:14px monospace;color:", On, ";min-width:60px;"
-		  "display:inline-block"]),
-    wse:appendChild(Ws, T, wse:createTextNode(Ws, "0")),
-    wse:appendChild(Ws, Row, T),
-    {value, T, Look}.
-
-meter(Ws, Row, Look = #{colour := {On, _}}) ->
-    Outer = wse:createElement(Ws, "span"),
-    wse:setStyle(Ws, Outer, "display:inline-block;width:200px;height:12px;"
-		 "background:#252525;border:1px solid #555;vertical-align:middle"),
-    Bar = wse:createElement(Ws, "span"),
-    style(Ws, Bar, ["display:block;height:100%;width:0;background:", On]),
-    wse:appendChild(Ws, Outer, Bar),
-    wse:appendChild(Ws, Row, Outer),
-    Out = readout(Ws, Row),
-    {meter, Bar, Out, Look}.
-
-%% Every port 9 pixel side by side on one line. That is what the strip is on
-%% the board, and one swatch per row neither looks like the hardware nor lets
-%% you see a pattern travel along it -- which is the whole of what cpx_ball
-%% does.
-strip(_Ws, _Root, []) -> [];
-strip(Ws, Root, Pixels) ->
-    Row = wse:createElement(Ws, "div"),
-    wse:setStyle(Ws, Row, "margin:12px 0;font:14px monospace"),
-    Label = wse:createElement(Ws, "span"),
-    wse:setStyle(Ws, Label, "display:inline-block;width:110px;color:#ccc"),
-    wse:appendChild(Ws, Label, wse:createTextNode(Ws, "port 9")),
-    wse:appendChild(Ws, Row, Label),
-    Nodes = [{Name, cell(Ws, Row, maps:get(label, Look))}
-	     || {Name, Look} <- Pixels],
-    wse:appendChild(Ws, Root, Row),
-    Nodes.
-
-cell(Ws, Row, Label) ->
-    C = wse:createElement(Ws, "span"),
-    wse:setStyle(Ws, C, ?PIXEL "background:#000"),
-    wse:set(Ws, C, "title", Label),     % hover says which pixel
-    wse:appendChild(Ws, Row, C),
-    {pixel, C}.
-
-%%% One canvas per group, and ONE painter function shared by all of them -- the
-%%% browser compiles it once, exactly as painter/1 does for the trace.
-plot_panels(_Ws, _Root, []) ->
-    {[], []};
-plot_panels(Ws, Root, Groups) ->
-    Plot = plotter(Ws),
-    lists:foldl(fun(G, {Gs, Ns}) ->
-			{G1, N1} = plot_panel(Ws, Root, G, Plot),
-			{Gs ++ [G1], Ns ++ N1}
-		end, {[], []}, Groups).
-
-plot_panel(Ws, Root, G = #{id := Id, x := X, ys := Ys}, Plot) ->
-    Box = wse:createElement(Ws, "div"),
-    wse:setStyle(Ws, Box, "margin:12px 0;font:14px monospace"),
-    Label = wse:createElement(Ws, "span"),
-    wse:setStyle(Ws, Label, "display:inline-block;width:110px;color:#ccc;"
-		 "vertical-align:top"),
-    wse:appendChild(Ws, Label, wse:createTextNode(Ws, Id)),
-    wse:appendChild(Ws, Box, Label),
-    C = wse:createElement(Ws, "canvas"),
-    wse:set(Ws, C, "width", ?PLOT_W),
-    wse:set(Ws, C, "height", ?PLOT_W),
-    wse:setStyle(Ws, C, [?GLASS, css(?PLOT_BG), ";",
-			 case maps:get(round, G) of
-			     true  -> ?ROUND;
-			     false -> ?FLAT
-			 end]),
-    wse:appendChild(Ws, Box, C),
-    {ok, Ctx} = wse:call(Ws, C, "getContext", ["2d"]),
-    Side = wse:createElement(Ws, "div"),
-    wse:setStyle(Ws, Side, "display:inline-block;margin-left:12px;"
-		 "vertical-align:top"),
-    Members = [{"x", M} || M <- [X], M =/= undefined] ++
-	[{"y", M} || M <- Ys],
-    Nodes = [{maps:get(name, M), {plotval, plot_row(Ws, Side, Ax, M), M}}
-	     || {Ax, M} <- Members],
-    wse:appendChild(Ws, Box, Side),
-    wse:appendChild(Ws, Root, Box),
-    xy_handler(Ws, C, drivable(X, Ys)),
-    {G#{ctx => Ctx, plot => Plot}, Nodes}.
-
-%% axis, name, and the live value beside it -- in engineering units when the
-%% annotation gave enough to work them out.
-plot_row(Ws, Side, Axis, M) ->
-    Row = wse:createElement(Ws, "div"),
-    wse:setStyle(Ws, Row, "margin-bottom:4px"),
-    Tag = wse:createElement(Ws, "span"),
-    wse:setStyle(Ws, Tag, ["color:", maps:get(colour, M),
-			   ";font:12px monospace"]),
-    wse:appendChild(Ws, Tag, wse:createTextNode(
-				Ws, Axis ++ "  " ++ maps:get(label, M))),
-    wse:appendChild(Ws, Row, Tag),
-    V = wse:createElement(Ws, "span"),
-    wse:setStyle(Ws, V, "display:block;color:#888;font:12px monospace"),
-    wse:appendChild(Ws, V, wse:createTextNode(Ws, "")),
-    wse:appendChild(Ws, Row, V),
-    wse:appendChild(Ws, Side, Row),
-    V.
 
 %% Which channels the pointer may drive: the ones whose declaration is an INPUT.
 %% A plot of two outputs is a picture and nothing else, and must not pretend
@@ -1377,161 +949,6 @@ drivable(X, Ys) ->
 	 end,
     Across ++ Up.
 
-%%% THE CANVAS IS THE CONTROL: the pointer is the beam, which is what makes an
-%%% XY pair worth steering by hand -- two sliders cannot be moved together.
-%%%
-%%% Both axes go as two separate notifies of "Name=Value", the same wire format
-%%% a slider uses. Inventing a two-value message for this would mean the panel
-%%% could say something you cannot type at the csp prompt, and that is the one
-%%% property that makes it debuggable.
-%%%
-%%% In run mode the values land and the next tick commits them. Under /pause
-%%% they wait and ONE /step commits both -- the instant a board would see, with
-%%% x and y belonging to the same cycle.
-xy_handler(_Ws, _C, []) ->
-    ok;
-xy_handler(Ws, C, Sends) ->
-    {ok, Id} = wse:create_event(Ws),
-    Body = ["{ var r = this.getBoundingClientRect(); ",
-	    [send_js(Id, Ax, M) || {Ax, M} <- Sends], " }"],
-    %% Held, not hovered: a plot you cannot take your hand off is a plot you
-    %% cannot click anything else beside.
-    Move = wse:newf(Ws, "e", lists:flatten(["{ if (this.__xy) ", Body, " }"])),
-    Down = wse:newf(Ws, "e", lists:flatten(["{ this.__xy = 1; ", Body, " }"])),
-    Up = wse:newf(Ws, "e", "{ this.__xy = 0; }"),
-    wse:set(Ws, C, "onmousedown", Down),
-    wse:set(Ws, C, "onmousemove", Move),
-    wse:set(Ws, C, "onmouseup", Up),
-    wse:set(Ws, C, "onmouseleave", Up),
-    ok.
-
-%% The pointer's position as a fraction of the box, mapped onto the channel's
-%% own range -- min..max, not 0..full-scale, so a narrowed plot drives the same
-%% values it displays. Up is UP: the top of the box is max, as on a scope and
-%% unlike a canvas coordinate.
-send_js(Id, Axis, M) ->
-    Min = maps:get(min, M),
-    Max = maps:get(max, M),
-    {Frac, V} = case Axis of
-		    across -> {"(e.clientX - r.left) / (r.width || 1)", "vx"};
-		    up     -> {"(1 - (e.clientY - r.top) / (r.height || 1))",
-			       "vy"}
-		end,
-    %% One variable per axis: both axes are sent from the same function, and a
-    %% second `var v' in it is a redeclaration that reads as a bug even where
-    %% the language allows it.
-    ["var ", V, " = ", n(Min), " + Math.round(", Frac, " * ", n(Max - Min),
-     "); ",
-     V, " = ", V, " < ", n(Min), " ? ", n(Min), " : (", V, " > ", n(Max),
-     " ? ", n(Max), " : ", V, "); ",
-     "Wse.notify(", integer_to_list(Id), ", '", maps:get(name, M),
-     "=' + ", V, "); "].
-
-n(V) when is_integer(V) -> integer_to_list(V);
-n(V) when is_float(V)   -> lists:flatten(io_lib:format("~w", [trunc(V)])).
-
-css({R, G, B}) ->
-    lists:flatten(io_lib:format("rgb(~w,~w,~w)", [R, G, B])).
-
-%%% The afterglow. One cast per plot per tick: every pixel decays toward the
-%%% background, then the graticule, then the beam.
-%%%
-%%% The decay is what a phosphor does -- everything already drawn gets a little
-%%% dimmer, so the beam leaves a trail that fades instead of a line that stays.
-%%%
-%%% It is done PER PIXEL, on the image data, and not as a translucent wash of
-%%% the background over the canvas. A wash never gets there: each channel moves
-%%% by round(a * distance), and once a * distance is under a half the rounding
-%%% eats the step and the pixel stops for good -- at a = 0.1 that is five levels
-%%% short of the background, which is the ghost a trail left behind. Here the
-%%% distance is multiplied and TRUNCATED, so it shrinks by at least one level
-%%% every tick and every trail reaches the background exactly.
-%%%
-%%% The graticule is redrawn after the decay, every tick, so it does not fade
-%%% with the trail: a scope's screen is printed, not drawn.
-plotter(Ws) ->
-    {R, G, B} = ?PLOT_BG,
-    Bg = lists:flatten(io_lib:format("~w,~w,~w", [R, G, B])),
-    %% Ten numbers in, five per channel after them: where the beam WAS, where
-    %% it is now, and the colour. The segment is what turns ten samples a second
-    %% into a curve rather than ten dots.
-    %%
-    %% x0 < 0 means NO segment: the first sample after a rebuild, and a retrace
-    %% (see seg/2).
-    %%
-    %% `step' draws across at the OLD height and then up: the value held until
-    %% the next sample, which is what a square wave is. `dot' is the head's
-    %% radius, 0 for none. `glow' blooms the head (shadowBlur) -- the trail
-    %% never does, bloom on a stroke is the expensive one -- and is turned off
-    %% again straight after, or the next graticule would glow too.
-    %%
-    %% An odd line width is drawn on the half pixel, so a thin line is one sharp
-    %% pixel wide instead of two half-lit ones.
-    %%
-    %% The CLIP is a path, not a trust: border-radius does clip a canvas in the
-    %% browsers that matter, but nothing in the drawing says so. With it on,
-    %% the decay and the graticule stop at the glass too -- pixels outside it
-    %% are never painted, stay transparent, and are skipped by the decay.
-    wse:newf(Ws, "ctx,w,h,keep,round,clip,beam,dot,glow,step,a",
-	     "{ var bg = [" ++ Bg ++ "];"
-	     "  if (!ctx.__lit) { ctx.__lit = 1;"
-	     "    ctx.save();"
-	     "    if (clip) { ctx.beginPath();"
-	     "      ctx.arc(w / 2, h / 2, Math.min(w, h) / 2 - 1, 0, 6.2832);"
-	     "      ctx.clip(); }"
-	     "    ctx.fillStyle = 'rgb(' + bg + ')'; ctx.fillRect(0, 0, w, h);"
-	     "    ctx.restore(); }"
-	     "  if (ctx.__keep !== keep) { ctx.__keep = keep;"
-	     "    ctx.__lut = new Uint8Array(256);"
-	     "    for (var j = 0; j < 256; j++)"
-	     "      ctx.__lut[j] = Math.floor(j * keep); }"
-	     "  var L = ctx.__lut, im = ctx.getImageData(0, 0, w, h), d = im.data;"
-	     "  for (var p = 0; p < d.length; p += 4) {"
-	     "    if (d[p+3] === 0) continue;"
-	     "    for (var c = 0; c < 3; c++) {"
-	     "      var v = d[p+c], b = bg[c];"
-	     "      d[p+c] = v >= b ? b + L[v - b] : b - L[b - v]; } }"
-	     "  ctx.putImageData(im, 0, 0);"
-	     "  if (clip) { ctx.save(); ctx.beginPath();"
-	     "    ctx.arc(w / 2, h / 2, Math.min(w, h) / 2 - 1, 0, 6.2832);"
-	     "    ctx.clip(); }"
-	     "  ctx.strokeStyle = '#203420'; ctx.lineWidth = 1;"
-	     "  if (round) {"
-	     "    var cx = w / 2, cy = h / 2, r = Math.min(w, h) / 2 - 2;"
-	     "    for (var g = 1; g <= 3; g++) {"
-	     "      ctx.beginPath(); ctx.arc(cx, cy, r * g / 3, 0, 6.2832);"
-	     "      ctx.stroke(); }"
-	     "    ctx.beginPath();"
-	     "    ctx.moveTo(cx - r, cy); ctx.lineTo(cx + r, cy);"
-	     "    ctx.moveTo(cx, cy - r); ctx.lineTo(cx, cy + r);"
-	     "    ctx.stroke(); }"
-	     "  else {"
-	     "    ctx.beginPath();"
-	     "    for (var k = 1; k < 4; k++) {"
-	     "      var q = Math.round(k * w / 4) + 0.5;"
-	     "      ctx.moveTo(q, 0); ctx.lineTo(q, h);"
-	     "      var s = Math.round(k * h / 4) + 0.5;"
-	     "      ctx.moveTo(0, s); ctx.lineTo(w, s); }"
-	     "    ctx.stroke(); }"
-	     "  var o = (Math.round(beam) % 2) ? 0.5 : 0;"
-	     "  ctx.lineWidth = beam;"
-	     "  ctx.lineCap = glow ? 'round' : 'square';"
-	     "  ctx.lineJoin = glow ? 'round' : 'miter';"
-	     "  for (var i = 0; i < a.length; i += 5) {"
-	     "    var col = a[i+4], x0 = a[i] + o, y0 = a[i+1] + o,"
-	     "        x1 = a[i+2] + o, y1 = a[i+3] + o;"
-	     "    if (a[i] >= 0 && beam > 0) {"
-	     "      ctx.strokeStyle = col;"
-	     "      ctx.beginPath(); ctx.moveTo(x0, y0);"
-	     "      if (step) ctx.lineTo(x1, y0);"
-	     "      ctx.lineTo(x1, y1); ctx.stroke(); }"
-	     "    if (dot > 0) {"
-	     "      ctx.fillStyle = col;"
-	     "      if (glow) { ctx.shadowColor = col; ctx.shadowBlur = 7; }"
-	     "      ctx.beginPath(); ctx.arc(x1, y1, dot, 0, 6.2832);"
-	     "      ctx.fill(); ctx.shadowBlur = 0; } }"
-	     "  if (clip) ctx.restore(); }").
-
 %% How much of the last frame survives one tick: the fraction each pixel's
 %% distance from the background is multiplied by.
 %%
@@ -1543,31 +960,6 @@ plotter(Ws) ->
 keep(P, Ms) ->
     K = min(0.999, max(0.0, P)),
     math:pow(K, Ms / ?PERIOD).
-
-readout(Ws, Row) ->
-    T = wse:createElement(Ws, "span"),
-    wse:setStyle(Ws, T, "margin-left:10px;color:#888;font:12px monospace"),
-    wse:appendChild(Ws, T, wse:createTextNode(Ws, "")),
-    wse:appendChild(Ws, Row, T),
-    T.
-
-switch(Ws, Row, Name, #{colour := Hue}) ->
-    B = wse:createElement(Ws, "button"),
-    wse:setStyle(Ws, B, "width:60px;padding:4px;font:14px monospace;"
-		 "background:#333;color:#eee;border:1px solid #555"),
-    wse:appendChild(Ws, B, wse:createTextNode(Ws, "0")),
-    {ok, Id} = wse:create_event(Ws),
-    Func = wse:newf(Ws, "", "{ Wse.notify(" ++ integer_to_list(Id) ++
-			",'" ++ Name ++ "'); }"),
-    wse:set(Ws, B, "onclick", Func),
-    wse:appendChild(Ws, Row, B),
-    {switch, B, Hue}.
-
-lamp(Ws, Row, #{colour := Hue}) ->
-    L = wse:createElement(Ws, "span"),
-    wse:setStyle(Ws, L, ?LAMP ?LAMP_OFF),
-    wse:appendChild(Ws, Row, L),
-    {lamp, L, Hue}.
 
 %% Take the hint from the name. A traffic light whose lamps all glow green is
 %% harder to read than one that looks like a traffic light, and the name is the
@@ -1640,66 +1032,19 @@ label_of(Name) ->
 	_ -> Name
     end.
 
-%% No rows, no canvas: draw/2 then only moves the plots.
-canvas(_Ws, _Root, []) ->
-    {undefined, undefined};
-canvas(Ws, Root, Looks) ->
-    C = wse:createElement(Ws, "canvas"),
-    wse:set(Ws, C, "width", ?GUTTER + ?TRACE_W),
-    wse:set(Ws, C, "height", length(Looks) * ?ROW_H + 8),
-    wse:setStyle(Ws, C, "margin-top:14px;background:#1a1a1a;"
-		 "border:1px solid #333"),
-    wse:appendChild(Ws, Root, C),
-    {ok, Ctx} = wse:call(Ws, C, "getContext", ["2d"]),
-    labels(Ws, Ctx, Looks),
-    {Ctx, painter(Ws)}.
-
-%% The names down the left, once: a trace of eight stripes is unreadable when
-%% you have to count rows against the widgets above to know which is which.
-%% Each in its signal's colour, which is also the colour of its line. The
-%% gutter is never cleared -- draw/2 wraps the trace to the right of it.
-labels(Ws, Ctx, Looks) ->
-    Items = lists:append(
-	      [[short(maps:get(label, L)), I * ?ROW_H + 4 + (?ROW_H - 12) div 2,
-		element(1, maps:get(colour, L))]
-	       || {I, L} <- lists:zip(lists:seq(0, length(Looks) - 1), Looks)]),
-    F = wse:newf(Ws, "ctx,gw,a",
-		 "{ ctx.font = '12px monospace'; ctx.textBaseline = 'middle';"
-		 "  for (var i = 0; i < a.length; i += 3) {"
-		 "    ctx.fillStyle = a[i+2]; ctx.fillText(a[i], 6, a[i+1]); }"
-		 "  ctx.fillStyle = '#333'; ctx.fillRect(gw - 4, 0, 1, 4096); }"),
-    wse:cast(Ws, F, "call", [null, Ctx, ?GUTTER, wse:array(Items)]).
-
-%% What fits in the gutter at 12px monospace, with an ellipsis when it does not.
-short(S) when length(S) =< 13 -> S;
-short(S)                      -> lists:sublist(S, 12) ++ "~".
-
-%%% ONE asynchronous call per tick instead of two synchronous ones per trace.
-%%%
-%%% wse:set/4 and wse:setStyle/3 are rsync -- they wait for the browser to
-%%% answer. Drawing a column as `set(fillStyle)' plus `cast(fillRect)' per trace
-%%% therefore cost one ROUND TRIP per trace per tick: measured at 342 synchronous
-%%% calls a second with 31 widgets at 10 Hz, each one blocking this process.
-%%%
-%%% This is a function created once in the browser that takes the whole column
-%%% as a flat list -- x, y, colour, x, y, colour -- and is invoked with cast,
-%%% which does not wait. Flat rather than nested because wse encodes a list of
-%%% lists as a JSON array of arrays and the marshalling is what we are trying to
-%%% avoid.
-painter(Ws) ->
-    wse:newf(Ws, "ctx,a",
-	     "{ for (var i = 0; i < a.length; i += 3) {"
-	     "    ctx.fillStyle = a[i+2];"
-	     "    ctx.fillRect(a[i], a[i+1], " ++ integer_to_list(?STEP) ++
-	     ", 3); } }").
-
 %% Nothing to drive, so there is no csp and no tick -- just the chooser.
-wait_for_pick(Ws, Where, Chat) ->
+wait_for_pick(U, Where, Chat, SelId) ->
     receive
-	{notify, _Id, _Local, File} -> render(Ws, Where, File, Chat);
-	{closed, _}                 -> ok;
-	stop                        -> ok
+	stop -> ok;
+	Msg ->
+	    case event(U, #{sel => SelId}, Msg) of
+		{pick, File} -> render(U, Where, File, Chat);
+		closed       -> ok;
+		_            -> wait_for_pick(U, Where, Chat, SelId)
+	    end
     end.
+
+event({M, _H}, Ids, Msg) -> M:event(Ids, Msg).
 
 %% Which declaration types a file actually has, counted, for the message above.
 kinds(Ast) ->
@@ -1713,34 +1058,66 @@ kinds(Ast) ->
 
 %%% --------------------------------------------------------------------- loop
 
-loop(Ws, Link, S) ->
-    SelId = maps:get(sel_id, S),
-    %% Bound before the receive so the clause can match on it: a guard may not
-    %% call maps:get, and matching a bound variable is what tells the bar's
-    %% events apart from a widget's without reading the payload.
-    RunId = maps:get(event, maps:get(run, S, #{event => undefined}),
-		     undefined),
-    CodeId = case maps:get(code, S, undefined) of
-		 undefined -> undefined;
-		 #{event := Ce} -> Ce
-	     end,
+loop(U, Link, S) ->
     receive
-	%% Another program was picked: drop this csp and rebuild from that file.
-	{notify, SelId, _Local, File} ->
-	    csp_link:close(Link),
-	    flush(),
-	    render(Ws, maps:get(where, S), File, maps:get(chat, S));
+	{csp_state, _N, Vals} ->
+	    loop(U, Link, update(U, S, Vals));
 
-	%% run / pause / step. Sent by the bar, and told apart from a widget by
-	%% the event id rather than by the payload, so a signal called "step"
-	%% could not be mistaken for the button.
-	{notify, RunId, _Local, "target=" ++ Text} ->
-	    {Link1, S1} = retarget(Ws, Link, S, Text),
-	    csp_chat:attach(maps:get(chat, S1), chat_info(maps:get(file, S1))),
-	    loop(Ws, Link1, S1);
-	{notify, RunId, _Local, "chat=toggle"} ->
-	    csp_chat:toggle(maps:get(chat, S)),
-	    loop(Ws, Link, S);
+	{csp_fired, _N, Rules} ->
+	    loop(U, Link,
+		 S#{code := csp_code:fired(maps:get(code, S), Rules)});
+
+	{csp_clock, N, Ms} ->
+	    loop(U, Link, S#{clock := {N, Ms}});
+
+	%% varp's answer to the code view's clear or solve.
+	{csp_model, A} ->
+	    loop(U, Link, code_do(U, Link, S,
+				  csp_code:model(maps:get(code, S), A)));
+
+	%% Draw on the TICK, not on the dump. csp only dumps what changed, so a
+	%% trace driven by dumps stops moving as soon as the program settles --
+	%% which is exactly when you are staring at it wondering why. Drawing
+	%% here also means the x axis is wall time, not cycle number.
+	%% The timer keeps arriving while stepping -- it just does not drive the
+	%% program. Drawing still happens, so a held value stays visible as a
+	%% flat line rather than the trace freezing mid-air.
+	tick ->
+	    show_clock(U, S),
+	    S1 = (draw(U, S))#{code := csp_code:tick(maps:get(code, S))},
+	    case maps:get(mode, S, run) of
+		run  -> csp_link:tick(Link);
+		step -> ok
+	    end,
+	    erlang:send_after(maps:get(period, S, ?PERIOD), self(), tick),
+	    loop(U, Link, S1);
+
+	{csp_link, Text} ->
+	    show_link(U, S, Text),
+	    loop(U, Link, S);
+
+	%% A node's program, listed off its image: the panel is rebuilt from it,
+	%% so the code and the widgets are what RUNS there and not whatever
+	%% file happened to be open. Once it shows that program this is a no-op,
+	%% which is what keeps the reconnect after the rebuild from looping.
+	{csp_program, Text} ->
+	    File = node_file(target_text()),
+	    Bin = unicode:characters_to_binary(Text),
+	    case file:read_file(maps:get(file, S)) of
+		{ok, Bin} ->
+		    loop(U, Link, S);
+		_ ->
+		    ok = filelib:ensure_dir(File),
+		    ok = file:write_file(File, Bin),
+		    csp_link:close(Link),
+		    flush(),
+		    render(U, maps:get(where, S), File, maps:get(chat, S))
+	    end;
+
+	%% csp ended, or the node went away. The panel stays: another target
+	%% can be typed in.
+	{csp_exit, _Status} ->
+	    loop(U, Link, S);
 
 	%% The chat asks what only the panel knows, or to act as a button or
 	%% the chooser would -- so the bar shows what happened.
@@ -1753,113 +1130,89 @@ loop(Ws, Link, S) ->
 		    From ! {Ref, Reply},
 		    csp_link:close(Link),
 		    flush(),
-		    render(Ws, maps:get(where, S), File, maps:get(chat, S));
+		    render(U, maps:get(where, S), File, maps:get(chat, S));
 		{control, Tag, Reply} ->
 		    From ! {Ref, Reply},
-		    loop(Ws, Link, control(Ws, Link, S, Tag));
+		    loop(U, Link, control(U, Link, S, Tag));
 		Reply ->
 		    From ! {Ref, Reply},
-		    loop(Ws, Link, S)
-	    end;
-	{notify, RunId, _Local, Tag} ->
-	    loop(Ws, Link, control(Ws, Link, S, Tag));
-
-	%% ladder / code, from the code view's own bar.
-	{notify, CodeId, _Local, Tag} ->
-	    loop(Ws, Link, code_do(Ws, Link, S,
-				   csp_code:control(Ws, maps:get(code, S), Tag)));
-
-	%% A switch was clicked. We do not track its state ourselves -- we
-	%% toggle against what csp last told us, so the button can never
-	%% disagree with the program.
-	{notify, _Id, _Local, Data} ->
-	    case string:split(Data, "=") of
-		[Name, Val] ->
-		    %% a slider: send the value it was dragged to
-		    csp_link:set(Link, Name, Val);
-		[Name] ->
-		    %% a switch: toggle against what csp last told us, so the
-		    %% button can never disagree with the program
-		    Cur = maps:get(Name, maps:get(last, S), 0),
-		    csp_link:set(Link, Name, case Cur of 0 -> 1; _ -> 0 end)
-	    end,
-	    loop(Ws, Link, S);
-
-	{csp_state, _N, Vals} ->
-	    loop(Ws, Link, update(Ws, S, Vals));
-
-	{csp_fired, _N, Rules} ->
-	    loop(Ws, Link,
-		 S#{code := csp_code:fired(Ws, maps:get(code, S), Rules)});
-
-	{csp_clock, N, Ms} ->
-	    loop(Ws, Link, S#{clock := {N, Ms}});
-
-	%% varp's answer to the code view's clear or solve.
-	{csp_model, A} ->
-	    loop(Ws, Link, code_do(Ws, Link, S,
-				   csp_code:model(Ws, maps:get(code, S), A)));
-
-	%% Draw on the TICK, not on the dump. csp only dumps what changed, so a
-	%% trace driven by dumps stops moving as soon as the program settles --
-	%% which is exactly when you are staring at it wondering why. Drawing
-	%% here also means the x axis is wall time, not cycle number.
-	%% The timer keeps arriving while stepping -- it just does not drive the
-	%% program. Drawing still happens, so a held value stays visible as a
-	%% flat line rather than the trace freezing mid-air.
-	tick ->
-	    show_clock(Ws, S),
-	    S1 = (draw(Ws, S))#{code := csp_code:tick(Ws, maps:get(code, S))},
-	    case maps:get(mode, S, run) of
-		run  -> csp_link:tick(Link);
-		step -> ok
-	    end,
-	    erlang:send_after(maps:get(period, S, ?PERIOD), self(), tick),
-	    loop(Ws, Link, S1);
-
-	{csp_link, Text} ->
-	    show_link(Ws, S, Text),
-	    loop(Ws, Link, S);
-
-	%% A node's program, listed off its image: the panel is rebuilt from it,
-	%% so the code and the widgets are what RUNS there and not whatever
-	%% file happened to be open. Once it shows that program this is a no-op,
-	%% which is what keeps the reconnect after the rebuild from looping.
-	{csp_program, Text} ->
-	    File = node_file(target_text()),
-	    Bin = unicode:characters_to_binary(Text),
-	    case file:read_file(maps:get(file, S)) of
-		{ok, Bin} ->
-		    loop(Ws, Link, S);
-		_ ->
-		    ok = filelib:ensure_dir(File),
-		    ok = file:write_file(File, Bin),
-		    csp_link:close(Link),
-		    flush(),
-		    render(Ws, maps:get(where, S), File, maps:get(chat, S))
+		    loop(U, Link, S)
 	    end;
 
-	%% csp ended, or the node went away. The panel stays: another target
-	%% can be typed in.
-	{csp_exit, _Status} ->
-	    loop(Ws, Link, S);
-	{closed, _}         -> csp_link:close(Link);
-	stop                -> csp_link:close(Link)
+	stop -> csp_link:close(Link);
+
+	%% Anything else is the renderer's: what the person did.
+	Msg ->
+	    act_ui(U, Link, S, event(U, ids(S), Msg))
+    end.
+
+%% The event ids the renderer tells the chooser, the bar and the code view
+%% by: the bar's from a widget's by the id rather than by the payload, so a
+%% signal called "step" could not be mistaken for the button.
+ids(S) ->
+    #{sel => maps:get(sel_id, S),
+      run => maps:get(event, maps:get(run, S, #{}), undefined),
+      code => case maps:get(code, S, undefined) of
+		  #{event := Ce} -> Ce;
+		  _ -> undefined
+	      end}.
+
+%% Another program was picked: drop this csp and rebuild from that file.
+act_ui(U, Link, S, {pick, File}) ->
+    csp_link:close(Link),
+    flush(),
+    render(U, maps:get(where, S), File, maps:get(chat, S));
+%% run / pause / step, the target, the views: the bar.
+act_ui(U, Link, S, {bar, "target=" ++ Text}) ->
+    {Link1, S1} = retarget(U, Link, S, Text),
+    csp_chat:attach(maps:get(chat, S1), chat_info(maps:get(file, S1))),
+    loop(U, Link1, S1);
+act_ui(U, Link, S, {bar, "chat=toggle"}) ->
+    csp_chat:toggle(maps:get(chat, S)),
+    loop(U, Link, S);
+act_ui(U, Link, S, {bar, Tag}) ->
+    loop(U, Link, control(U, Link, S, Tag));
+%% ladder / code, from the code view's own bar.
+act_ui(U, Link, S, {code, Tag}) ->
+    loop(U, Link, code_do(U, Link, S,
+			  csp_code:control(maps:get(code, S), Tag)));
+%% A widget. A switch sends its bare name: we do not track its state
+%% ourselves but toggle against what csp last told us, so the button can
+%% never disagree with the program. Anything else sends Name=Value.
+act_ui(U, Link, S, {widget, Data}) ->
+    set_widget(Link, S, Data),
+    loop(U, Link, S);
+%% Several at once: an XY plot dragged sets both axes from one move.
+act_ui(U, Link, S, {widgets, Ds}) ->
+    [set_widget(Link, S, D) || D <- Ds],
+    loop(U, Link, S);
+act_ui(_U, Link, _S, closed) ->
+    csp_link:close(Link);
+act_ui(U, Link, S, none) ->
+    loop(U, Link, S).
+
+set_widget(Link, S, Data) ->
+    case string:split(Data, "=") of
+	[Name, Val] ->
+	    csp_link:set(Link, Name, Val);
+	[Name] ->
+	    Cur = maps:get(Name, maps:get(last, S), 0),
+	    csp_link:set(Link, Name, case Cur of 0 -> 1; _ -> 0 end)
     end.
 
 %% What the code view asked csp for: a replayed trace's reset, inputs and
 %% steps. A replay runs paused, so the bar says so.
-code_do(Ws, Link, S, Code0) ->
+code_do(U, Link, S, Code0) ->
     {Acts, Code} = csp_code:actions(Code0),
-    lists:foldl(fun(A, Si) -> act(Ws, Link, Si, A) end, S#{code := Code}, Acts).
+    lists:foldl(fun(A, Si) -> act(U, Link, Si, A) end, S#{code := Code}, Acts).
 
-act(Ws, Link, S = #{mode := run}, pause) -> control(Ws, Link, S, "mode=step");
-act(_Ws, _Link, S, pause)                -> S;
-act(_Ws, Link, S, reset)                 -> csp_link:reset(Link), S;
-act(_Ws, Link, S, {clock, Ms})           -> csp_link:clock(Link, Ms), S;
-act(_Ws, _Link, S, {frame, Id, Bytes})    -> send_frame(Id, Bytes), S;
-act(_Ws, Link, S, {set, N, V})           -> csp_link:set(Link, N, V), S;
-act(_Ws, Link, S, step)                  -> csp_link:step(Link), S.
+act(U, Link, S = #{mode := run}, pause) -> control(U, Link, S, "mode=step");
+act(_U, _Link, S, pause)                -> S;
+act(_U, Link, S, reset)                 -> csp_link:reset(Link), S;
+act(_U, Link, S, {clock, Ms})           -> csp_link:clock(Link, Ms), S;
+act(_U, _Link, S, {frame, Id, Bytes})   -> send_frame(Id, Bytes), S;
+act(_U, Link, S, {set, N, V})           -> csp_link:set(Link, N, V), S;
+act(_U, Link, S, step)                  -> csp_link:step(Link), S.
 
 %% A replayed frame, on the bus csp listens to (--can=vcan0 in csp_link),
 %% through the can application `make run' starts. Synchronous, so it is in
@@ -1872,29 +1225,29 @@ send_frame(Id, Bytes) ->
     end.
 
 %% Once a tick, and only when the text changed.
-show_clock(Ws, #{clock_box := {B, F}, clock := {N, Ms}}) ->
+show_clock(U, #{clock_box := B, clock := {N, Ms}}) ->
     T = clock_text(N, Ms),
     case get(candid_clock) of
 	T -> ok;
 	_ -> put(candid_clock, T),
-	     wse:cast(Ws, F, "call", [null, B, T])
+	     ui(U, status, [B, T])
     end;
-show_clock(_Ws, _S) ->
+show_clock(_U, _S) ->
     ok.
 
 %% run: let the program go. step: freeze it, so values set from widgets wait for
 %% a /step and are committed together.
-control(Ws, Link, S, "mode=run") ->
+control(U, Link, S, "mode=run") ->
     csp_link:resume(Link),
     S1 = S#{mode := run},
-    light_mode(Ws, S1),
+    light_mode(U, S1),
     S1;
-control(Ws, Link, S, "mode=step") ->
+control(U, Link, S, "mode=step") ->
     csp_link:pause(Link),
     S1 = S#{mode := step},
-    light_mode(Ws, S1),
+    light_mode(U, S1),
     S1;
-control(_Ws, Link, S, "step=1") ->
+control(_U, Link, S, "step=1") ->
     %% Only meaningful while stopped; in run mode the program is already going
     %% and a step would be indistinguishable from the tick.
     case maps:get(mode, S, run) of
@@ -1904,26 +1257,20 @@ control(_Ws, Link, S, "step=1") ->
     S;
 %% A new tick takes effect on the NEXT one: the timer already in flight is left
 %% to arrive, so changing the rate cannot drop a tick or run two at once.
-control(Ws, _Link, S, "trace=" ++ V) -> view(Ws, S, "trace", V);
-control(Ws, _Link, S, "code=" ++ V)  -> view(Ws, S, "code", V);
-control(Ws, _Link, S, "theme=" ++ V) -> view(Ws, S, "theme", V);
-control(_Ws, _Link, S, "period=" ++ Ms) ->
+control(U, _Link, S, "trace=" ++ V) -> view(U, S, "trace", V);
+control(U, _Link, S, "code=" ++ V)  -> view(U, S, "code", V);
+control(U, _Link, S, "theme=" ++ V) -> view(U, S, "theme", V);
+control(_U, _Link, S, "period=" ++ Ms) ->
     case string:to_integer(Ms) of
 	{N, _} when is_integer(N), N >= 5, N =< 10000 -> S#{period := N};
 	_                                             -> S
     end;
-control(_Ws, _Link, S, _Other) ->
+control(_U, _Link, S, _Other) ->
     S.
 
 %% Which of the three is in force, so the bar says where you are.
-light_mode(Ws, S) ->
-    #{run := RunB, pause := PauseB, one := OneB} = maps:get(run, S),
-    Step = maps:get(mode, S, run) =:= step,
-    style(Ws, RunB,   btn_style(not Step)),
-    style(Ws, PauseB, btn_style(Step)),
-    %% the step button is only live while stopped
-    style(Ws, OneB, [btn_style(false),
-		     case Step of true -> ";opacity:1"; false -> ";opacity:0.4" end]).
+light_mode(U, S) ->
+    ui(U, mode, [maps:get(run, S), maps:get(mode, S, run) =:= step]).
 
 %% Dumps and ticks already in flight belong to the csp we just dropped.
 flush() ->
@@ -1947,93 +1294,38 @@ flush() ->
 %% some sixty times a second -- and wse:set and setStyle are SYNCHRONOUS, a
 %% round trip to the browser each. Measured: 1800 calls a second, nearly all
 %% writing what was already there. That was the lag, not the transport.
-update(Ws, S, Vals) ->
+update(U, S, Vals) ->
     Last = maps:get(last, S),
-    paint(Ws, S, [{N, V} || {N, V} <- Vals,
-			    maps:get(N, Last, undefined) =/= V]),
+    paint(U, S, [{N, V} || {N, V} <- Vals,
+			   maps:get(N, Last, undefined) =/= V]),
     Last1 = maps:merge(Last, maps:from_list(Vals)),
     S#{last := Last1,
-       code := csp_code:refresh(Ws, maps:get(code, S, undefined), Last1)}.
+       code := csp_code:refresh(maps:get(code, S, undefined), Last1)}.
 
-paint(Ws, S, Vals) ->
+paint(U, S, Vals) ->
     Nodes = maps:get(nodes, S),
-    lists:foreach(fun({Name, V}) -> paint1(Ws, maps:find(Name, Nodes), V) end,
+    lists:foreach(fun({Name, V}) -> ui(U, paint, [maps:find(Name, Nodes), V]) end,
 		  Vals).
 
-paint1(Ws, {ok, {lamp, Node, {On, Off}}}, V) ->
-    style(Ws, Node,
-	  case V of
-	      0 -> [?LAMP, "background:", Off];
-	      _ -> [?LAMP, "background:", On, ";box-shadow:0 0 9px ", On]
-	  end);
-%% A switch that is on shows it in its colour, so a pressed button reads as
-%% pressed without having to read the digit on it.
-paint1(Ws, {ok, {switch, Node, {On, _Off}}}, V) ->
-    style(Ws, Node, ["width:60px;padding:4px;font:14px monospace;"
-		     "border:1px solid #555;",
-		     case V of
-			 0 -> "background:#333;color:#eee";
-			 _ -> ["background:", On, ";color:#111;font-weight:bold"]
-		     end]),
-    wse:set(Ws, Node, "textContent", label(V));
-paint1(Ws, {ok, {meter, Bar, Out, Look = #{colour := {On, _}}}}, V) ->
-    Pct = trunc(100 * frac(V, Look)),
-    style(Ws, Bar, io_lib:format("display:block;height:100%;"
-				 "background:~s;width:~w%", [On, Pct])),
-    wse:set(Ws, Out, "textContent", lists:flatten(eng(V, Look)));
-paint1(Ws, {ok, {action, Node, Hue}}, V) ->
-    style(Ws, Node, action_style(V, Hue)),
-    wse:set(Ws, Node, "textContent", case V of 0 -> "off"; _ -> "ON" end);
-paint1(Ws, {ok, {dial, Needle, _S, Out, Look}}, V) ->
-    style(Ws, Needle, needle_style(V, Look)),
-    wse:set(Ws, Out, "textContent", lists:flatten(eng(V, Look)));
-paint1(Ws, {ok, {value, Node, Look}}, V) ->
-    wse:set(Ws, Node, "textContent", lists:flatten(eng(V, Look)));
-%% An input's field is left alone while it is being typed in, same reasoning as
-%% the slider: csp owning it would fight the hand.
-paint1(_Ws, {ok, {invalue, _Node}}, _V) ->
-    ok;
-%% A plot channel's number, in engineering units when the annotation gave enough
-%% to work them out. The beam is drawn on the tick, not here.
-paint1(Ws, {ok, {plotval, Node, M}}, V) ->
-    wse:set(Ws, Node, "textContent", lists:flatten(eng(V, M)));
-paint1(Ws, {ok, {pixel, Node}}, V) ->
-    style(Ws, Node, [?PIXEL, "background:", rgb565(V)]);
-%% A slider is an INPUT: csp owning the value would fight the drag, so only the
-%% readout follows. The control itself is left where the hand put it.
-paint1(Ws, {ok, {slider, _S, Out, Look}}, V) ->
-    wse:set(Ws, Out, "textContent", lists:flatten(eng(V, Look)));
-paint1(_Ws, _, _V) ->
-    ok.
-
-label(0) -> "0";
-label(_) -> "1".
-
-%% wse encodes a plain Erlang list as a JSON ARRAY, and only a flat string as a
-%% string -- so an iolist handed to setStyle arrives as [["..."],["..."]] and the
-%% style is silently dropped. Everything built up from pieces goes through here.
-style(Ws, Node, IoList) ->
-    wse:setStyle(Ws, Node, lists:flatten(IoList)).
-
-%% One column per tick, drawn incrementally: two fillRects per trace beats
-%% redrawing the canvas, and cast/4 does not wait for the browser to answer.
-draw(Ws, S) ->
+%% One column per tick, drawn incrementally: a dot per trace beats redrawing
+%% the whole trace.
+draw(U, S) ->
     X = maps:get(x, S),
-    Ctx = maps:get(ctx, S),
+    Trace = maps:get(trace, S),
     Last = maps:get(last, S),
     Ms = maps:get(period, S, ?PERIOD),
-    Plots = [plot_tick(Ws, G, Last, Ms) || G <- maps:get(plots, S)],
-    if Ctx =:= undefined ->                 % trace=off on `*'
+    Plots = [plot_tick(U, G, Last, Ms) || G <- maps:get(plots, S)],
+    if Trace =:= none ->                    % trace=off on `*'
 	    S#{plots := Plots};
        X >= ?TRACE_W ->
 	    %% wrap, right of the labels
-	    wse:cast(Ws, Ctx, "clearRect", [?GUTTER, 0, ?TRACE_W, 4096]),
-	    trace_column(Ws, S#{x := 0, plots := Plots});
+	    ui(U, trace_clear, [Trace]),
+	    trace_column(U, S#{x := 0, plots := Plots});
        true ->
-	    trace_column(Ws, S#{plots := Plots})
+	    trace_column(U, S#{plots := Plots})
     end.
 
-trace_column(Ws, S = #{x := X, ctx := Ctx, last := Last}) ->
+trace_column(U, S = #{x := X, trace := Trace, last := Last}) ->
     {_, Items} =
 	lists:foldl(
 	  fun({Name, Kind, Look}, {Row, Acc}) ->
@@ -2041,24 +1333,22 @@ trace_column(Ws, S = #{x := X, ctx := Ctx, last := Last}) ->
 		  {Y, Col} = sample(Row * ?ROW_H + 4, Kind, V, Look),
 		  {Row + 1, Acc ++ [?GUTTER + X, Y, Col]}
 	  end, {0, []}, maps:get(traces, S)),
-    wse:cast(Ws, maps:get(paint, S), "call", [null, Ctx, wse:array(Items)]),
+    ui(U, trace_column, [Trace, Items]),
     S#{x := X + ?STEP}.
 
 %% The beam moves on the TICK, like the trace and for the same reason: csp dumps
 %% only what changed, so a plot driven by dumps stops the moment the program
 %% settles -- and a settled XY reading is still a reading. Drawing here also
 %% means the afterglow decays in wall time, which is what makes it read as one.
-plot_tick(Ws, G = #{x := undefined}, Last, Ms) ->
+plot_tick(U, G = #{x := undefined}, Last, Ms) ->
     %% No x channel, so the beam sweeps: time along the bottom. See pick_x/3.
     Sw = maps:get(sweep, G),
-    G1 = cast_plot(Ws, G, ?PAD + (Sw rem (?PLOT_W - 2 * ?PAD)), Last, Ms),
+    G1 = cast_plot(U, G, ?PAD + (Sw rem (?PLOT_W - 2 * ?PAD)), Last, Ms),
     G1#{sweep := Sw + 2};
-plot_tick(Ws, G = #{x := X}, Last, Ms) ->
-    cast_plot(Ws, G, px(val(X, Last), X), Last, Ms).
+plot_tick(U, G = #{x := X}, Last, Ms) ->
+    cast_plot(U, G, px(val(X, Last), X), Last, Ms).
 
-cast_plot(Ws, G = #{ctx := Ctx, plot := Plot, ys := Ys, persist := P,
-		    prev := Prev, round := Rnd, clip := Clip, beam := Beam,
-		    dot := Dot, glow := Glow, step := Step}, Px, Last, Ms) ->
+cast_plot(U, G = #{ys := Ys, persist := P, prev := Prev}, Px, Last, Ms) ->
     {Items, Prev1} =
 	lists:foldl(
 	  fun(M, {Acc, Pm}) ->
@@ -2068,9 +1358,7 @@ cast_plot(Ws, G = #{ctx := Ctx, plot := Plot, ys := Ys, persist := P,
 		  {Acc ++ [X0, Y0, Px, Py, maps:get(colour, M)],
 		   Pm#{Name => {Px, Py}}}
 	  end, {[], Prev}, Ys),
-    wse:cast(Ws, Plot, "call",
-	     [null, Ctx, ?PLOT_W, ?PLOT_W, keep(P, Ms), Rnd, Clip, Beam, Dot,
-	      Glow, Step, wse:array(Items)]),
+    ui(U, plot, [G, keep(P, Ms), Items]),
     G#{prev := Prev1}.
 
 %% Where to draw the segment from, or nowhere.
@@ -2112,7 +1400,8 @@ sample(Top, _Kind, V, #{colour := {On, _Off}}) ->
 %%% -------------------------------------------------------------------- files
 
 available(Current) ->
-    Found = lists:append([csp_in(demo_dir()), csp_in(examples_dir())]),
+    Found = lists:append([csp_in(D) || D <- lists:usort([demo_dir(), work_dir()])]
+			 ++ [csp_in(examples_dir())]),
     lists:usort([Current | Found]).
 
 csp_in(Dir) ->
@@ -2135,22 +1424,30 @@ default_file() ->
 	false -> hd(available(F))
     end.
 
-text(Ws, Root, Str) ->
-    P = wse:createElement(Ws, "pre"),
-    wse:setStyle(Ws, P, "color:#e77;font:13px monospace"),
-    wse:appendChild(Ws, P, wse:createTextNode(Ws, lists:flatten(Str))),
-    wse:appendChild(Ws, Root, P).
-
 %%% -------------------------------------------------------------------- paths
 
-%% candid's own files are found from where its beam is, candyspeak's (the
-%% examples, csp, the manual) from where csp_tools' are -- ERL_LIBS or -pa
-%% puts both on the path. Overridable, because when it does not hold the
-%% failure is an enoent on a path nobody typed.
+%% candid's own files are found from where its beam is -- priv/, where
+%% priv/demo is a link to demo/ in a checkout and the copy in a packaged
+%% system -- candyspeak's (the examples, csp, the manual) from csp_tools:dir/0.
+%% Overridable, because when it does not hold the failure is an enoent on a
+%% path nobody typed.
 demo_dir() ->
     case os:getenv("CANDID_DEMO") of
-	false -> filename:join(base(), "demo");
+	false -> filename:join(priv_dir(), "demo");
 	Dir   -> Dir
+    end.
+
+%% Where a new program goes -- the chat's: demo/ when it can be written, and
+%% ~/candid otherwise, which is what a packaged system (an AppImage is read
+%% only) gets.
+work_dir() ->
+    D = demo_dir(),
+    case file:read_file_info(D) of
+	{ok, #file_info{access = read_write}} -> D;
+	_ ->
+	    W = filename:join(os:getenv("HOME", "."), "candid"),
+	    ok = filelib:ensure_dir(filename:join(W, "x")),
+	    W
     end.
 
 examples_dir() -> filename:join(root(), "examples").
@@ -2166,23 +1463,14 @@ csp_exe() ->
 	false -> error({csp_not_found, Exe, "set CSP_EXE to the csp binary"})
     end.
 
-%% wse's priv/, taken from where its beam actually is, so the aliased scripts
-%% are always the ones belonging to the wse serving the websocket.
-wse_priv() ->
-    filename:join(filename:dirname(
-		    filename:dirname(filename:absname(code:which(wse)))),
-		  "priv").
-
 %% absname first: with a relative -pa, code:which/1 answers a relative path
 %% and every dirname above would climb out of the wrong tree.
 base() ->
     filename:dirname(filename:dirname(filename:absname(code:which(?MODULE)))).
 
-%% candyspeak's tree: csp_tools builds into its top-level ebin/.
+%% candyspeak's files: the tree's, or what came along with csp_tools.
 root() ->
     case os:getenv("CANDYSPEAK") of
-	false ->
-	    filename:dirname(filename:dirname(
-			       filename:absname(code:which(candyspeak))));
-	Dir -> Dir
+	false -> csp_tools:dir();
+	Dir   -> Dir
     end.
