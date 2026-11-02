@@ -1,0 +1,5 @@
+test/wx.out
+candid.AppDir/
+*.AppImage
+tmpdist/
+*.dmg

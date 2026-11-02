@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff5fa2"/>
+      <stop offset="1" stop-color="#7a3cff"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#bg)"/>
+  <path d="M60 8h136a52 52 0 0 1 52 52v20Q128 120 8 80V60A52 52 0 0 1 60 8z"
+        fill="url(#gloss)"/>
+  <g fill="none" stroke="#fff" stroke-width="10" stroke-linecap="round"
+     stroke-linejoin="round">
+    <path d="M38 78V40h38"/><path d="M180 40h38v38"/>
+    <path d="M218 178v38h-38"/><path d="M76 216H38v-38"/>
+  </g>
+  <circle cx="200" cy="58" r="0"/>
+  <g stroke="#fff" stroke-width="9" stroke-linecap="round" fill="none">
+    <line x1="64" y1="78" x2="64" y2="178"/>
+    <line x1="192" y1="78" x2="192" y2="178"/>
+    <!-- rung 1: NO contact, coil -->
+    <path d="M64 104h22M104 104h34M178 104h14"/>
+    <line x1="86" y1="88" x2="86" y2="120"/>
+    <line x1="104" y1="88" x2="104" y2="120"/>
+    <path d="M150 88Q136 104 150 120"/>
+    <path d="M170 88Q184 104 170 120"/>
+    <!-- rung 2: NC contact, coil -->
+    <path d="M64 152h22M104 152h34M178 152h14"/>
+    <line x1="86" y1="136" x2="86" y2="168"/>
+    <line x1="104" y1="136" x2="104" y2="168"/>
+    <line x1="80" y1="168" x2="110" y2="136" stroke-width="7"/>
+    <path d="M150 136Q136 152 150 168"/>
+    <path d="M170 136Q184 152 170 168"/>
+  </g>
+  <!-- energized coil = candy -->
+  <circle cx="160" cy="104" r="9" fill="#ffe14d"/>
+  <!-- REC dot -->
+  <circle cx="204" cy="60" r="8" fill="#ff2d55" stroke="#fff" stroke-width="3"/>
+</svg>
