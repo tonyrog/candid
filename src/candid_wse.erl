@@ -12,10 +12,11 @@
 
 -module(candid_wse).
 
--export([start/2, code_view/0, chat_view/0]).
+-export([start/2, code_view/0, chat_view/0, log_view/0]).
 -export([clear/2, message/3, chooser/3, panel/3, event/2]).
 -export([status/3, trace_view/3, theme/2, view_buttons/4, mode/3]).
 -export([paint/3, trace_clear/2, trace_column/3, plot/4]).
+-export([dock_pane/3, dock_show/3]).                % the log's and the chat's
 
 -include("candid.hrl").
 
@@ -76,9 +77,69 @@ ensure_inets() ->
 	Err                           -> Err
     end.
 
-%% Who draws the code view and the chat pane here.
+%% Who draws the code view, the chat pane and the log here.
 code_view() -> csp_code_wse.
 chat_view() -> csp_chat_wse.
+log_view() -> candid_log_wse.
+
+%%% ------------------------------------------------------------ the dock
+%%%
+%%% The log on the left, the chat on the right, each with its title and a
+%%% close, along the bottom of the page; the dock is shown while either is,
+%%% and the page gets room beneath for it. Hung off document.body, so a
+%%% rebuild of the panel leaves it standing. Each pane is made by its own
+%%% process, so the dock is found or made in the browser, by its id.
+
+-define(PANE, "flex:1;min-width:0;flex-direction:column;background:#1b1b1b;"
+	"color:#ddd;font:13px monospace;border:1px solid #333;").
+
+%% A pane in the dock, hidden: {Pane, Close} -- Close the event its close
+%% button sends.
+dock_pane(Ws, Title, Where) ->
+    Box = wse:createElement(Ws, "div"),
+    wse:setStyle(Ws, Box, ?PANE ++ "display:none"),
+    Head = el(Ws, Box, "div", "display:flex;align-items:center;gap:8px;"
+	      "padding:4px 8px;border-bottom:1px solid #333"),
+    Title1 = el(Ws, Head, "span", "flex:1;color:#9cf"),
+    wse:appendChild(Ws, Title1, wse:createTextNode(Ws, Title)),
+    {ok, Close} = wse:create_event(Ws),
+    X = el(Ws, Head, "button", "font:12px monospace"),
+    wse:appendChild(Ws, X, wse:createTextNode(Ws, "close")),
+    wse:set(Ws, X, "onclick", wse:newf(Ws, "", "{ Wse.notify(" ++
+					     integer_to_list(Close) ++
+					     ", 'x'); }")),
+    Attach = wse:newf(Ws, "e, left",
+		      "{ var d = document.getElementById('candid_dock');"
+		      " if (!d) { d = document.createElement('div');"
+		      " d.id = 'candid_dock'; d.style.cssText = '"
+		      "position:fixed;left:0;right:0;bottom:0;height:35vh;"
+		      "z-index:9;display:none;gap:4px;padding:2px;"
+		      "background:#111;border-top:1px solid #444';"
+		      " document.body.appendChild(d); }"
+		      " if (left) d.insertBefore(e, d.firstChild);"
+		      " else d.appendChild(e); }"),
+    wse:cast(Ws, Attach, "call", [null, Box, Where =:= left]),
+    {Box, Close}.
+
+dock_show(Ws, Box, On) ->
+    wse:setStyle(Ws, Box, ?PANE ++ case On of
+				       true -> "display:flex";
+				       false -> "display:none"
+				   end),
+    Fix = wse:newf(Ws, "",
+		   "{ var d = document.getElementById('candid_dock');"
+		   " var on = false;"
+		   " for (var i = 0; i < d.children.length; i++)"
+		   " if (d.children[i].style.display != 'none') on = true;"
+		   " d.style.display = on ? 'flex' : 'none';"
+		   " document.body.style.paddingBottom = on ? '36vh' : ''; }"),
+    wse:cast(Ws, Fix, "call", [null]).
+
+el(Ws, Parent, Tag, Style) ->
+    E = wse:createElement(Ws, Tag),
+    wse:setStyle(Ws, E, Style),
+    wse:appendChild(Ws, Parent, E),
+    E.
 
 %%% ------------------------------------------------------------ the page
 
@@ -116,7 +177,7 @@ panel(Ws, Root, #{rows := Rows, pixels := Pixels, plots := Plots0,
     Left = box(Ws, Main, "flex:none;overflow:auto;padding-right:8px"),
     Right = box(Ws, Main, "flex:1;min-width:0;overflow:auto"),
     TraceBox = box(Ws, Root, ?TRACE_BOX "display:none"),
-    RowNodes = [{Name, row(Ws, Left, W, Look)} || {W = {_, Name, _}, Look} <- Rows],
+    RowNodes = lists:append([row_nodes(Ws, Left, R) || R <- Rows]),
     PixNodes = strip(Ws, Left, Pixels),
     {Plots, PlotNodes} = plot_panels(Ws, Left, Plots0),
     Trace = canvas(Ws, TraceBox, Traces),
@@ -291,6 +352,10 @@ runstep(Ws, Bar, Spec = #{views := Vs, chat := Chat}) ->
 	    wse:appendChild(Ws, Wrap, L),
 	    Mk("chat", "chat=toggle")
 	end,
+    Gap = wse:createElement(Ws, "span"),
+    wse:setStyle(Ws, Gap, "margin-left:16px"),
+    wse:appendChild(Ws, Wrap, Gap),
+    Mk("log", "log=toggle"),
     wse:appendChild(Ws, Bar, Wrap),
     #{event => Id, run => RunB, pause => PauseB, one => OneB,
       views => maps:from_list(Views)}.
@@ -378,6 +443,50 @@ row(Ws, Root, {Kind, Name, _W}, Look) ->
 	   end,
     wse:appendChild(Ws, Root, Row),
     Node.
+
+row_nodes(Ws, Left, {keypad, Pad}) -> keypad(Ws, Left, Pad);
+row_nodes(Ws, Left, {group, G}) -> group(Ws, Left, G);
+row_nodes(Ws, Left, {W = {_, Name, _}, Look}) -> [{Name, row(Ws, Left, W, Look)}].
+
+%% A group with no kind of its own: its name, and under it the members'
+%% rows, drawn as they would be anyway, inside a rule at the left.
+group(Ws, Root, #{label := Label, rows := Rows}) ->
+    Box = wse:createElement(Ws, "div"),
+    wse:setStyle(Ws, Box, "margin:10px 0 6px 0;padding-left:8px;"
+		 "border-left:2px solid #444"),
+    H = wse:createElement(Ws, "div"),
+    wse:setStyle(Ws, H, "color:#8ab;font:13px monospace;margin-bottom:2px"),
+    wse:appendChild(Ws, H, wse:createTextNode(Ws, Label)),
+    wse:appendChild(Ws, Box, H),
+    Nodes = [{Name, row(Ws, Box, W, Look)} || {W = {_, Name, _}, Look} <- Rows],
+    wse:appendChild(Ws, Root, Box),
+    Nodes.
+
+%% A keypad: one row, its label, then the keys in a grid of `cols' columns,
+%% each one a push or a toggle as it is declared, named by its label and lit
+%% while it is away from rest.
+keypad(Ws, Root, #{label := Label, cols := Cols, keys := Keys}) ->
+    Row = wse:createElement(Ws, "div"),
+    wse:setStyle(Ws, Row, "margin:6px 0;font:14px monospace"),
+    L = wse:createElement(Ws, "span"),
+    wse:setStyle(Ws, L, "display:inline-block;width:110px;color:#ccc;"
+		 "vertical-align:top"),
+    wse:appendChild(Ws, L, wse:createTextNode(Ws, Label)),
+    wse:appendChild(Ws, Row, L),
+    Grid = wse:createElement(Ws, "span"),
+    style(Ws, Grid, ["display:inline-grid;gap:4px;grid-template-columns:repeat(",
+		     integer_to_list(Cols), ",auto)"]),
+    wse:appendChild(Ws, Row, Grid),
+    Nodes = [begin
+		 {switch, B, Hue, Idle} = case Kind of
+					      push   -> push(Ws, Grid, Name, Look);
+					      toggle -> switch(Ws, Grid, Name, Look)
+					  end,
+		 wse:set(Ws, B, "textContent", maps:get(label, Look)),
+		 {Name, {key, B, Hue, Idle}}
+	     end || {{Kind, Name, _}, Look} <- Keys],
+    wse:appendChild(Ws, Root, Row),
+    Nodes.
 
 %% An input's value has to travel with the name, so the notify carries
 %% "Name=Value" and the loop splits on the first '='. A switch sends the bare
@@ -831,6 +940,14 @@ paint1(Ws, {ok, {switch, Node, {On, _Off}, Idle}}, V) ->
 			 false -> ["background:", On, ";color:#111;font-weight:bold"]
 		     end]),
     wse:set(Ws, Node, "textContent", label(V));
+%% A key keeps its name and only lights.
+paint1(Ws, {ok, {key, Node, {On, _Off}, Idle}}, V) ->
+    style(Ws, Node, ["width:60px;padding:4px;font:14px monospace;"
+		     "border:1px solid #555;",
+		     case V =:= Idle of
+			 true -> "background:#333;color:#eee";
+			 false -> ["background:", On, ";color:#111;font-weight:bold"]
+		     end]);
 paint1(Ws, {ok, {meter, Bar, Out, Look = #{colour := {On, _}}}}, V) ->
     Pct = trunc(100 * candid:frac(V, Look)),
     style(Ws, Bar, io_lib:format("display:block;height:100%;"

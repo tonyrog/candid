@@ -391,7 +391,7 @@ why(Error) ->
 
 model(undefined, _A) -> undefined;
 model(V0, {error, Why}) ->
-    V = V0#{trace := none, at := none},
+    V = V0#{trace := none, at := none, look := none},
     answer(V, "bad", Why), V;
 model(V, {check, M, {found, _, _}}) ->
     answer(V, "ok", "the model runs." ++ free_text(M)), V;
@@ -407,21 +407,21 @@ model(V, {solve, Goal, _K, M, {found, At, Rows}}) ->
 %% No trace, and a proof there never is one: by the rules alone with
 %% 0-induction, by the history that leads up to it with more.
 model(V0, {solve, Goal, _K, _M, {proved, 0}}) ->
-    V = V0#{trace := none, at := none},
+    V = V0#{trace := none, at := none, look := none},
     answer(V, "ok", "never: " ++ Goal ++ " -- no step can lead into it, "
 	   "whatever came before (proved by 0-induction)"), V;
 model(V0, {solve, Goal, _K, _M, {proved, N}}) ->
-    V = V0#{trace := none, at := none},
+    V = V0#{trace := none, at := none, look := none},
     answer(V, "ok",
 	   lists:flatten(io_lib:format("never: ~s -- no run reaches it "
 				       "(proved by ~w-induction)", [Goal, N]))), V;
 model(V0, {solve, Goal, K, _M, {none, _}}) ->
-    V = V0#{trace := none, at := none},
+    V = V0#{trace := none, at := none, look := none},
     answer(V, "bad",
 	   lists:flatten(io_lib:format("not reachable within ~w steps, and "
 				       "not proved for ever: ~s", [K, Goal]))), V;
 model(V0, {solve, _Goal, _K, _M, no_transitions}) ->
-    V = V0#{trace := none, at := none},
+    V = V0#{trace := none, at := none, look := none},
     answer(V, "bad", no_transitions()), V;
 model(V, {_, _, {error, Out}}) ->
     answer(V, "bad", "varp: " ++ Out), V;

@@ -25,6 +25,7 @@ handle it works on, `U = {Module, Handle}`:
 | the panel       | `candid_wse`    | `candid_wx`    | `candid`   |
 | the code view   | `csp_code_wse`  | `csp_code_wx`  | `csp_code` |
 | the chat        | `csp_chat_wse`  | `csp_chat_wx`  | `csp_chat` |
+| the log         | `candid_log_wse`| `candid_log_wx`| `candid_log`|
 
 What the person does comes back as messages -- wse's notifies, wx's events --
 and `Module:event/2` reads them into what the core acts on: `{pick, File}`,

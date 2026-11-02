@@ -10,6 +10,7 @@
 
 -export([run/0]).
 -export([logger/1]).
+-export([answer/5]).                  % the code view's ui in a test
 
 -define(SETTLE, 600).
 
@@ -136,6 +137,10 @@ run() ->
     %% 6k. label, hidden, color, unit, scale, min and max mean the same thing
     %%     on every widget that can show them.
     look_check(),
+
+    %% 6l. the log: what candyspeak says of a file it cannot parse, and what
+    %%     csp says of a set it refuses.
+    log_check(),
 
     %% 7. a program with no inputs at all still runs -- traffic.csp is driven
     %%    by its own timer, so the lamps must change with nobody touching
@@ -409,6 +414,7 @@ look_check() ->
 	   {Get("Level", min), Get("Level", max)} =:= {0, 255},
 	   {Get("Swing", min), Get("Swing", max)}),
     pullup_check(),
+    keypad_check(),
     Eng = lists:flatten(candid:eng(215, maps:get("Temp", L))),
     expect("scale= and unit= on a dial, not only on a plot",
 	   Eng =:= "215  21.500 \x{b0}C", Eng),
@@ -833,7 +839,24 @@ prove_check(Sh) ->
 	   Ru),
     Rf = Ask("Yellow && B1"),
     expect("prove: a goal that is reached has its trace",
-	   element(1, Rf) =:= found andalso element(2, Rf) =:= 1, Rf).
+	   element(1, Rf) =:= found andalso element(2, Rf) =:= 1, Rf),
+    %% One hand on the keys: with the count assumed, two at once never is.
+    {ok, Src} = file:read_file(F),
+    Fa = "/tmp/csp_varp_prove_card.csp",
+    ok = file:write_file(Fa, [Src, "#annotate varp assume \"[LTE 1](B1, B2, B3)\"\n"]),
+    {ok, Ma} = candyspeak_varp:model(Fa, [{reach, "B1 && B2"}]),
+    Rc = candyspeak_varp:prove(Ma, "--property " ++ maps:get(name, Ma) ++ "_reach",
+			       10, 30, Sh),
+    expect("prove: [LTE 1](B1, B2, B3) assumed, B1 && B2 never",
+	   Rc =:= {proved, 0}, Rc),
+    {ok, Mb} = candyspeak_varp:model(F, [{reach, "B1 && B2"}]),
+    Rb = candyspeak_varp:prove(Mb, "--property " ++ maps:get(name, Mb) ++ "_reach",
+			       10, 30, Sh),
+    expect("...and without it, both at once is a run", element(1, Rb) =:= found, Rb),
+    ok = file:write_file(Fa, [Src, "#annotate varp assume \"[LTE 1](B1, Nope)\"\n"]),
+    Rn = candyspeak_varp:model(Fa, []),
+    expect("a count over a name the model lacks is an error",
+	   element(1, Rn) =:= error, Rn).
 
 %% The model view's side of candyspeak_varp: the question replaces the
 %% source's reach, varp's printed trace reads back as data, and -- when varp
@@ -954,6 +977,12 @@ timer_check(Sh) ->
 	   maps:get({timeout, "T"}, Lv) =:= 1 andalso maps:get("X", Lv) =:= 1
 	   andalso string:find(Lt, "step 1 -> 2:") =/= nomatch andalso
 	   string:find(Lt, "X=2") =/= nomatch, {Lv, Lt}),
+    %% A solve with no trace after one with: the cycle walked in the old
+    %% trace goes with it, or the next paint looks for it there.
+    Vn = csp_code:model(Vt#{ui => {?MODULE, ui}, h => h, at => none},
+			{solve, "X == 9", 4, Mt, {proved, 0}}),
+    expect("no trace, no cycle to walk", maps:get(look, Vn) =:= none,
+	   maps:get(look, Vn)),
     RE = Ask("E", 4),
     expect("timer: elapsed() is read, not guessed",
 	   element(1, RE) =:= found andalso element(2, RE) =:= 1, RE).
@@ -1544,15 +1573,110 @@ latch_file() ->
     case filelib:is_regular(F) of true -> F; false -> "demo/gate.csp" end.
 
 %% The chooser's event is created first, before any switch.
+%% The chooser's: the first event after its select -- the log's pane makes
+%% events of its own, in its own process, before or after.
 first_event() ->
+    After = lists:dropwhile(fun(X) -> X =/= "createElement select" end,
+			    calls()),
     [Id | _] = [list_to_integer(string:trim(string:prefix(X, "event ")))
-		|| X <- calls(), lists:prefix("event ", X)],
+		|| X <- After, lists:prefix("event ", X)],
     Id.
+
+log_check() ->
+    Bad = "/tmp/csp_log_bad.csp",
+    ok = file:write_file(Bad, "#digital A in 2\nA = = 1\n"),
+    flush(),
+    P1 = track_panel(spawn(fun() -> candid:run(fake_ws, "panel", Bad) end)),
+    timer:sleep(?SETTLE),
+    Said = [X || X <- calls(), lists:prefix("createTextNode", X)],
+    expect("a parse error is in the log, its token as written",
+	   lists:member("createTextNode " ++ Bad ++
+			":2: syntax error before: '='", Said), Said),
+    P1 ! stop,
+    Good = "/tmp/csp_log_good.csp",
+    ok = file:write_file(Good, "#digital A in 2\n#digital L out 8\nL = A\n"),
+    P2 = track_panel(spawn(fun() -> candid:run(fake_ws, "panel", Good) end)),
+    timer:sleep(?SETTLE),
+    P2 ! {notify, 0, local, "Nope=1"},
+    timer:sleep(?SETTLE),
+    Csp = [X || X <- calls(), string:find(X, "Nope") =/= nomatch],
+    expect("what csp says of a set goes to the log",
+	   lists:member("createTextNode Error: variable Nope is not declared",
+			Csp), Csp),
+    P2 ! stop,
+    timer:sleep(300).
 
 %% One batched call per tick, not one fillRect per trace: the column is handed
 %% to a painter function created once in the browser. See candid:painter/1 --
 %% wse:set/4 is rsync, so the old shape cost a round trip per trace per tick.
 samples(L) -> [X || X <- L, lists:prefix("ASYNC cast call", X)].
+
+%% A keypad: the group's name lists the keys (buttons=) and the grid
+%% (layout=); group= on a key puts it in too, after the listed ones. The pad
+%% stands where its first key would have been, and the rest are rows.
+keypad_check() ->
+    F = "/tmp/csp_keypad_panel.csp",
+    ok = file:write_file(F, "#digital L out 13\n"
+			 "#digital K1 in pullup 2\n#digital K2 in pullup 3\n"
+			 "#digital K3 in pullup 4\n#digital K4 in pullup 5\n"
+			 "#annotate panel K4 group=keys\n"
+			 "#annotate panel keys kind=keypad buttons=\"K2,K1,K3\" "
+			 "layout=\"2x2\"\n"
+			 "#annotate panel L group=out\n"),
+    {ok, A} = candyspeak:parse(F),
+    R = candid:rows(A),
+    Shape = [case X of
+		 {keypad, #{id := Id, cols := C, keys := Ks}} ->
+		     {Id, C, [N || {{_, N, _}, _} <- Ks]};
+		 {{_, N, _}, _} -> N;
+		 {group, #{id := Id, rows := Rs}} ->
+		     {Id, [N || {{_, N, _}, _} <- Rs]}
+	     end || X <- R],
+    expect("kind=keypad: listed keys in order, group= after them, 2 columns, "
+	   "in the place of its first key; a group of no kind is rows",
+	   Shape =:= [{"out", ["L"]}, {"keys", 2, ["K2", "K1", "K3", "K4"]}],
+	   Shape),
+    %% A line copied and not changed: the button it was meant for has nothing.
+    G = "/tmp/csp_keypad_warn.csp",
+    ok = file:write_file(G, "#digital K1 in 2\n#digital K2 in 3\n"
+			 "#analog T:8 in 4\n#digital K4 in 5\n"
+			 "#annotate panel K1 kind=push group=kp\n"
+			 "#annotate panel K1 kind=push group=kp\n"
+			 "#annotate panel K2 color=red color=green\n"
+			 "#annotate panel K4 kind=push group=other\n"
+			 "#annotate panel kp kind=keypad "
+			 "buttons=\"K1,T,K4,K9\"\n"),
+    {ok, B} = candyspeak:parse(G),
+    Said = said(fun() -> candid:warn_annotations(B), candid:rows(B) end),
+    expect("said again, replaced, left out and why, listed in another group",
+	   Said =:= ["panel: line 6: K1: kind=push said again",
+		     "panel: line 6: K1: group=kp said again",
+		     "panel: line 7: K2: color=green replaces color=red",
+		     "panel: kp: T left out, it is a slider and a keypad "
+		     "takes a push or a toggle (kind=push)",
+		     "panel: kp: K9 left out, there is no such widget",
+		     "panel: kp: K4 is listed in buttons= but says group=other"],
+	   Said).
+
+%% What F prints, line by line.
+said(F) ->
+    Old = group_leader(),
+    Cap = spawn(fun() -> capture([]) end),
+    group_leader(Cap, self()),
+    try F() after group_leader(Old, self()) end,
+    Cap ! {done, self()},
+    receive {said, Text} -> string:lexemes(Text, "\n") end.
+
+capture(Acc) ->
+    receive
+	{io_request, From, Ref, {put_chars, Enc, Cs}} ->
+	    From ! {io_reply, Ref, ok},
+	    capture([unicode:characters_to_list(Cs, Enc) | Acc]);
+	{io_request, From, Ref, {put_chars, Enc, M, F, A}} ->
+	    From ! {io_reply, Ref, ok},
+	    capture([unicode:characters_to_list(apply(M, F, A), Enc) | Acc]);
+	{done, Pid} -> Pid ! {said, lists:append(lists:reverse(Acc))}
+    end.
 
 %% A button to ground (pullup) rests at 1: its look says so, and its push
 %% sends 0 while held and 1 on release; one pulled down is the other way.
@@ -1617,3 +1741,5 @@ logger(Acc) ->
 	{log, S}        -> logger([lists:flatten(S) | Acc]);
 	{calls, From}   -> From ! {calls, lists:reverse(Acc)}, logger(Acc)
     end.
+
+answer(ui, h, _Cls, _Text, _Trace) -> ok.

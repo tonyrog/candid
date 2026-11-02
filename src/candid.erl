@@ -26,8 +26,8 @@
 -export([run/2, run/3, run_ui/2, run_ui/3]).
 -export([frac/2, drivable/2, shorten/1, priv_dir/0]).  % for the renderers
 -export([widgets/1, rgb565/1, hue/1, label_of/1]).   % tests, introspection
--export([plots/1, eng/2, period/0, keep/2]).         % tests, introspection
--export([looks/1, colour/3]).                        % tests, introspection
+-export([plots/1, eng/2, period/0, keep/2, rows/1, rows/3]). % tests
+-export([looks/1, colour/3, warn_annotations/1]).    % tests, introspection
 
 -include("candid.hrl").
 -include_lib("kernel/include/file.hrl").
@@ -84,24 +84,34 @@ run_ui(U, Where) ->
     run_ui(U, Where, default_file()).
 
 run_ui(U, Where, File) ->
-    %% The chat, when ellm is there: its own process, so it lives through
-    %% every rebuild below.
+    %% The log and the chat, when ellm is there: processes of their own, so
+    %% they live through every rebuild below. The log first: it is this
+    %% process's group leader from here on, what it prints is kept.
+    Log = candid_log:start(log_ui(U)),
     Chat = csp_chat:start(chat_ui(U), #{root => root(), exe => csp_exe(),
 				       demo_dir => work_dir()}),
-    render(U, Where, File, Chat).
+    render(U, Where, File, #{chat => Chat, log => Log}).
 
 %% Also the restart path: picking another file in the chooser comes back here,
 %% so the whole panel is rebuilt from that file's declarations.
-render(U, Where, File, Chat) ->
+%% Side is #{chat, log}, the two that outlive it.
+render(U, Where, File, Side) ->
+    candid_log:add(maps:get(log, Side), note, "--- " ++ shorten(File)),
     Root = ui(U, clear, [Where]),
     case candyspeak:parse(File) of
 	{ok, Ast} ->
-	    build(U, Where, Root, File, widgets(Ast), Ast, Chat);
-	Error ->
-	    ui(U, chooser, [Root, bar(File, Chat)]),
-	    ui(U, message, [Root, io_lib:format("~n~p cannot be parsed: ~p",
-						[File, Error])])
+	    build(U, Where, Root, File, widgets(Ast), Ast, Side);
+	_Error ->
+	    %% candyspeak said why, on this process's output: in the log.
+	    {SelId, _Run} = ui(U, chooser, [Root, bar(File, Side)]),
+	    ui(U, message, [Root, io_lib:format("~n~s cannot be parsed, "
+						"the log says why",
+						[shorten(File)])]),
+	    candid_log:show(maps:get(log, Side)),
+	    wait_for_pick(U, Where, Side, SelId)
     end.
+
+side(S) -> maps:with([chat, log], S).
 
 %% The renderer's function F on its handle.
 ui({M, H}, F, A) -> apply(M, F, [H | A]).
@@ -109,9 +119,10 @@ ui({M, H}, F, A) -> apply(M, F, [H | A]).
 %% The code view's and the chat pane's renderers, on the same handle.
 code_ui({M, H}) -> {M:code_view(), H}.
 chat_ui({M, H}) -> {M:chat_view(), H}.
+log_ui({M, H}) -> {M:log_view(), H}.
 
 %% What the bar is built from.
-bar(File, Chat) ->
+bar(File, #{chat := Chat}) ->
     #{file => File, files => available(File), target => target_text(),
       period => period(), periods => ?PERIODS, views => ?VIEWS,
       chat => Chat =/= undefined}.
@@ -174,13 +185,25 @@ buffers(Ast) ->
 %% warned about rather than ignored, because a layout that silently drops a typo
 %% is how it stops matching the program.
 annotations(Ast) ->
+    ann_fold(fun(_Target, _Kvs, _Old, _Ln) -> ok end, Ast).
+
+%% The same, saying what is wrong with them: once per panel, from build/7.
+warn_annotations(Ast) ->
+    ann_fold(fun(Target, Kvs, Old, Ln) ->
+		     Kv = maps:from_list(Kvs),
+		     warn_unknown(Target, Kv, Ln),
+		     warn_star(Target, Kv, Ln),
+		     warn_repeat(Target, Kvs, Old, Ln)
+	     end, Ast),
+    ok.
+
+ann_fold(Warn, Ast) ->
     lists:foldl(
       fun({annotate, Ln, {'WORD', _, "panel"}, {'WORD', _, Target}, Items}, M) ->
-	      Kv = maps:from_list([{K, ann_value(V)}
-				   || {{'WORD', _, K}, V} <- Items]),
-	      warn_unknown(Target, Kv, Ln),
-	      warn_star(Target, Kv, Ln),
-	      maps:put(Target, maps:merge(maps:get(Target, M, #{}), Kv), M);
+	      Kvs = [{K, ann_value(V)} || {{'WORD', _, K}, V} <- Items],
+	      Old = maps:get(Target, M, #{}),
+	      Warn(Target, Kvs, Old, Ln),
+	      maps:put(Target, maps:merge(Old, maps:from_list(Kvs)), M);
 	 (_, M) -> M
       end, #{}, Ast).
 
@@ -201,11 +224,35 @@ ann_value(V)                 -> V.
 		   %% how the beam is drawn
 		   "beam", "dot", "glow", "line",
 		   %% a row in the logic trace, or on `*' the whole trace
-		   "trace"]).
+		   "trace",
+		   %% a keypad: its buttons and their grid, said on the group's own
+		   %% name, and on a button the group it belongs to
+		   "buttons", "layout", "group"]).
 
 %% Keys that are about ONE signal: said on `*' they would make every widget
 %% the same kind, or give them all one label. Never inherited from `*'.
--define(OWN_KEYS, ["kind", "label", "axis"]).
+-define(OWN_KEYS, ["kind", "label", "axis", "group"]).
+
+%% Said twice -- on one line, or on a line before -- is most likely a line
+%% copied and not changed: the signal it was meant for is left without it.
+warn_repeat(Target, Kvs, Old, Ln) ->
+    lists:foldl(
+      fun({K, V}, Seen) ->
+	      case maps:find(K, Seen) of
+		  {ok, V} ->
+		      io:format("panel: line ~w: ~s: ~s said again~n",
+				[Ln, Target, kv_text(K, V)]);
+		  {ok, V0} ->
+		      io:format("panel: line ~w: ~s: ~s replaces ~s~n",
+				[Ln, Target, kv_text(K, V), kv_text(K, V0)]);
+		  error -> ok
+	      end,
+	      Seen#{K => V}
+      end, Old, Kvs),
+    ok.
+
+kv_text(K, true) -> K;
+kv_text(K, V) -> K ++ "=" ++ to_text(V).
 
 warn_unknown(Target, Kv, Ln) ->
     case [K || K <- maps:keys(Kv), not lists:member(K, ?ANN_KEYS)] of
@@ -720,21 +767,134 @@ eng(V, #{scale := S, unit := U}) when S == 1 ->
 eng(V, #{scale := S, unit := U}) ->
     io_lib:format("~w  ~.3f ~s", [V, V * S, U]).
 
+%%% ---------------------------------------------------------------- groups
+%%%
+%%% Widgets that belong together, said on the group's own name:
+%%%
+%%%     #annotate panel K1 group=keys
+%%%     #annotate panel keys kind=keypad buttons="K1,K2,K3,K4" layout="2x2"
+%%%
+%%% buttons= gives the members and their order; group= on a widget puts it in
+%%% too, after the listed ones. The group's KIND says how it is drawn:
+%%%
+%%%     keypad  the members are keys -- buttons only, push or toggle -- in a
+%%%             grid, layout="RxC"; each named by its label, lit while held
+%%%     (none)  the members as their own rows, together under the group's name
+%%%
+%%% That one finger presses one key at a time is the model's to know, not the
+%%% panel's: `#annotate varp assume "[LTE 1](!K1, !K2, !K3, !K4)"'.
+-define(GROUP_KINDS, ["keypad"]).
+
+%% The rows the page shows: a widget, or a group in the place of its first
+%% member.
+rows(Ast) ->
+    rows([W || W <- widgets(Ast), element(1, W) =/= pixel, not is_plot(W)],
+	 looks(Ast), annotations(Ast)).
+
+rows(Rest, Looks, Ann) ->
+    Gs = groups(Rest, Ann),
+    Of = maps:from_list([{N, Id} || {Id, Ns} <- Gs, N <- Ns]),
+    {Out, _} =
+	lists:foldl(
+	  fun(W = {_, N, _}, {Acc, Done}) ->
+		  case maps:find(N, Of) of
+		      error -> {[{W, maps:get(N, Looks)} | Acc], Done};
+		      {ok, Id} ->
+			  case lists:member(Id, Done) of
+			      true  -> {Acc, Done};
+			      false -> {[group(Id, Gs, Rest, Looks, Ann) | Acc],
+					[Id | Done]}
+			  end
+		  end
+	  end, {[], []}, Rest),
+    lists:reverse(Out).
+
+%% [{Id, [Name]}]: every group named by buttons= or by a member's group=.
+groups(Rest, Ann) ->
+    Names = [N || {_, N, _} <- Rest],
+    Ids = lists:usort([T || {T, #{"buttons" := _}} <- maps:to_list(Ann)] ++
+		      [to_text(G) || N <- Names,
+				     G <- [maps:get("group", maps:get(N, Ann, #{}), none)],
+				     G =/= none]),
+    [{Id, members(Id, Rest, Ann)} || Id <- Ids].
+
+%% A keypad takes buttons only; a plain group anything that has a row.
+members(Id, Rest, Ann) ->
+    Kind = group_kind(Id, Ann),
+    Can = [N || {K, N, _} <- Rest,
+		Kind =/= "keypad" orelse K =:= push orelse K =:= toggle],
+    Listed = [string:trim(B) || B <- string:lexemes(
+				       to_text(maps:get("buttons",
+							maps:get(Id, Ann, #{}), "")),
+				       ",")],
+    [io:format("panel: ~s: ~s left out, ~s~n", [Id, B, why_out(B, Rest)])
+     || B <- Listed, not lists:member(B, Can)],
+    [io:format("panel: ~s: ~s is listed in buttons= but says group=~s~n",
+	       [Id, B, G])
+     || B <- Listed, G <- [to_text(maps:get("group", maps:get(B, Ann, #{}),
+					     Id))], G =/= Id],
+    Grouped = [N || N <- Can,
+		    to_text(maps:get("group", maps:get(N, Ann, #{}), none)) =:= Id],
+    [N || N <- Listed ++ (Grouped -- Listed), lists:member(N, Can)].
+
+why_out(B, Rest) ->
+    case lists:keyfind(B, 2, Rest) of
+	false -> "there is no such widget";
+	{K, _, _} -> io_lib:format("it is a ~w and a keypad takes a push or "
+				   "a toggle (kind=push)", [K])
+    end.
+
+group_kind(Id, Ann) ->
+    case maps:get("kind", maps:get(Id, Ann, #{}), none) of
+	none -> none;
+	K0 ->
+	    K = to_text(K0),
+	    case lists:member(K, ?GROUP_KINDS) of
+		true -> K;
+		false ->
+		    io:format("panel: ~s: kind=~s is not a kind of group (~s)~n",
+			      [Id, K, string:join(?GROUP_KINDS, ", ")]),
+		    none
+	    end
+    end.
+
+%% {keypad, #{id, label, cols, keys}} or {group, #{id, label, rows}}:
+%% layout="RxC" says a keypad's grid; without it the keys stand in one row.
+group(Id, Gs, Rest, Looks, Ann) ->
+    Kv = maps:get(Id, Ann, #{}),
+    {Id, Ns} = lists:keyfind(Id, 1, Gs),
+    Ms = [{W, maps:get(N, Looks)} || N <- Ns, W <- [lists:keyfind(N, 2, Rest)]],
+    Label = to_text(maps:get("label", Kv, Id)),
+    case group_kind(Id, Ann) of
+	"keypad" ->
+	    Cols = case string:lexemes(to_text(maps:get("layout", Kv, "")), "xX") of
+		       [_R, C] -> case string:to_integer(C) of
+				      {N, ""} when N > 0 -> N;
+				      _ -> length(Ns)
+				  end;
+		       _ -> length(Ns)
+		   end,
+	    {keypad, #{id => Id, label => Label, cols => Cols, keys => Ms}};
+	none ->
+	    {group, #{id => Id, label => Label, rows => Ms}}
+    end.
+
 %%% ---------------------------------------------------------------- rendering
 
-build(U, Where, Root, File, [], Ast, Chat) ->
+build(U, Where, Root, File, [], Ast, Side) ->
     %% Parsed fine, but nothing in it is a widget yet. Say which declarations
     %% it does have -- an empty panel otherwise looks like a failure.
-    {SelId, _Run} = ui(U, chooser, [Root, bar(File, Chat)]),
+    {SelId, _Run} = ui(U, chooser, [Root, bar(File, Side)]),
     ui(U, message, [Root, io_lib:format(
 			    "nothing to show in ~s.~n~n"
 			    "it declares: ~s~n~n"
 			    "widgets come from #digital, #analog and #field; "
 			    "variables and rules are not shown yet.",
 			    [shorten(File), kinds(Ast)])]),
-    wait_for_pick(U, Where, Chat, SelId);
-build(U, Where, Root, File, Widgets0, Ast, Chat) ->
-    {SelId, Run} = ui(U, chooser, [Root, bar(File, Chat)]),
+    wait_for_pick(U, Where, Side, SelId);
+build(U, Where, Root, File, Widgets0, Ast, Side = #{chat := Chat, log := Log}) ->
+    {SelId, Run} = ui(U, chooser, [Root, bar(File, Side)]),
+    warn_annotations(Ast),
     Ann = annotations(Ast),
     Rng = ranges(Ast),
     Looks = idle(looks(Widgets0, Ann, Rng), pullups(Ast)),
@@ -756,8 +916,7 @@ build(U, Where, Root, File, Widgets0, Ast, Chat) ->
     %% for a logic analyser underneath it.
     Ordered = [T || T = {_, N, _} <- Rest ++ Pixels ++ Plots,
 		    maps:get(trace, maps:get(N, Looks))],
-    P = ui(U, panel, [Root, #{rows => [{W, maps:get(N, Looks)}
-				       || W = {_, N, _} <- Rest],
+    P = ui(U, panel, [Root, #{rows => rows(Rest, Looks, Ann),
 			      pixels => [{N, maps:get(N, Looks)}
 					 || {_, N, _} <- Pixels],
 			      plots => plot_groups(Plots, Ann, Rng),
@@ -789,6 +948,7 @@ build(U, Where, Root, File, Widgets0, Ast, Chat) ->
 	   link_box => maps:get(link_box, P),
 	   file   => File,
 	   chat   => Chat,
+	   log    => Log,
 	   where  => Where},
     csp_chat:attach(Chat, chat_info(File)),
     loop(U, Link, start_mode(U, Link, S2)).
@@ -1033,14 +1193,18 @@ label_of(Name) ->
     end.
 
 %% Nothing to drive, so there is no csp and no tick -- just the chooser.
-wait_for_pick(U, Where, Chat, SelId) ->
+wait_for_pick(U, Where, Side, SelId) ->
     receive
 	stop -> ok;
 	Msg ->
 	    case event(U, #{sel => SelId}, Msg) of
-		{pick, File} -> render(U, Where, File, Chat);
+		{pick, File} -> render(U, Where, File, Side);
+		{bar, "log=toggle"} -> candid_log:toggle(maps:get(log, Side)),
+				       wait_for_pick(U, Where, Side, SelId);
+		{bar, "chat=toggle"} -> csp_chat:toggle(maps:get(chat, Side)),
+					wait_for_pick(U, Where, Side, SelId);
 		closed       -> ok;
-		_            -> wait_for_pick(U, Where, Chat, SelId)
+		_            -> wait_for_pick(U, Where, Side, SelId)
 	    end
     end.
 
@@ -1094,6 +1258,12 @@ loop(U, Link, S) ->
 
 	{csp_link, Text} ->
 	    show_link(U, S, Text),
+	    candid_log:add(maps:get(log, S), link, Text),
+	    loop(U, Link, S);
+
+	%% What csp says besides the dumps: an error after a set, Paused ...
+	{csp_out, Text} ->
+	    candid_log:add(maps:get(log, S), csp, Text),
 	    loop(U, Link, S);
 
 	%% A node's program, listed off its image: the panel is rebuilt from it,
@@ -1111,7 +1281,7 @@ loop(U, Link, S) ->
 		    ok = file:write_file(File, Bin),
 		    csp_link:close(Link),
 		    flush(),
-		    render(U, maps:get(where, S), File, maps:get(chat, S))
+		    render(U, maps:get(where, S), File, side(S))
 	    end;
 
 	%% csp ended, or the node went away. The panel stays: another target
@@ -1130,7 +1300,7 @@ loop(U, Link, S) ->
 		    From ! {Ref, Reply},
 		    csp_link:close(Link),
 		    flush(),
-		    render(U, maps:get(where, S), File, maps:get(chat, S));
+		    render(U, maps:get(where, S), File, side(S));
 		{control, Tag, Reply} ->
 		    From ! {Ref, Reply},
 		    loop(U, Link, control(U, Link, S, Tag));
@@ -1161,12 +1331,15 @@ ids(S) ->
 act_ui(U, Link, S, {pick, File}) ->
     csp_link:close(Link),
     flush(),
-    render(U, maps:get(where, S), File, maps:get(chat, S));
+    render(U, maps:get(where, S), File, side(S));
 %% run / pause / step, the target, the views: the bar.
 act_ui(U, Link, S, {bar, "target=" ++ Text}) ->
     {Link1, S1} = retarget(U, Link, S, Text),
     csp_chat:attach(maps:get(chat, S1), chat_info(maps:get(file, S1))),
     loop(U, Link1, S1);
+act_ui(U, Link, S, {bar, "log=toggle"}) ->
+    candid_log:toggle(maps:get(log, S)),
+    loop(U, Link, S);
 act_ui(U, Link, S, {bar, "chat=toggle"}) ->
     csp_chat:toggle(maps:get(chat, S)),
     loop(U, Link, S);

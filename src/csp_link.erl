@@ -12,6 +12,7 @@
 %%% the program /dump rom and /dump eeprom said it runs. The same messages come
 %%% back, without csp_fired, and the node is never sent /quit -- closing just
 %%% lets go of it. The owner also gets {csp_link, Text}, what is connected,
+%%% {csp_out, Line} for the rest of what a local csp prints,
 %%% and {csp_program, Text}: the node's program as source, listed off its image
 %%% and patch by csp_list -- what it runs, whatever file the panel had open.
 %%%
@@ -517,13 +518,28 @@ feed(Owner, [], Line) ->
     case string:find(Line, "{state,") of
 	nomatch ->
 	    case one_line(Line, ["{fired,", "{clock,"]) of
-		nomatch -> [];
+		nomatch -> said(Owner, Line), [];
 		F       -> emit(Owner, F), []
 	    end;
 	Rest -> hold(Owner, [Rest])
     end;
 feed(Owner, Buf, Line) ->
     hold(Owner, [strip(Line) | Buf]).
+
+%% Anything else csp prints goes to the owner as {csp_out, Line} -- an error
+%% after a set, Paused -- but not its prompts, nor the /commit every tick and
+%% its answer.
+said(Owner, Line) ->
+    case prompts(string:trim(Line)) of
+	""          -> ok;
+	"/commit"   -> ok;
+	"Committed" -> ok;
+	L           -> Owner ! {csp_out, L}
+    end.
+
+prompts("> " ++ L) -> prompts(string:trim(L, leading));
+prompts(">") -> "";
+prompts(L) -> L.
 
 one_line(_Line, []) -> nomatch;
 one_line(Line, [Tag | Tags]) ->

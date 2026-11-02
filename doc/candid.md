@@ -282,6 +282,30 @@ The same plot drawn as sharp logic levels instead of a glowing trace:
 
     #annotate panel xout kind=plot axis=x id=plot1 beam=1 dot=0 glow=off line=step persist=0.5
 
+## Groups and keypads
+
+Widgets that belong together are a group, said on the group's own name:
+
+    #annotate panel K1 group=keys
+    #annotate panel keys kind=keypad buttons="K1,K2,K3,K4" layout="2x2"
+
+`buttons=` lists the members in order; `group=` on a widget puts it in too,
+after the listed ones. The group stands where its first member would have
+been. Its `kind` says how it is drawn:
+
+| kind      | members              | drawn as                                        |
+|-----------|----------------------|-------------------------------------------------|
+| `keypad`  | buttons (push/toggle)| a grid, `layout="RxC"`; each key named by its `label`, lit while held |
+| (none)    | anything with a row  | their own rows, together under the group's name |
+
+That one hand presses one key at a time is the MODEL's to know, not the
+panel's: an assume says it to varp, as a count over the keys --
+
+    #annotate varp assume "[LTE 1](!K1, !K2, !K3, !K4)"
+
+(`!K1` because a button to ground is pressed at 0). Without it varp may press
+every key at once, and a trace that does is no run a person can make.
+
 ## The bar
 
 At the top are the program chooser (every `.csp` file in candid's `demo/`
@@ -531,10 +555,33 @@ A declaration inside a `#module` becomes one widget per object, named as csp
 dumps it. The Pixel module in `cpx_m.csp` gives ten pixels, `p0.P` to `p9.P`.
 Before this change it gave a single pixel `P` that nothing ever wrote.
 
+## The log
+
+`log` in the bar opens it in the DOCK along the bottom of the panel: the log
+on the left, the chat on the right, each with its `close`; the dock is there
+while either is. It keeps what would otherwise scroll past in a terminal:
+
+* candyspeak's parse errors, with the token as it is written
+  (`syntax error before: '='`, `... before: 'end of line'`) -- a file that
+  cannot be parsed opens the log by itself;
+* the panel's warnings about annotations (`panel: ...`, in amber): an
+  unknown key, a key said again or replaced -- most likely a line copied for
+  the next button and not changed -- and a keypad's button that is left out
+  (and why) or that says `group=` another group;
+* a line `--- file` each time the panel is built from a file;
+* what the link says: which csp or node it is connected to, and why not;
+* what csp itself prints besides the dumps: `Error: variable Nope is not
+  declared` after a set, `Paused ...` (errors in red). Its prompts, and the
+  `/commit` of every tick, are left out.
+
+The log is the panel process's group leader (candid_log), so everything the
+panel writes with io:format reaches it and the terminal both. It lives through
+a rebuild of the panel, like the chat; `clear` empties it, closing hides it.
+
 ## The chat
 
 With ellm (and the rester it talks through) on the code path, the bar has a
-`chat` button. It opens a pane on the right where a language model helps write,
+`chat` button. It opens a pane in the dock, on the right, where a language model helps write,
 read and debug the program -- with the same things at hand as you: the
 program shown (the node's own, listed off its image, when the panel runs a
 node), the values right now, the manual, the tree's `.csp` files, the
@@ -592,8 +639,7 @@ and `{candid, [{chat, off}]}` takes the button away.
 nothing in a program or its annotations changes. What differs is the drawing:
 
 * **The bar is two rows**: what runs and how (program, target, run, pause,
-  step, tick), then what is shown (trace, code, theme, chat). The chat is a
-  window of its own beside the panel.
+  step, tick), then what is shown (trace, code, theme, chat, log).
 * **Light** is the dark panel's lightness turned over with each hue kept, as
   the browser's css filter does it. The trace and the plots stay dark: they are
   screens.

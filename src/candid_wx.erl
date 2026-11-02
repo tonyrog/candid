@@ -25,19 +25,21 @@
 -include_lib("wx/include/wx.hrl").
 -include("candid.hrl").
 
--export([start/0, start/1, start0/0, code_view/0, chat_view/0]).
+-export([start/0, start/1, start0/0, code_view/0, chat_view/0, log_view/0]).
 -export([clear/2, message/3, chooser/3, panel/3, event/2]).
 -export([status/3, trace_view/3, theme/2, view_buttons/4, mode/3]).
 -export([paint/3, trace_clear/2, trace_column/3, plot/4]).
 -export([fg/3, bg/3, tc/2]).
 -export([colour/1, mix/3, font/1, label/2, relayout_up/1, canvas/4, redraw/3, register/3, register/4,
-	 forget/2, lookup/2, click/3, frame_box/2, text/4]).                          % csp_code_wx's
+	 forget/2, lookup/2, click/3, frame_box/2, text/4]).
+-export([dock_pane/4, dock_show/3]).                % the log's and the chat's                          % csp_code_wx's
 
 -define(BG,      {18, 18, 18}).
 -define(INK,     {221, 221, 221}).
 -define(DIM,     {136, 136, 136}).
 -define(LABEL_W, 110).
 -define(PIXEL,   22).
+-define(DOCK_H,  300).
 
 %%% ------------------------------------------------------------ starting
 
@@ -63,11 +65,17 @@ start(File) ->
 		  Wx = wx:new(),
 		  F = wxFrame:new(Wx, ?wxID_ANY, "candid", [{size, {1400, 900}}]),
 		  ok = wxFrame:connect(F, close_window),
-		  H = #{env => wx:get_env(), frame => F,
+		  %% The dock: the log's and the chat's panes, under the panel
+		  %% and outside what a rebuild tears down.
+		  Dock = wxPanel:new(F, [{size, {-1, ?DOCK_H}}]),
+		  wxWindow:setSizer(Dock, wxBoxSizer:new(?wxHORIZONTAL)),
+		  wxWindow:hide(Dock),
+		  H = #{env => wx:get_env(), frame => F, dock => Dock,
 			ids => ets:new(candid_wx, [set, public]),
 			font => wxFont:new(10, ?wxFONTFAMILY_TELETYPE,
 					   ?wxFONTSTYLE_NORMAL,
 					   ?wxFONTWEIGHT_NORMAL)},
+		  bg(H, Dock, ?BG),
 		  wxFrame:show(F),
 		  case File of
 		      default -> candid:run_ui({?MODULE, H}, F);
@@ -76,25 +84,67 @@ start(File) ->
 		  wx:destroy()
 	  end).
 
-%% Who draws the code view and the chat here.
+%% Who draws the code view, the chat and the log here.
 code_view() -> csp_code_wx.
 chat_view() -> csp_chat_wx.
+log_view() -> candid_log_wx.
 
 %%% ------------------------------------------------------------ the page
 
-%% The window emptied for a rebuild, and a fresh root to build in.
-clear(H = #{ids := Ids}, Frame) ->
+%% The window emptied for a rebuild, and a fresh root to build in. The dock
+%% stays.
+clear(H = #{ids := Ids, dock := Dock}, Frame) ->
     ets:delete_all_objects(Ids),
-    wxWindow:destroyChildren(Frame),
+    Fs = wxBoxSizer:new(?wxVERTICAL),
+    wxWindow:setSizer(Frame, Fs),
+    [wxWindow:destroy(W) || W <- wxWindow:getChildren(Frame),
+			    wxWindow:getId(W) =/= wxWindow:getId(Dock)],
     Root = wxPanel:new(Frame),
     bg(H, Root, ?BG),
     fg(H, Root, ?INK),
     wxWindow:setSizer(Root, wxBoxSizer:new(?wxVERTICAL)),
-    Fs = wxBoxSizer:new(?wxVERTICAL),
     wxSizer:add(Fs, Root, [{proportion, 1}, {flag, ?wxEXPAND}]),
-    wxWindow:setSizer(Frame, Fs),
+    wxSizer:add(Fs, Dock, [{flag, ?wxEXPAND}]),
     register(H, theme_root, Root),
     Root.
+
+%%% ------------------------------------------------------------ the dock
+%%%
+%%% The log on the left, the chat on the right, each with its title and a
+%%% close; the dock is shown while either is. Each pane is made by its own
+%%% process, whose callbacks send it Close.
+
+%% A pane in the dock, hidden: {Pane, Sizer} to fill.
+dock_pane(H = #{dock := Dock}, Title, Where, Close) ->
+    P = wxPanel:new(Dock),
+    bg(H, P, ?BG),
+    S = wxBoxSizer:new(?wxVERTICAL),
+    wxWindow:setSizer(P, S),
+    Head = wxBoxSizer:new(?wxHORIZONTAL),
+    wxSizer:add(Head, text(H, P, Title, {153, 204, 255}),
+		[{proportion, 1}, {flag, ?wxALIGN_CENTER_VERTICAL bor ?wxLEFT},
+		 {border, 4}]),
+    X = wxButton:new(P, ?wxID_ANY, [{label, "close"}]),
+    Pid = self(),
+    wxButton:connect(X, command_button_clicked,
+		     [{callback, fun(_E, _O) -> Pid ! Close end}]),
+    wxSizer:add(Head, X),
+    wxSizer:add(S, Head, [{flag, ?wxEXPAND bor ?wxALL}, {border, 2}]),
+    Opts = [{proportion, 1}, {flag, ?wxEXPAND bor ?wxALL}, {border, 2}],
+    case Where of
+	left  -> wxSizer:insert(wxWindow:getSizer(Dock), 0, P, Opts);
+	right -> wxSizer:add(wxWindow:getSizer(Dock), P, Opts)
+    end,
+    wxWindow:hide(P),
+    {P, S}.
+
+dock_show(#{dock := Dock, frame := F}, P, On) ->
+    wxWindow:show(P, [{show, On}]),
+    wxWindow:show(Dock, [{show, lists:any(fun wxWindow:isShown/1,
+					   wxWindow:getChildren(Dock))}]),
+    wxWindow:layout(Dock),
+    wxWindow:layout(F),
+    ok.
 
 message(H, Root, Str) ->
     T = text(H, Root, lists:flatten(Str), {238, 119, 119}),
@@ -165,6 +215,8 @@ chooser(H, Root, #{file := Current, files := Files, target := Target,
 		     wxButton:connect(B, command_button_clicked,
 				      [{userData, {bar, "chat=toggle"}}])
 		 end,
+    LogB = Add2(wxButton:new(Root, ?wxID_ANY, [{label, "log"}])),
+    wxButton:connect(LogB, command_button_clicked, [{userData, {bar, "log=toggle"}}]),
     wxSizer:add(wxWindow:getSizer(Root), Bar, [{flag, ?wxALL bor ?wxEXPAND},
 					       {border, 4}]),
     relayout(Root),
@@ -213,7 +265,7 @@ panel(H, Root, #{rows := Rows, pixels := Pixels, plots := Plots0,
     wxWindow:setMinSize(TraceBox, {-1, 260}),
     wxSizer:add(RS, TraceBox, [{flag, ?wxEXPAND bor ?wxTOP}, {border, 8}]),
     wxWindow:hide(TraceBox),
-    RowNodes = [{Name, row(H, Left, W, Look)} || {W = {_, Name, _}, Look} <- Rows],
+    RowNodes = lists:append([row_nodes(H, Left, R) || R <- Rows]),
     PixNodes = strip(H, Left, Pixels),
     {Plots, PlotNodes} = plot_panels(H, Left, Plots0),
     Trace = trace_canvas(H, TraceBox, Traces),
@@ -407,6 +459,38 @@ row(H, Left, {Kind, Name, _W}, Look) ->
 	   end,
     wxSizer:add(LS, Row, [{flag, ?wxALL}, {border, 4}]),
     Node.
+
+row_nodes(H, Left, {keypad, Pad}) -> keypad(H, Left, Pad);
+row_nodes(H, Left, {group, G}) -> group(H, Left, G);
+row_nodes(H, Left, {W = {_, Name, _}, Look}) -> [{Name, row(H, Left, W, Look)}].
+
+%% A group with no kind of its own: its name, and under it the members'
+%% rows as they would be anyway.
+group(H, Left, #{label := Label, rows := Rows}) ->
+    T = text(H, Left, Label, {136, 170, 187}),
+    wxSizer:add(wxWindow:getSizer(Left), T, [{flag, ?wxTOP bor ?wxLEFT}, {border, 6}]),
+    [{Name, row(H, Left, W, Look)} || {W = {_, Name, _}, Look} <- Rows].
+
+%% A keypad: its label, then the keys in a grid of `cols' columns, each a
+%% push or a toggle as it is declared, named by its label, lit while away
+%% from rest.
+keypad(H, Left, #{label := Label, cols := Cols, keys := Keys}) ->
+    Row = wxBoxSizer:new(?wxHORIZONTAL),
+    L = text(H, Left, Label, {204, 204, 204}),
+    wxWindow:setMinSize(L, {?LABEL_W, -1}),
+    wxSizer:add(Row, L, []),
+    Grid = wxGridSizer:new(0, Cols, 4, 4),
+    Nodes = [begin
+		 {switch, B, Hue, Idle} = case Kind of
+					      push   -> push(H, Left, Grid, Name, Look);
+					      toggle -> switch(H, Left, Grid, Name, Look)
+					  end,
+		 label(B, maps:get(label, Look)),
+		 {Name, {key, B, Hue, Idle}}
+	     end || {{Kind, Name, _}, Look} <- Keys],
+    wxSizer:add(Row, Grid, []),
+    wxSizer:add(wxWindow:getSizer(Left), Row, [{flag, ?wxALL}, {border, 4}]),
+    Nodes.
 
 %% A label in a frame of its own, the frame's colour being the mark: wx has
 %% no outline, so the mark is the panel round the text.
@@ -655,6 +739,15 @@ paint1(H, {ok, {switch, B, {On, _Off}, Idle}}, V) ->
 		 fg(H, B, {17, 17, 17})
     end,
     wxButton:setLabel(B, case V of 0 -> "0"; _ -> "1" end),
+    wxWindow:refresh(B);
+%% A key keeps its name and only lights.
+paint1(H, {ok, {key, B, {On, _Off}, Idle}}, V) ->
+    case V =:= Idle of
+	true  -> bg(H, B, {51, 51, 51}),
+		 fg(H, B, {238, 238, 238});
+	false -> bg(H, B, colour(On)),
+		 fg(H, B, {17, 17, 17})
+    end,
     wxWindow:refresh(B);
 paint1(_H, {ok, {meter, G, Out, Look}}, V) ->
     wxGauge:setValue(G, trunc(1000 * candid:frac(V, Look))),
