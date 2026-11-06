@@ -101,6 +101,9 @@ loop(S = #{ui := {M, _}, pane := Pane}) ->
 	{chat_note, Text} ->
 	    pui(S, say, [note, Text]),
 	    loop(S);
+	{chat_out, Text} ->
+	    pui(S, say, [console, Text]),
+	    loop(S);
 	{chat_made, File} ->
 	    loop(S#{made := [File | maps:get(made, S)]});
 	{chat_done, Msgs, New} ->
@@ -121,6 +124,12 @@ loop(S = #{ui := {M, _}, pane := Pane}) ->
     end.
 
 send(S, "") -> S;
+%% `//' is to the program itself, not to the model: a line for csp's
+%% prompt or the node's console, what it says back shown here.
+send(S = #{panel := Panel}, "//" ++ Line) when Panel =/= undefined ->
+    pui(S, say, [user, "//" ++ Line]),
+    Panel ! {chat_direct, self(), string:trim(Line)},
+    S;
 send(S = #{worker := none}, Text) ->
     pui(S, say, [user, Text]),
     ask(S, Text);

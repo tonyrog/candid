@@ -41,7 +41,7 @@ wx: all
 test: all
 	mkdir -p test/ebin
 	$(ERLC) -o test/ebin test/wse.erl test/panel_test.erl test/fake_llm.erl
-	CSP_EXE=$(CANDYSPEAK)/csp \
+	CANDID_SETTINGS=/dev/null CSP_EXE=$(CANDYSPEAK)/csp \
 	  erl -noshell $(PA) -pa test/ebin -s panel_test run
 
 # A standalone candid, as varp makes its own (servator, which packages the
@@ -80,7 +80,7 @@ osxapp: all
 test-wx: all
 	mkdir -p test/ebin
 	$(ERLC) -o test/ebin test/wx_test.erl
-	@CSP_EXE=$(CANDYSPEAK)/csp xvfb-run -a -s "-screen 0 1440x940x24" \
+	@CANDID_SETTINGS=/dev/null CSP_EXE=$(CANDYSPEAK)/csp xvfb-run -a -s "-screen 0 1440x940x24" \
 	  erl -noshell $(PA) -pa test/ebin -s wx_test run > test/wx.out 2>&1; \
 	  s=$$?; grep -v 'Gtk-WARNING' test/wx.out | grep -v '^$$'; exit $$s
 

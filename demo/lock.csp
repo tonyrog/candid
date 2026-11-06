@@ -1,0 +1,77 @@
+// Kodlås: en 4x4-knappsats, 16 knappar mot GND (pullup: nedtryckt = 0).
+//
+// Varje tryck skiftar in tangentens ASCII i Code, så Code håller de fyra
+// senaste tangenterna: "158#" är 0x31353823. Stämmer de med Secret öppnar
+// låset (Lock, pwm 50 %) och Code nollas. Det står öppet tills man trycker #,
+// som stänger och nollar Code en gång till.
+//
+//   1 2 3 A
+//   4 5 6 B
+//   7 8 9 C
+//   * 0 # D
+
+#digital K1 in pullup 22
+#digital K2 in pullup 23
+#digital K3 in pullup 24
+#digital KA in pullup 25
+#digital K4 in pullup 26
+#digital K5 in pullup 27
+#digital K6 in pullup 28
+#digital KB in pullup 29
+#digital K7 in pullup 30
+#digital K8 in pullup 31
+#digital K9 in pullup 32
+#digital KC in pullup 33
+#digital KS in pullup 34
+#digital K0 in pullup 35
+#digital KH in pullup 36
+#digital KD in pullup 37
+#analog  Lock:8 out pwm 10            // 128 = 50 %
+
+#param    Secret:32 = 0x31353823      // "158#", ändras utan omflashning
+#variable Code:32                     // de fyra senaste tangenterna
+
+#annotate panel K1 kind=push group=pad label="1"
+#annotate panel K2 kind=push group=pad label="2"
+#annotate panel K3 kind=push group=pad label="3"
+#annotate panel KA kind=push group=pad label="A"
+#annotate panel K4 kind=push group=pad label="4"
+#annotate panel K5 kind=push group=pad label="5"
+#annotate panel K6 kind=push group=pad label="6"
+#annotate panel KB kind=push group=pad label="B"
+#annotate panel K7 kind=push group=pad label="7"
+#annotate panel K8 kind=push group=pad label="8"
+#annotate panel K9 kind=push group=pad label="9"
+#annotate panel KC kind=push group=pad label="C"
+#annotate panel KS kind=push group=pad label="*"
+#annotate panel K0 kind=push group=pad label="0"
+#annotate panel KH kind=push group=pad label="#"
+#annotate panel KD kind=push group=pad label="D"
+#annotate panel pad kind=keypad layout="4x4" buttons="K1,K2,K3,KA,K4,K5,K6,KB,K7,K8,K9,KC,KS,K0,KH,KD"
+#annotate panel Lock label="lås"
+#annotate varp assume "[LTE 1](!K1, !K2, !K3, !KA, !K4, !K5, !K6, !KB, !K7, !K8, !K9, !KC, !KS, !K0, !KH, !KD)"
+
+Code = (Code << 8) | 0x31 ? falling(K1)   // 1
+Code = (Code << 8) | 0x32 ? falling(K2)   // 2
+Code = (Code << 8) | 0x33 ? falling(K3)   // 3
+Code = (Code << 8) | 0x41 ? falling(KA)   // A
+Code = (Code << 8) | 0x34 ? falling(K4)   // 4
+Code = (Code << 8) | 0x35 ? falling(K5)   // 5
+Code = (Code << 8) | 0x36 ? falling(K6)   // 6
+Code = (Code << 8) | 0x42 ? falling(KB)   // B
+Code = (Code << 8) | 0x37 ? falling(K7)   // 7
+Code = (Code << 8) | 0x38 ? falling(K8)   // 8
+Code = (Code << 8) | 0x39 ? falling(K9)   // 9
+Code = (Code << 8) | 0x43 ? falling(KC)   // C
+Code = (Code << 8) | 0x2A ? falling(KS)   // *
+Code = (Code << 8) | 0x30 ? falling(K0)   // 0
+Code = (Code << 8) | 0x23 ? falling(KH)   // #
+Code = (Code << 8) | 0x44 ? falling(KD)   // D
+
+// Öppna: Code töms så att samma kod inte ligger kvar.
+Lock = 128 ? Code == Secret
+Code = 0   ? Code == Secret
+
+// Stäng med #. Står efter #-regeln ovan, så den vinner och Code blir 0.
+Lock = 0   ? Lock == 128 && falling(KH)
+Code = 0   ? Lock == 128 && falling(KH)

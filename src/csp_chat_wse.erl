@@ -46,7 +46,8 @@ say(Ws, #{log := Log, scroll := Scroll}, Who, Text) ->
 		user -> "color:#9cf;margin:10px 0 4px";
 		assistant -> "color:#eee;margin:4px 0";
 		note -> "color:#888;margin:0";
-		error -> "color:#f66;margin:4px 0"
+		error -> "color:#f66;margin:4px 0";
+		console -> "color:#8d8;margin:0;white-space:pre"
 	    end,
     D = el(Ws, Log, "div", Style),
     Prefix = case Who of user -> "> "; note -> "  · "; _ -> "" end,
@@ -55,4 +56,4 @@ say(Ws, #{log := Log, scroll := Scroll}, Who, Text) ->
     wse:cast(Ws, Scroll, "call", [null, Log]).
 
 busy(Ws, #{busy := B}, On) ->
-    wse:set(Ws, B, "textContent", case On of true -> "..."; false -> "" end).
+    wse:set(Ws, B, "textContent", candid_wse:u(case On of true -> "..."; false -> "" end)).

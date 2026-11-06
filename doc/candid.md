@@ -418,6 +418,10 @@ you pick with **ladder** or **code** in the bar:
 * **code** is candyspeak, printed back from the parse tree. Comments and the
   original layout are therefore gone.
 
+Both are drawn on one canvas. `csp_ladder` lays the rungs out and says what
+each piece looks like, and the browser and the desktop only draw what it
+gives them, so the two look the same and a redraw is a single call.
+
 What the colours mean:
 
 * **Green contact:** the condition holds in the current state. Setting an

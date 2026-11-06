@@ -38,6 +38,7 @@ pane(H = #{env := Env}, Title) ->
     candid_wx:fg(H, Busy, {255, 187, 51}),
     wxSizer:add(Foot, Busy, [{flag, ?wxLEFT bor ?wxALIGN_CENTER_VERTICAL}, {border, 6}]),
     wxSizer:add(S, Foot, [{flag, ?wxEXPAND bor ?wxTOP}, {border, 2}]),
+    candid_wx:rich(H, Log, fun colour/2),
     #{pane => P, log => Log, input => In, busy => Busy}.
 
 show(H, #{pane := P}, On) ->
@@ -48,18 +49,23 @@ event(_P, {csp_chat_wx, send, Text}) -> {send, Text};
 event(_P, {csp_chat_wx, close})      -> close;
 event(_P, _Msg)                      -> none.
 
-say(_H, #{log := Log}, Who, Text) ->
-    Col = case Who of
-	      user      -> {153, 204, 255};
-	      assistant -> {238, 238, 238};
-	      note      -> {136, 136, 136};
-	      error     -> {255, 102, 102}
-	  end,
+say(H, #{log := Log}, Who, Text) ->
     Prefix = case Who of user -> "\n> "; note -> "  \x{b7} "; _ -> "" end,
-    A = wxTextAttr:new(Col),
-    wxTextCtrl:setDefaultStyle(Log, A),
-    wxTextCtrl:appendText(Log, Prefix ++ unicode:characters_to_list(Text) ++ "\n"),
-    wxTextAttr:destroy(A).
+    candid_wx:rich_add(H, Log, Who,
+		       Prefix ++ unicode:characters_to_list(Text) ++ "\n").
+
+%% On the dark ground, and on the light one: the dark ones turned over would
+%% come out too pale to read on white.
+colour(false, user)      -> {153, 204, 255};
+colour(false, assistant) -> {238, 238, 238};
+colour(false, note)      -> {136, 136, 136};
+colour(false, error)     -> {255, 102, 102};
+colour(false, console)   -> {136, 221, 136};
+colour(true, user)       -> {10, 70, 160};
+colour(true, assistant)  -> {20, 20, 20};
+colour(true, note)       -> {90, 90, 90};
+colour(true, error)      -> {190, 30, 30};
+colour(true, console)    -> {20, 100, 30}.
 
 busy(_H, #{busy := B}, On) ->
     candid_wx:label(B, case On of true -> "..."; false -> "  " end).

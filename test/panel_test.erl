@@ -480,9 +480,10 @@ trace_check() ->
     C2 = calls() -- B2,
     P2 ! stop,
     timer:sleep(300),
+    %% One canvas: the code view's own, which the rungs are drawn on.
+    Canvases = [X || X <- C2, string:find(X, "createElement canvas") =/= nomatch],
     expect("* trace=off: no trace canvas at all",
-	   [X || X <- C2, string:find(X, "createElement canvas") =/= nomatch]
-	   =:= [], length(C2)).
+	   length(Canvases) =:= 1, length(Canvases)).
 
 %% One plot, built from the annotation text under test.
 clip_of(Opts) ->
@@ -749,10 +750,10 @@ code_view_check() ->
 	   Ev("!Go && elapsed(T) > 5", #{"Go" => 1}) =:= 0 andalso
 	   Ev("Go && elapsed(T) > 5", #{"Go" => 1}) =:= unknown, nomatch),
 
-    %% --fired, through csp_link. Paused with Go set, ONE step sees it --
-    %% csp_link:step/2 commits what was set first -- and fires Phase's rule
-    %% (line 7) and `Red = Phase == 0' (8); `Red = 0 ? Odd' (9) does not,
-    %% Phase was 0.
+    %% --fired, through csp_link. Paused with Go set: as on a board the rules
+    %% read it the cycle after it was sampled, so the SECOND step fires
+    %% Phase's rule (line 7) and `Red = Phase == 0' (8); `Red = 0 ? Odd' (9)
+    %% does not, Phase was 0.
     flush(),
     {ok, L} = csp_link:open(csp_exe(), [F]), track(L),
     timer:sleep(200),
@@ -761,6 +762,8 @@ code_view_check() ->
     csp_link:set(L, "Go", 1),
     timer:sleep(100),
     flush(),
+    csp_link:step(L),
+    timer:sleep(150),
     csp_link:step(L),
     timer:sleep(300),
     Fired = last_fired(undefined),
@@ -879,6 +882,13 @@ model_check() ->
 	   candyspeak_varp:trace("% 0\n")),
     Pr = candyspeak_varp:trace("bmc: proved by 2-induction\n% TRUE\n"),
     expect("a proof reads back with its k", Pr =:= {proved, 2}, Pr),
+    edge_model_check(),
+    ladder_check(),
+    file_check(),
+    tab_check(),
+    save_check(),
+    direct_check(),
+    click_check(),
     F = tree("examples/traffic.csp"),
     {ok, M} = candyspeak_varp:model(F, [{reach, "LongRed && Please"}]),
     Text = lists:flatten(maps:get(text, M)),
@@ -977,6 +987,10 @@ timer_check(Sh) ->
 	   maps:get({timeout, "T"}, Lv) =:= 1 andalso maps:get("X", Lv) =:= 1
 	   andalso string:find(Lt, "step 1 -> 2:") =/= nomatch andalso
 	   string:find(Lt, "X=2") =/= nomatch, {Lv, Lt}),
+    #{step := Step, steps := Steps, ms := Ms, values := LVs} = csp_code:look(Vt),
+    expect("the panel is told the cycle walked: step, values, the time so far",
+	   {Step, Steps, maps:get("X", LVs)} =:= {2, 2, 1} andalso Ms >= 1000,
+	   {Step, Steps, Ms}),
     %% A solve with no trace after one with: the cycle walked in the old
     %% trace goes with it, or the next paint looks for it there.
     Vn = csp_code:model(Vt#{ui => {?MODULE, ui}, h => h, at => none},
@@ -1362,7 +1376,7 @@ node_checks() ->
     Said = link_said(nomatch),
     expect("a node's program is read from its dumps",
 	   string:find(Said, "declarations") =/= nomatch, Said),
-    Listed = receive {csp_program, Text} -> Text after 3000 -> "" end,
+    Listed = receive {csp_program, Text, _} -> Text after 3000 -> "" end,
     expect("and comes back as source, listed off its image",
 	   string:find(Listed, "#Cnt a") =/= nomatch andalso
 	   string:find(Listed, "K=K+1 ? timeout(T)") =/= nomatch, Listed),
@@ -1381,7 +1395,29 @@ node_checks() ->
 	   C2 =:= C1 + 3 andalso
 	   maps:get("b.N", P2) =:= (maps:get("b.N", P1) + 6) band 255,
 	   {C1, C2, P1, P2}),
-    csp_link:close(L).
+    csp_link:close(L),
+    %% From an empty tab -- nothing runs, so nothing to retarget -- a node
+    %% typed in the target field is connected to and gets its tab.
+    spawn(fun() -> relay(LS) end),
+    C0 = calls(),
+    Pn = track_panel(spawn(fun() -> candid:run(fake_ws, "panel") end)),
+    timer:sleep(?SETTLE),
+    Bar = hd(tl([list_to_integer(string:trim(string:prefix(X, "event ")))
+		 || X <- lists:dropwhile(fun(X) -> X =/= "createElement select"
+					 end, lists:nthtail(length(C0), calls())),
+		    lists:prefix("event ", X)])),
+    C1n = calls(),
+    Where = "localhost:" ++ integer_to_list(Port),
+    Pn ! {notify, Bar, local, "target=" ++ Where},
+    timer:sleep(3000),
+    %% the page gets UTF-8 (candid_wse:u), and the stub logs it as it came
+    Label = "createTextNode " ++
+	binary_to_list(unicode:characters_to_binary("\x{25CF} " ++ Where)),
+    Tab = [X || X <- lists:nthtail(length(C1n), calls()), X =:= Label],
+    Pn ! stop,
+    timer:sleep(300),
+    expect("node: typed in from an empty tab, it is connected to and gets "
+	   "its tab", Tab =/= [], Tab).
 
 %% The chat's own parts, without a model: its tools are well formed, the
 %% manual answers, `check' says what csp says, and the panel's half keeps a
@@ -1657,6 +1693,340 @@ keypad_check() ->
 		     "panel: kp: K9 left out, there is no such widget",
 		     "panel: kp: K4 is listed in buttons= but says group=other"],
 	   Said).
+
+%% falling(B) on a pin: the half the rules read is state, the sample an input
+%% (B_s), and an edge is between them. And a shift past 31 bits of an
+%% unsigned 32 bit variable is its 32 bit word, not a free variable.
+%% A program as candid is to hold it (candid_file): line by line, a rule
+%% that is off marked on its line, from disk or a node, saved under a name,
+%% and the tabs of a workspace.
+file_check() ->
+    N = candid_file:new(),
+    expect("file: a new one has no name and may be edited",
+	   {candid_file:label(N), maps:get(mode, N)} =:= {"new", edit},
+	   candid_file:label(N)),
+    {ok, D} = candid_file:load({disk, "demo/lock.csp"}),
+    {ok, Src} = file:read_file("demo/lock.csp"),
+    expect("file: from disk, named by its path, its text as read",
+	   candid_file:label(D) =:= "lock.csp" andalso
+	       candid_file:text(D) =:= {ok, binary_to_list(Src)},
+	   candid_file:label(D)),
+    Prog = "#digital B in 2\n#digital Led out 13\n"
+	"Led = 1 ? B\nLed = 0 ? !B\n",
+    Rom = fun(C) -> <<"JAM\n", 0:(50 * 8), C:16, "rest">> end,
+    Dumps = [{rom, Rom(16#abcd)}, {patch, <<1, 2, 3>>}],
+    L = candid_file:from_node("10.0.0.5:4000", Prog, Dumps),
+    expect("file: the rules numbered as csp numbers them, by line",
+	   candid_file:rules(L) =:= {ok, [{1, 3, "Led = 1 ? B", false},
+					  {2, 4, "Led = 0 ? !B", false}]},
+	   candid_file:rules(L)),
+    {ok, L1, S1} = candid_file:disable(L, 2),
+    {ok, L2, S2} = candid_file:add(L1, "Led = 0 ? B && !B"),
+    {ok, L3, S3} = candid_file:edit(L2, candid_file:source(L2) ++
+					"Led = 1 ? !B && B\n"),
+    expect("file: live, what is done is what is sent, the mark stays put",
+	   {S1, S2, S3} =:= {["#disable 2"], ["Led = 0 ? B && !B"],
+			     ["Led = 1 ? !B && B"]} andalso
+	       candid_file:text(L3) =:= {ok, Prog ++ "Led = 0 ? B && !B\n"
+					 "Led = 1 ? !B && B\n#disable 2\n"} andalso
+	       candid_file:label(L3) =:= "10.0.0.5:4000 *",
+	   {S1, S2, S3, candid_file:text(L3)}),
+    expect("file: live, only the end may grow",
+	   candid_file:edit(L1, "x\n" ++ Prog) =:= {error, patch_mode} andalso
+	       candid_file:disable(L, 9) =:= {error, {no_such_rule, 9}},
+	   nomatch),
+    E = (candid_file:new())#{lines := maps:get(lines, L1)},
+    {ok, E1, []} = candid_file:edit(E, "#digital B in 2\n#digital Led out 13\n"
+				    "Led = 0 ? B\nLed = 1 ? B\nLed = 0 ? !B\n"),
+    expect("file: a line put in above renumbers, the mark follows its line",
+	   candid_file:text(E1) =:= {ok, candid_file:source(E1) ++
+					 "#disable 3\n"},
+	   candid_file:text(E1)),
+    expect("file: the same image and patch is the program already held",
+	   candid_file:same_image(L, Dumps) andalso
+	       not candid_file:same_image(L, [{rom, Rom(16#abcd)}]) andalso
+	       not candid_file:same_image(L, [{rom, Rom(16#1234)},
+					       {patch, <<1, 2, 3>>}]) andalso
+	       not candid_file:same_image(D, Dumps),
+	   nomatch),
+    Tmp = filename:join(os:getenv("TMPDIR", "/tmp"), "candid_file_test.csp"),
+    {ok, S} = candid_file:save(L3, Tmp),
+    {ok, Back} = candid_file:load({disk, Tmp}),
+    {ok, Saved} = file:read_file(Tmp),
+    file:delete(Tmp),
+    expect("file: a node's file saved gets a name, stays the node's, and "
+	   "loads with its marks",
+	   candid_file:label(S) =:= "candid_file_test.csp" andalso
+	       candid_file:live(S) andalso
+	       {ok, binary_to_list(Saved)} =:= candid_file:text(L3) andalso
+	       candid_file:rules(Back) =:= candid_file:rules(L3),
+	   candid_file:rules(Back)),
+    W0 = candid_file:workspace(),
+    L4 = candid_file:from_node("10.0.0.5:4000", "", Dumps),
+    W = lists:foldl(fun(F, Acc) -> candid_file:open(Acc, F) end, W0,
+		    [D, L, N, L4]),
+    expect("workspace: one tab a device, the last opened active",
+	   [candid_file:label(F) || F <- candid_file:files(W)] =:=
+	       ["lock.csp", "new", "10.0.0.5:4000"] andalso
+	       candid_file:active(W) =:= L4,
+	   [candid_file:label(F) || F <- candid_file:files(W)]),
+    W2 = candid_file:close(W, maps:get(id, L4)),
+    expect("workspace: closing the active tab makes the one before it active",
+	   candid_file:active(W2) =:= N, candid_file:active(W2)).
+
+%% The tabs: one a file open, going to a node's connects to the node, going
+%% back to a file's goes back to a csp of our own, and the last one stays.
+tab_check() ->
+    {ok, D} = candid_file:load({disk, "demo/lock.csp"}),
+    Dev = "10.0.0.5:4000",
+    L = candid_file:from_node(Dev, "#digital B in 2\n", []),
+    Ws = candid_file:open(candid_file:open(candid_file:workspace(), D), L),
+    Side = #{ws => Ws, chat => undefined},
+    Ts = candid:tabs(Side),
+    expect("tabs: one a file, the node's live and the one shown",
+	   [{maps:get(label, T), maps:get(live, T), maps:get(active, T)}
+	    || T <- Ts] =:= [{"lock.csp", false, false}, {Dev, true, true}],
+	   Ts),
+    {go, F1, S1} = candid:tab_event("tab=" ++
+					integer_to_list(maps:get(id, D)), Side),
+    T1 = candid:target_text(),
+    {go, F2, _} = candid:tab_event("tab=" ++
+				       integer_to_list(maps:get(id, L)), S1),
+    T2 = candid:target_text(),
+    expect("tabs: a file's runs here, a node's connects to the node",
+	   {F1, T1, F2, T2} =:= {"demo/lock.csp", "", candid:node_file(Dev), Dev},
+	   {F1, T1, F2, T2}),
+    W1 = candid_file:close(Ws, maps:get(id, L)),
+    expect("tabs: the last one is not closed",
+	   candid:tab_event("close=" ++ integer_to_list(maps:get(id, D)),
+			    Side#{ws := W1}) =:= none, nomatch),
+    erase(candid_target), erase(candid_target_text).
+
+%% Without a file the panel starts on an empty tab, which a file opened
+%% takes the place of; save as gives a tab a name; the views are kept for
+%% the next start, and a place they cannot be kept in is no crash.
+save_check() ->
+    Since = fun(C) -> lists:nthtail(length(C), calls()) end,
+    %% the chooser's event and the bar's, the first two after the dock's
+    Events = fun(Cs0) ->
+		     Cs = lists:dropwhile(fun(X) -> X =/= "createElement select"
+					  end, Cs0),
+		     [Sel, Bar | _] = [list_to_integer(string:trim(
+							 string:prefix(X, "event ")))
+				       || X <- Cs, lists:prefix("event ", X)],
+		     {Sel, Bar}
+	     end,
+    Tabs = fun(Cs) -> [X || X <- Cs, X =:= "createTextNode new" orelse
+				 X =:= "createTextNode gate.csp" orelse
+				 X =:= "createTextNode saved_new.csp"] end,
+    flush(),
+    C0 = calls(),
+    P1 = track_panel(spawn(fun() -> candid:run(fake_ws, "panel") end)),
+    timer:sleep(?SETTLE),
+    New0 = Since(C0),
+    T0 = Tabs(New0),
+    {Sel1, _} = Events(New0),
+    C1 = calls(),
+    P1 ! {notify, Sel1, local, filename:absname("demo/gate.csp")},
+    timer:sleep(?SETTLE),
+    T1 = Tabs(Since(C1)),
+    %% the tab, then the button `new'
+    expect("save: an empty tab to start, a file opened takes its place",
+	   T0 =:= ["createTextNode new", "createTextNode new"] andalso
+	       T1 =:= ["createTextNode gate.csp", "createTextNode new"],
+	   {T0, T1}),
+    P1 ! stop,
+    timer:sleep(300),
+    C2 = calls(),
+    P2 = track_panel(spawn(fun() -> candid:run(fake_ws, "panel") end)),
+    timer:sleep(?SETTLE),
+    {_, B2} = Events(Since(C2)),
+    Tmp = filename:join(os:getenv("TMPDIR", "/tmp"), "saved_new"),
+    file:delete(Tmp ++ ".csp"),
+    C3 = calls(),
+    P2 ! {notify, B2, local, "saveas=" ++ Tmp},
+    timer:sleep(?SETTLE),
+    T2 = Tabs(Since(C3)),
+    Saved = file:read_file(Tmp ++ ".csp"),
+    file:delete(Tmp ++ ".csp"),
+    expect("save: save as writes it, .csp added, and the tab is named so",
+	   Saved =:= {ok, <<>>} andalso T2 =:= ["createTextNode saved_new.csp"],
+	   {Saved, T2}),
+    Kept = filename:join(os:getenv("TMPDIR", "/tmp"), "candid_settings_test"),
+    file:delete(Kept),
+    os:putenv("CANDID_SETTINGS", Kept),
+    P2 ! {notify, B2, local, "theme=light"},
+    timer:sleep(?SETTLE),
+    K = file:consult(Kept),
+    os:putenv("CANDID_SETTINGS", "/nonexistent/dir/settings"),
+    P2 ! {notify, B2, local, "theme=dark"},
+    timer:sleep(?SETTLE),
+    Alive = is_process_alive(P2),
+    os:putenv("CANDID_SETTINGS", "/dev/null"),
+    file:delete(Kept),
+    expect("save: the views kept as they are set; not kept is no crash",
+	   element(1, K) =:= ok andalso
+	       lists:member({theme, light}, element(2, K)) andalso Alive,
+	   {K, Alive}),
+    P2 ! stop,
+    timer:sleep(300).
+
+%% One cycle a tick, counted from 1; a line after `//' in the chat goes to
+%% csp as it is and what it says comes back, but not one that would take
+%% the panel's link or its stepping away.
+direct_check() ->
+    flush(),
+    C0 = calls(),
+    P = track_panel(spawn(fun() -> candid:run(fake_ws, "panel",
+					      "demo/gate.csp") end)),
+    timer:sleep(?SETTLE),
+    Cycles = [N || X <- lists:nthtail(length(C0), calls()),
+		   string:find(X, "\"cycle ") =/= nomatch,
+		   {N, _} <- [string:to_integer(
+				string:prefix(lists:nth(2, string:split(X, "\"cycle ")),
+					      ""))]],
+    %% shown on the tick, so a number can be shown twice; none skipped
+    D = lists:usort(Cycles),
+    expect("direct: a cycle a tick, from 1",
+	   length(D) > 3 andalso hd(D) =< 1 andalso
+	       lists:last(D) - hd(D) =:= length(D) - 1,
+	   Cycles),
+    P ! {chat_direct, self(), "/quit"},
+    Refused = receive {chat_out, R} -> R after 1000 -> none end,
+    P ! {chat_direct, self(), "/list"},
+    timer:sleep(?SETTLE),
+    Said = direct_said([]),
+    expect("direct: /quit refused, /list answered",
+	   lists:prefix("not sent", Refused) andalso
+	       lists:any(fun(L) -> string:find(L, "Led") =/= nomatch end, Said),
+	   {Refused, Said}),
+    P ! stop,
+    timer:sleep(300).
+
+%% A key pressed and let go inside one tick is still a press: lock.csp takes
+%% a key on falling(K), and the edge must survive both values arriving
+%% before the cycle runs.
+click_check() ->
+    flush(),
+    {ok, L} = csp_link:open(csp_exe(), ["demo/lock.csp"]), track(L),
+    timer:sleep(300),
+    csp_link:tick(L),
+    timer:sleep(100),
+    csp_link:set(L, "K1", 0),
+    csp_link:set(L, "K1", 1),
+    csp_link:tick(L),
+    timer:sleep(100),
+    csp_link:set(L, "K5", 0),
+    csp_link:tick(L),
+    timer:sleep(100),
+    csp_link:set(L, "K5", 1),
+    csp_link:tick(L),
+    timer:sleep(300),
+    Codes = click_codes([]),
+    csp_link:close(L),
+    timer:sleep(250),
+    expect("click: a key pressed and let go in one tick is taken, as is "
+	   "one held over a tick", lists:member(16#3135, Codes), Codes).
+
+click_codes(Acc) ->
+    receive
+	{csp_state, _, Vs} -> click_codes([V || {"Code", V} <- Vs] ++ Acc);
+	{csp_fired, _, _} -> click_codes(Acc);
+	{csp_clock, _, _} -> click_codes(Acc);
+	{csp_out, _} -> click_codes(Acc);
+	{csp_link, _} -> click_codes(Acc)
+    after 0 -> Acc
+    end.
+
+direct_said(Acc) ->
+    receive {chat_out, L} -> direct_said([L | Acc])
+    after 0 -> lists:reverse(Acc)
+    end.
+
+%% The rungs as a picture (csp_ladder), the same for both renderers: every
+%% contact and coil a box by its id, a click finds the contact under it, the
+%% classes colour it, and a row out of its block is dimmed whole.
+ladder_check() ->
+    {ok, Ast} = candyspeak:parse("demo/knappar.csp"),
+    Rules = csp_code:rules(Ast),
+    M = #{cw => 8, ch => 16},
+    L = csp_ladder:layout(Rules, ladder, M),
+    Boxes = maps:from_list([{Id, {X, Y, W, H}}
+			    || {box, Id, _, X, Y, W, H, _, _, _}
+				   <- tuple_to_list(maps:get(pieces, L))]),
+    Want = ["k1", "k1_0", "k1_1", "k1_2", "k2", "k2_0", "k3", "k3_0", "k3_1",
+	    "k3_2"],
+    expect("ladder: a box for every contact and coil",
+	   lists:sort(maps:keys(Boxes)) =:= Want, maps:keys(Boxes)),
+    Mid = fun(Id) -> {X, Y, W, H} = maps:get(Id, Boxes),
+		     {X + W div 2, Y + H div 2} end,
+    {Cx, Cy} = Mid("k1_1"),
+    {Kx, Ky} = Mid("k1"),
+    expect("ladder: a click finds the contact under it, not the coil",
+	   {csp_ladder:hit(L, Cx, Cy), csp_ladder:hit(L, Kx, Ky)} =:=
+	       {"ct=k1_1", none},
+	   {csp_ladder:hit(L, Cx, Cy), csp_ladder:hit(L, Kx, Ky)}),
+    {_, Y0} = Mid("k1_0"), {_, Y1} = Mid("k1_1"), {_, Y2} = Mid("k3_1"),
+    {_, Y3} = Mid("k3_2"),
+    expect("ladder: an OR stacks its branches, an AND runs across",
+	   Y0 < Y1 andalso Y2 =:= Y3, {Y0, Y1, Y2, Y3}),
+    Col = #{true => "#3f3", fired => "#fb3", next => "#fb3", block => "#bdf",
+	    want => "#4af", unwant => "#f55"},
+    {L1, Rest, Ch} = csp_ladder:set(L, ["k1_0", "ct t", "sv_B1", "sgt"]),
+    Ops0 = csp_ladder:ops(L, Col),
+    Ops1 = csp_ladder:ops(L1, Col),
+    expect("ladder: a class changes the picture, another id is given back",
+	   Ch andalso Rest =:= ["sv_B1", "sgt"] andalso Ops0 =/= Ops1,
+	   {Ch, Rest}),
+    {L2, _, _} = csp_ladder:set(L, ["r1", "rw off"]),
+    Texts = fun(Ls) -> [C || {text, _, _, "B1", C, _} <- csp_ladder:ops(Ls, Col)] end,
+    expect("ladder: a row out of its block is dimmed whole",
+	   hd(Texts(L2)) =/= hd(Texts(L)) andalso
+	       lists:last(Texts(L2)) =:= lists:last(Texts(L)),
+	   {Texts(L), Texts(L2)}),
+    C = csp_ladder:layout(Rules, code, M),
+    Ys = lists:usort([Y || {box, Id, _, _, Y, _, _, _, _, _}
+			       <- tuple_to_list(maps:get(pieces, C)),
+			   lists:prefix("k1", Id)]),
+    expect("code: a rule is one line, no wires",
+	   length(Ys) =:= 1 andalso
+	       [W || W = {wire, _, _, _, _, _, _, _}
+			 <- tuple_to_list(maps:get(pieces, C))] =:= [],
+	   Ys).
+
+edge_model_check() ->
+    F = "/tmp/csp_edge_model.csp",
+    ok = file:write_file(F, "#digital B in pullup 2\n#variable N:8\n"
+			 "#variable Code:32\n"
+			 "N = N + 1 ? falling(B)\n"
+			 "Code = (Code << 8) | 0x31 ? rising(B)\n"),
+    Sh = candyspeak_varp:varp_cmd(),
+    Ask = fun(P) ->
+		  {ok, M = #{name := N}} =
+		      candyspeak_varp:model(F, [{reach, P}, {params, fixed}]),
+		  {M, candyspeak_varp:prove(M, "--property " ++ N ++ "_reach",
+					    10, 30, Sh)}
+	  end,
+    {M, R} = Ask("N == 2"),
+    Bs = case R of
+	     {found, _, Rows} -> [proplists:get_value("B", Row) || Row <- Rows];
+	     _ -> R
+	 end,
+    expect("falling(B): a pin at rest at 1 falls twice by step 3, and "
+	   "Code is modelled",
+	   maps:get(free, M) =:= [] andalso Bs =:= [1, 0, 1, 0], {R, M}),
+    %% Walking it, the panel shows the pin as the person set it: the sample
+    %% that comes in, B_s, under the pin's own name.
+    {found, _, BRows} = R,
+    Look = csp_code:look(#{trace => {BRows, M}, look => 0, states => []}),
+    expect("a walked cycle shows a pin as it was set, and the step it is",
+	   maps:get(step, Look) =:= 1 andalso
+	       maps:get("B", maps:get(values, Look)) =:=
+	       proplists:get_value("B_s", lists:nth(2, BRows)),
+	   {Look, lists:sublist(BRows, 2)}),
+    {_, R2} = Ask("Code == 0x31313131"),
+    expect("four rises shift four 0x31 into Code",
+	   element(1, R2) =:= found, R2).
 
 %% What F prints, line by line.
 said(F) ->

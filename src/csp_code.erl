@@ -59,12 +59,13 @@
 -module(csp_code).
 
 -export([new/4, refresh/2, fired/2, tick/1, control/2, model/2, actions/1]).
+-export([look/1]).
 -export([assign/1, bind/1, chain/2, cols/1, tr_id/2, col_name/1,
 	 signed/3]).                                     % for the renderers
 -export([goal_text/1, contact_of/3, state_name/2, sig_expr/2,
 	 look_values/1, look_text/1]).                   % tests
 -export([split/1]).
--export([rules/1, tabs/1, tabs/2]).                  % tests
+-export([rules/1, rules/2, tabs/1, tabs/2]).
 
 -define(GLOW, 600).                     % ms a coil stays lit after firing
 -define(KS, [1, 2, 5, 10, 20, 50]).     % solve's bounds, k steps from INIT
@@ -223,9 +224,11 @@ number([], _N)           -> [].
 %% handed on.
 new(C, Where, {Ast, File}, Cfg) ->
     Tabs = tabs(Ast, File),
-    H = cui(C, new, [Where, Tabs, #{colours => colours(Cfg), ks => ?KS,
-				   k => ?K}]),
+    Cols = colours(Cfg),
+    H = cui(C, new, [Where, Tabs, #{colours => Cols, ks => ?KS, k => ?K}]),
     V = #{ui => C, h => H, event => maps:get(event, H),
+	  colours => Cols, metrics => cui(C, metrics, [H]), ladder => none,
+	  redraw => false,
 	  tabs => Tabs, tab => 0, file => File,
 	  mode => hide, shown => #{}, fired => [], glow => #{}, last => #{},
 	  marks => #{}, sigs_seen => [], k => ?K,
@@ -341,6 +344,13 @@ control(V = #{marks := Ms}, "solve") ->
 	_ -> ask(V, {solve, goal_text(Ms), maps:get(k, V)})
     end,
     V;
+%% A click on the picture: what is at X, Y.
+control(V = #{ladder := L}, "xy=" ++ XY) when L =/= none ->
+    [X, Y] = [list_to_integer(N) || N <- string:lexemes(XY, ",")],
+    case csp_ladder:hit(L, X, Y) of
+	none -> V;
+	Tag  -> control(V, Tag)
+    end;
 control(V, "k=" ++ K) ->
     V#{k := list_to_integer(K)};
 control(V, _Tag) -> V.
@@ -503,6 +513,25 @@ look_values(#{trace := {Rows, M}, look := L}) ->
     maps:from_list([{"State", X} || {"St", X} <- State] ++
 		       [{C, X} || {C, X} <- State, C =/= "St"] ++
 		       Inputs ++ Timers ++ Rx).
+
+%% The cycle the walk shows, for the panel to show too: none while live, or
+%% #{values, step, steps, ms} -- the signals as the code view has them, an
+%% input by its own name (a pin's sample B_s is what the person did to B),
+%% the step the cycle leads to, of how many, and the time the trace has
+%% taken to get there.
+look(V = #{trace := {Rows, M}, look := L}) when is_integer(L) ->
+    B = lists:nth(L + 2, Rows),
+    In = maps:get(inputs, M),
+    Vs = maps:filter(fun(K, _) -> is_list(K) end, look_values(V)),
+    Pins = maps:from_list(
+	     [{lists:sublist(C, length(C) - 2), signed(C, X, M)}
+	      || {C, X} <- B, is_integer(X), lists:member(C, In),
+		 lists:suffix("_s", C)]),
+    Ms = lists:sum([D || R <- lists:sublist(Rows, L + 2),
+			 D <- [proplists:get_value("u_dt", R)], is_integer(D)]),
+    #{values => maps:merge(Vs, Pins), step => L + 1,
+      steps => length(Rows) - 1, ms => Ms};
+look(_) -> none.
 
 timer_values(T, P, Run, El, Dt) when is_integer(Run), is_integer(El),
 				     is_integer(Dt) ->
@@ -707,10 +736,12 @@ state_names(#{env := #{states := Ss}}) ->
     maps:from_list([{0, "INIT"}, {1, "NORMAL"}, {2, "FAILSAFE"} |
 		    lists:zip(lists:seq(3, 2 + length(User)), User)]).
 
-%% The tab's rungs drawn afresh, and every class sent again.
-render(V = #{mode := Mode, tab := I, tabs := Tabs}) ->
-    vui(V, rungs, [Mode, I, lists:nth(I + 1, Tabs)]),
-    paint(V#{shown := #{}}).
+%% The tab's rungs laid out afresh (csp_ladder), and every class sent again.
+render(V = #{mode := Mode, tab := I, tabs := Tabs, metrics := Ms}) ->
+    Tab = lists:nth(I + 1, Tabs),
+    L = csp_ladder:layout(maps:get(rules, Tab), Mode, Ms),
+    vui(V, rungs, [Mode, I, Tab, csp_ladder:size(L)]),
+    paint(V#{shown := #{}, ladder := L, redraw := true}).
 
 %%% ----------------------------------------------------------------- updates
 
@@ -799,13 +830,23 @@ paint1(V = #{tabs := Tabs, tab := I, last := Live, fired := Now0,
 			     Look1 ++ [{{t, Id}, T} || {Id, T} <- Txt]),
     Changed = [{Id, C} || {Id, C} <- maps:to_list(New),
 			  maps:get(Id, Shown, undefined) =/= C],
-    Cs = lists:append([[Id, C] || {Id, C} <- Changed, is_list(Id)]),
+    Cs0 = lists:append([[Id, C] || {Id, C} <- Changed, is_list(Id)]),
     Ts = lists:append([[Id, T] || {{t, Id}, T} <- Changed]),
+    {V1, Cs} = draw(V, Cs0),
     case Cs ++ Ts of
 	[] -> ok;
 	_  -> vui(V, paint, [Cs, Ts])
     end,
-    V#{shown := New}.
+    V1#{shown := New}.
+
+%% The classes of the rungs' pieces go to the picture, which is drawn again
+%% when one of them changed; the rest to the renderer's own pieces.
+draw(V = #{ladder := none}, Cs) -> {V, Cs};
+draw(V = #{mode := hide}, Cs) -> {V, Cs};
+draw(V = #{ladder := L, redraw := Re, colours := Cols}, Cs) ->
+    {L1, Rest, Changed} = csp_ladder:set(L, Cs),
+    (Changed orelse Re) andalso vui(V, draw, [csp_ladder:ops(L1, Cols)]),
+    {V#{ladder := L1, redraw := false}, Rest}.
 
 %% An object's tab reads `a0.A' as `A'; its own names win over the globals.
 values(Last, none) -> Last;

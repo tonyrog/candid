@@ -21,8 +21,21 @@ run() ->
     P ! {candid_wx, {bar, "code=ladder"}},
     P ! {candid_wx, {bar, "trace=show"}},
     timer:sleep(?SETTLE),
-    expect("ladder: a coil and its contacts by name",
-	   Has("k1") andalso Has("k1_0") andalso Has("r1"), nomatch),
+    Ops = fun() -> case ets:lookup(Ids, code_ops) of
+		       [{_, O, _}] -> O;
+		       [] -> []
+		   end end,
+    expect("ladder: the rungs drawn, a contact among them",
+	   [T || T = {text, _, _, "B1", _, _} <- Ops()] =/= [], length(Ops())),
+    %% A click where B1 is drawn marks it: a frame in `want' around it.
+    [{X, Y} | _] = [{X, Y} || {text, X, Y, "B1", _, _} <- Ops()],
+    P ! {candid_wx, {code, "xy=" ++ integer_to_list(X + 2) ++ "," ++
+			 integer_to_list(Y + 2)}},
+    timer:sleep(?SETTLE),
+    expect("ladder: a click on a contact marks it",
+	   [R || R = {rect, _, _, _, _, _, none, {68, 170, 255}, _} <- Ops()] =/= [],
+	   nomatch),
+    P ! {candid_wx, {code, "clear"}},
     P ! {candid_wx, {widget, "B1"}},
     P ! {candid_wx, {widget, "B2=1"}},
     timer:sleep(?SETTLE),
@@ -41,7 +54,8 @@ run() ->
     P ! {candid_wx, {bar, "code=code"}},
     timer:sleep(?SETTLE),
     expect("the code as text, in the light theme",
-	   Has("k1_0") andalso is_process_alive(P), nomatch),
+	   [T || T = {text, _, _, "B1", _, _} <- Ops()] =/= [] andalso
+	       is_process_alive(P), nomatch),
     %% A goal reached at step 0 has no cycle to walk: it must not crash.
     P ! {candid_wx, {code, "clear"}},
     P ! {candid_wx, {code, "sig=B1"}},
@@ -51,6 +65,17 @@ run() ->
     timer:sleep(500),
     expect("a trace of one step: nothing to walk, no crash",
 	   is_process_alive(P), nomatch),
+    %% The rungs and the answer were drawn over several times above: the
+    %% theme must not reach a window that is gone, which segfaults.
+    P ! {candid_wx, {bar, "theme=dark"}},
+    P ! {candid_wx, {bar, "theme=light"}},
+    timer:sleep(?SETTLE),
+    expect("the theme changed after the code view was redrawn",
+	   is_process_alive(P), nomatch),
+    %% wx torn down before the emulator: a halt with the window still up
+    %% segfaults on the way out, after every check has passed.
+    exit(P, kill),
+    timer:sleep(500),
     halt(0).
 
 %% The id table: the public ets the panel's process owns.

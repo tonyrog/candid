@@ -25,5 +25,8 @@ create_event(_)          -> Id = erlang:unique_integer([positive]),
 			    ?LOG("event ~w", [Id]), {ok, Id}.
 newf(_, _, Body)         -> ?LOG("newf ~s", [Body]), {func, Body}.
 call(_, _, "getContext", _) -> {ok, {ctx}};
+%% csp_code_wse's character width, 7.8 px, as a browser would measure it.
+call(_, {func, "{ var x = document.createElement('canvas')" ++ _}, "call", _) ->
+    {ok, 7800};
 call(_, _, M, A)         -> ?LOG("SYNC call ~s ~p", [M, A]), {ok, ok}.
 cast(_, _, M, A)         -> ?LOG("ASYNC cast ~s ~p", [M, A]), ok.

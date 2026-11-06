@@ -28,6 +28,7 @@
 -export([widgets/1, rgb565/1, hue/1, label_of/1]).   % tests, introspection
 -export([plots/1, eng/2, period/0, keep/2, rows/1, rows/3]). % tests
 -export([looks/1, colour/3, warn_annotations/1]).    % tests, introspection
+-export([tab_event/2, tabs/1, target_text/0, node_file/1]).  % tests
 
 -include("candid.hrl").
 -include_lib("kernel/include/file.hrl").
@@ -73,15 +74,17 @@ period() ->
 
 %% wse's entry: the page calls Wse.start('candid', 'run', [Where, ...]).
 run(Ws, Where) ->
-    run(Ws, Where, default_file()).
+    run(Ws, Where, new).
 
 run(Ws, Where, File) ->
     run_ui({candid_wse, Ws}, Where, File).
 
 %% Any renderer's entry, U = {Module, Handle}: candid_wx calls this from the
 %% process that owns its window.
+%% Without a file the panel starts on an empty tab: what the chat writes
+%% goes in it, save as gives it a name.
 run_ui(U, Where) ->
-    run_ui(U, Where, default_file()).
+    run_ui(U, Where, new).
 
 run_ui(U, Where, File) ->
     %% The log and the chat, when ellm is there: processes of their own, so
@@ -90,12 +93,18 @@ run_ui(U, Where, File) ->
     Log = candid_log:start(log_ui(U)),
     Chat = csp_chat:start(chat_ui(U), #{root => root(), exe => csp_exe(),
 				       demo_dir => work_dir()}),
-    render(U, Where, File, #{chat => Chat, log => Log}).
+    render(U, Where, File, #{chat => Chat, log => Log,
+			     ws => candid_file:workspace()}).
 
 %% Also the restart path: picking another file in the chooser comes back here,
 %% so the whole panel is rebuilt from that file's declarations.
-%% Side is #{chat, log}, the two that outlive it.
-render(U, Where, File, Side) ->
+%% Side is #{chat, log, ws}, what outlives it: ws the files open
+%% (candid_file), File's the active one.
+render(U, Where, new, Side = #{ws := Ws}) ->
+    F = candid_file:new(),
+    render(U, Where, new_file(F), Side#{ws := candid_file:open(Ws, F)});
+render(U, Where, File, Side0) ->
+    Side = Side0#{ws := holding(File, maps:get(ws, Side0))},
     candid_log:add(maps:get(log, Side), note, "--- " ++ shorten(File)),
     Root = ui(U, clear, [Where]),
     case candyspeak:parse(File) of
@@ -103,15 +112,55 @@ render(U, Where, File, Side) ->
 	    build(U, Where, Root, File, widgets(Ast), Ast, Side);
 	_Error ->
 	    %% candyspeak said why, on this process's output: in the log.
-	    {SelId, _Run} = ui(U, chooser, [Root, bar(File, Side)]),
+	    {SelId, Run} = ui(U, chooser, [Root, bar(File, Side)]),
 	    ui(U, message, [Root, io_lib:format("~n~s cannot be parsed, "
 						"the log says why",
 						[shorten(File)])]),
 	    candid_log:show(maps:get(log, Side)),
-	    wait_for_pick(U, Where, Side, SelId)
+	    idle(U, Where, File, Side#{sel => SelId, run => Run})
     end.
 
-side(S) -> maps:with([chat, log], S).
+side(S) -> maps:with([chat, log, ws], S).
+
+%% The workspace with File the active one: the tab that already holds it --
+%% a node's listing is opened as the node's when it comes (csp_program) --
+%% or a new one, read from disk.
+holding(File, Ws) ->
+    case [Id || F = #{id := Id} <- candid_file:files(Ws), holds(F, File)] of
+	[Id | _] -> {ok, Ws1} = candid_file:activate(Ws, Id), Ws1;
+	[] -> load(File, Ws)
+    end.
+
+holds(#{origin := {node, Dev}}, File) -> node_file(Dev) =:= File;
+holds(#{origin := new, id := Id}, File) -> new_path(Id) =:= File;
+holds(#{name := none}, _File) -> false;
+holds(#{name := Name}, File) ->
+    filename:absname(Name) =:= filename:absname(File).
+
+load(File, Ws) ->
+    case candid_file:load({disk, File}) of
+	{ok, F} -> candid_file:open(blank_gone(Ws), F);
+	_Error  -> Ws
+    end.
+
+%% A file opened takes the place of an empty tab that is the one shown, as
+%% the first one is: it was there to be filled.
+blank_gone(Ws) ->
+    case candid_file:active(Ws) of
+	#{origin := new, lines := [], id := Id} -> candid_file:close(Ws, Id);
+	_ -> Ws
+    end.
+
+%% A file not yet saved runs from a copy of its own, as a node's does.
+new_path(Id) ->
+    filename:join([os:getenv("TMPDIR", "/tmp"), "candid_new",
+		   "new-" ++ integer_to_list(Id) ++ ".csp"]).
+
+new_file(F = #{id := Id}) ->
+    P = new_path(Id),
+    ok = filelib:ensure_dir(P),
+    ok = candid_file:write(F, P),
+    P.
 
 %% The renderer's function F on its handle.
 ui({M, H}, F, A) -> apply(M, F, [H | A]).
@@ -122,10 +171,67 @@ chat_ui({M, H}) -> {M:chat_view(), H}.
 log_ui({M, H}) -> {M:log_view(), H}.
 
 %% What the bar is built from.
-bar(File, #{chat := Chat}) ->
+bar(File, Side = #{chat := Chat}) ->
     #{file => File, files => available(File), target => target_text(),
       period => period(), periods => ?PERIODS, views => ?VIEWS,
-      chat => Chat =/= undefined}.
+      chat => Chat =/= undefined, tabs => tabs(Side), dir => work_dir()}.
+
+%%% ------------------------------------------------------------------- tabs
+%%%
+%%% A tab per file open (candid_file's workspace), the active one the panel's:
+%%% #{id, label, live, active}. A node's tab is live -- patch mode, its
+%%% program what the node runs -- and to go to it is to connect to the node;
+%%% to go to a file's tab from a node's is to go back to a csp of our own.
+
+tabs(#{ws := Ws}) ->
+    A = case candid_file:active(Ws) of
+	    none -> none;
+	    #{id := I} -> I
+	end,
+    [#{id => Id, label => candid_file:label(F), live => candid_file:live(F),
+       active => Id =:= A} || F = #{id := Id} <- candid_file:files(Ws)];
+tabs(_) -> [].
+
+%% A tab's event: {go, File, Side} -- the panel rebuilt on File, the target
+%% the tab's -- or none.
+tab_event("tab=" ++ I, Side = #{ws := Ws}) ->
+    case candid_file:activate(Ws, list_to_integer(I)) of
+	{ok, Ws1} -> tab_go(Side#{ws := Ws1});
+	_ -> none
+    end;
+tab_event("close=" ++ I, Side = #{ws := Ws}) ->
+    case candid_file:files(Ws) of
+	[_] -> none;                    % the last one stays
+	_ -> tab_go(Side#{ws := candid_file:close(Ws, list_to_integer(I))})
+    end;
+tab_event(_, _Side) -> none.
+
+tab_go(Side = #{ws := Ws}) ->
+    case candid_file:active(Ws) of
+	#{origin := {node, Dev}} ->
+	    set_target(Dev),
+	    {go, node_file(Dev), Side};
+	F = #{origin := new} ->
+	    is_local() orelse set_target(""),
+	    {go, new_file(F), Side};
+	#{name := Path} when Path =/= none ->
+	    is_local() orelse set_target(""),
+	    {go, Path, Side};
+	_ -> none
+    end.
+
+set_target(Text) ->
+    case csp_link:target(Text) of
+	{ok, T} -> put(candid_target, T),
+		   put(candid_target_text, Text),
+		   ok;
+	_ -> error
+    end.
+
+%% A file picked, from the chooser or the dialog: its own tab, csp our own.
+pick(File) ->
+    is_local() orelse set_target(""),
+    File.
 
 %%% ------------------------------------------------------------------ widgets
 
@@ -884,14 +990,19 @@ group(Id, Gs, Rest, Looks, Ann) ->
 build(U, Where, Root, File, [], Ast, Side) ->
     %% Parsed fine, but nothing in it is a widget yet. Say which declarations
     %% it does have -- an empty panel otherwise looks like a failure.
-    {SelId, _Run} = ui(U, chooser, [Root, bar(File, Side)]),
-    ui(U, message, [Root, io_lib:format(
-			    "nothing to show in ~s.~n~n"
-			    "it declares: ~s~n~n"
-			    "widgets come from #digital, #analog and #field; "
-			    "variables and rules are not shown yet.",
-			    [shorten(File), kinds(Ast)])]),
-    wait_for_pick(U, Where, Side, SelId);
+    {SelId, Run} = ui(U, chooser, [Root, bar(File, Side)]),
+    ui(U, message, [Root, case Ast of
+			      [] -> "an empty program: open one, or ask the "
+				    "chat for one";
+			      _ -> io_lib:format(
+				     "nothing to show in ~s.~n~n"
+				     "it declares: ~s~n~n"
+				     "widgets come from #digital, #analog and "
+				     "#field; variables and rules are not "
+				     "shown yet.", [shorten(File), kinds(Ast)])
+			  end]),
+    csp_chat:attach(maps:get(chat, Side), chat_info(File)),
+    idle(U, Where, File, Side#{sel => SelId, run => Run});
 build(U, Where, Root, File, Widgets0, Ast, Side = #{chat := Chat, log := Log}) ->
     {SelId, Run} = ui(U, chooser, [Root, bar(File, Side)]),
     warn_annotations(Ast),
@@ -949,6 +1060,7 @@ build(U, Where, Root, File, Widgets0, Ast, Side = #{chat := Chat, log := Log}) -
 	   file   => File,
 	   chat   => Chat,
 	   log    => Log,
+	   ws     => maps:get(ws, Side),
 	   where  => Where},
     csp_chat:attach(Chat, chat_info(File)),
     loop(U, Link, start_mode(U, Link, S2)).
@@ -992,6 +1104,26 @@ retarget(U, Link, S, Text) ->
 	    {Link, S}
     end.
 
+%% The program a node runs, read off it: the panel rebuilt on it in the
+%% node's tab -- unless that tab already holds the same image and patch and
+%% is the one shown (held), which keeps the reconnect after the rebuild from
+%% looping.
+node_program(U, Where, Side = #{ws := Ws}, Link, Text, Dumps) ->
+    Dev = target_text(),
+    Held = [G || G = #{origin := {node, D}} <- candid_file:files(Ws),
+		 D =:= Dev, candid_file:same_image(G, Dumps)],
+    case {Held, candid_file:active(Ws)} of
+	{[F], F} -> held;
+	_ ->
+	    F = candid_file:from_node(Dev, Text, Dumps),
+	    File = node_file(Dev),
+	    ok = filelib:ensure_dir(File),
+	    ok = file:write_file(File, unicode:characters_to_binary(Text)),
+	    csp_link:close(Link),
+	    flush(),
+	    render(U, Where, File, Side#{ws := candid_file:open(blank_gone(Ws), F)})
+    end.
+
 %% What the chat is told after every rebuild: what is shown, and where it runs.
 chat_info(File) ->
     #{file => File, target => target_text(), local => is_local()}.
@@ -1031,11 +1163,14 @@ views() ->
 	V         -> V
     end.
 
-%% The first of each list unless candid.config names another. A value the bar
-%% has no button for is said, not taken.
+%% The first of each list unless the last run left another (settings/0) or
+%% candid.config names one. A value the bar has no button for is said, not
+%% taken.
 configured() ->
+    Kept = settings(),
     maps:from_list(
-      [{K, case config(list_to_atom(K)) of
+      [{K, case proplists:get_value(list_to_atom(K), Kept,
+				    config(list_to_atom(K))) of
 	       undefined -> hd(Vals);
 	       V0 ->
 		   V = to_text(V0),
@@ -1047,6 +1182,33 @@ configured() ->
 			   hd(Vals)
 		   end
 	   end} || {K, Vals} <- ?VIEWS]).
+
+%% What was shown when the panel was last used, kept for the next start:
+%% written as it changes and when the window closes. Not there, or not
+%% readable, is nothing kept; not written is said and nothing more.
+settings_path() ->
+    case os:getenv("CANDID_SETTINGS") of
+	false -> filename:join(filename:basedir(user_config, "candid"),
+			       "settings.config");
+	P -> P
+    end.
+
+settings() ->
+    case file:consult(settings_path()) of
+	{ok, Ts} -> [T || T = {K, _} <- Ts, is_atom(K)];
+	_ -> []
+    end.
+
+keep_settings() ->
+    P = settings_path(),
+    try
+	ok = filelib:ensure_dir(P),
+	ok = file:write_file(P, [io_lib:format("{~s, ~s}.~n", [K, V])
+				 || {K, V} <- lists:sort(maps:to_list(views()))])
+    catch _:Why ->
+	    io:format("panel: settings not kept in ~s: ~p~n", [P, Why])
+    end,
+    ok.
 
 %% candid.config's {candid, [...]}. The application is only loaded to make
 %% the environment reachable: -config keeps nothing for one nobody loaded.
@@ -1079,6 +1241,7 @@ view(_U, S, _K, _V) ->
 
 view_done(U, S, K, V) ->
     put(candid_views, maps:put(K, V, views())),
+    keep_settings(),
     ui(U, view_buttons, [maps:get(run, S), K, V]),
     S.
 
@@ -1192,19 +1355,99 @@ label_of(Name) ->
 	_ -> Name
     end.
 
-%% Nothing to drive, so there is no csp and no tick -- just the chooser.
-wait_for_pick(U, Where, Side, SelId) ->
+%% Nothing to drive, so there is no csp and no tick -- just the bar, and
+%% the chat's load. W is the side and the bar's ids, #{sel, run}.
+wait_tab(U, Where, File, W, Tag) ->
+    case tab_event(Tag, side(W)) of
+	{go, File1, Side1} -> render(U, Where, File1, Side1);
+	none -> wait_for_pick(U, Where, File, W)
+    end.
+
+%% The views as they are, the theme put on: there is no panel to show the
+%% others on.
+idle(U, Where, File, W) ->
+    W1 = lists:foldl(fun({"theme", V}, Wi) -> view(U, Wi, "theme", V);
+			({K, V}, Wi) -> view_done(U, Wi, K, V)
+		     end, W, maps:to_list(views())),
+    wait_for_pick(U, Where, File, W1).
+
+wait_for_pick(U, Where, File, W) ->
+    Side = side(W),
+    Again = fun(W1) -> wait_for_pick(U, Where, File, W1) end,
+    Link = maps:get(link, W, none),
+    Drop = fun() -> Link =:= none orelse csp_link:close(Link), flush() end,
     receive
-	stop -> ok;
+	stop -> Drop();
+	%% A node being connected to from here (target=): what it runs comes
+	%% as its program, and the panel is built on that.
+	{csp_link, Text} ->
+	    candid_log:add(maps:get(log, Side), link, Text),
+	    Again(W);
+	{csp_out, Text} ->
+	    candid_log:add(maps:get(log, Side), csp, Text),
+	    Again(W);
+	{csp_program, Text, Dumps} when Link =/= none ->
+	    case node_program(U, Where, Side, Link, Text, Dumps) of
+		held -> Again(W);
+		Done -> Done
+	    end;
+	{csp_exit, _} ->
+	    Drop(),
+	    Again(maps:remove(link, W));
+	{chat_tool, From, Ref, <<"load_file">> = Name, Args} ->
+	    {load, File1, Reply} = csp_chat:panel_tool(Name, Args, #{}),
+	    From ! {Ref, Reply},
+	    render(U, Where, File1, Side);
+	{chat_tool, From, Ref, _Name, _Args} ->
+	    From ! {Ref, {error, "nothing runs in the panel: an empty "
+			  "program, or one that cannot be read"}},
+	    Again(W);
+	{chat_direct, Chat, _Line} ->
+	    Chat ! {chat_out, "nothing runs to send it to"},
+	    Again(W);
 	Msg ->
-	    case event(U, #{sel => SelId}, Msg) of
-		{pick, File} -> render(U, Where, File, Side);
+	    case event(U, #{sel => maps:get(sel, W),
+			    run => maps:get(event, maps:get(run, W))}, Msg) of
+		{pick, File1} -> Drop(), render(U, Where, pick(File1), Side);
+		{bar, "open"} ->
+		    case ui(U, open_file, [work_dir()]) of
+			{ok, File1} -> Drop(), render(U, Where, pick(File1), Side);
+			_ -> Again(W)
+		    end;
+		{bar, "new"} -> Drop(), render(U, Where, new, Side);
+		{bar, "target=" ++ Text} ->
+		    Drop(),
+		    case set_target(Text) of
+			error ->
+			    candid_log:add(maps:get(log, Side), error,
+					   "not a target: " ++ Text),
+			    Again(maps:remove(link, W));
+			ok ->
+			    case is_local() of
+				true -> render(U, Where, File, Side);
+				false ->
+				    {ok, L} = csp_link:open(target(), csp_exe(),
+							    [File]),
+				    Again(W#{link => L})
+			    end
+		    end;
+		{bar, "save"} -> Again(save_ui(U, W, save));
+		{bar, "saveas"} -> Again(save_ui(U, W, ask));
+		{bar, "saveas=" ++ N} -> Again(save_ui(U, W, {as, N}));
+		{bar, Tag = "tab=" ++ _} ->
+		    Drop(), wait_tab(U, Where, File, maps:remove(link, W), Tag);
+		{bar, Tag = "close=" ++ _} ->
+		    Drop(), wait_tab(U, Where, File, maps:remove(link, W), Tag);
 		{bar, "log=toggle"} -> candid_log:toggle(maps:get(log, Side)),
-				       wait_for_pick(U, Where, Side, SelId);
+				       Again(W);
 		{bar, "chat=toggle"} -> csp_chat:toggle(maps:get(chat, Side)),
-					wait_for_pick(U, Where, Side, SelId);
-		closed       -> ok;
-		_            -> wait_for_pick(U, Where, Side, SelId)
+					Again(W);
+		%% the theme now, the others kept for when there is a panel
+		{bar, "theme=" ++ V} -> Again(view(U, W, "theme", V));
+		{bar, "trace=" ++ V} -> Again(view_done(U, W, "trace", V));
+		{bar, "code=" ++ V} -> Again(view_done(U, W, "code", V));
+		closed -> Drop(), keep_settings();
+		_ -> Again(W)
 	    end
     end.
 
@@ -1264,24 +1507,36 @@ loop(U, Link, S) ->
 	%% What csp says besides the dumps: an error after a set, Paused ...
 	{csp_out, Text} ->
 	    candid_log:add(maps:get(log, S), csp, Text),
+	    case maps:get(direct, S, none) of
+		{Chat, Until} -> erlang:monotonic_time(millisecond) < Until
+				     andalso (Chat ! {chat_out, Text});
+		none -> ok
+	    end,
 	    loop(U, Link, S);
+
+	%% A line typed in the chat after `//': to csp's prompt or the node's
+	%% console as it is, what comes back for a while shown in the chat.
+	{chat_direct, Chat, Line} ->
+	    case direct_refused(Line) of
+		false ->
+		    csp_link:raw(Link, Line),
+		    Until = erlang:monotonic_time(millisecond) + 2000,
+		    loop(U, Link, S#{direct => {Chat, Until}});
+		Why ->
+		    Chat ! {chat_out, Why},
+		    loop(U, Link, S)
+	    end;
 
 	%% A node's program, listed off its image: the panel is rebuilt from it,
 	%% so the code and the widgets are what RUNS there and not whatever
-	%% file happened to be open. Once it shows that program this is a no-op,
-	%% which is what keeps the reconnect after the rebuild from looping.
-	{csp_program, Text} ->
-	    File = node_file(target_text()),
-	    Bin = unicode:characters_to_binary(Text),
-	    case file:read_file(maps:get(file, S)) of
-		{ok, Bin} ->
-		    loop(U, Link, S);
-		_ ->
-		    ok = filelib:ensure_dir(File),
-		    ok = file:write_file(File, Bin),
-		    csp_link:close(Link),
-		    flush(),
-		    render(U, maps:get(where, S), File, side(S))
+	%% file happened to be open. The node's tab already holding that image
+	%% and patch makes it a no-op, which is what keeps the reconnect after
+	%% the rebuild from looping.
+	{csp_program, Text, Dumps} ->
+	    case node_program(U, maps:get(where, S), side(S), Link, Text,
+			      Dumps) of
+		held -> loop(U, Link, S);
+		Done -> Done
 	    end;
 
 	%% csp ended, or the node went away. The panel stays: another target
@@ -1316,6 +1571,76 @@ loop(U, Link, S) ->
 	    act_ui(U, Link, S, event(U, ids(S), Msg))
     end.
 
+tab_ui(U, Link, S, Tag) ->
+    case tab_event(Tag, side(S)) of
+	{go, File, Side} ->
+	    csp_link:close(Link),
+	    flush(),
+	    render(U, maps:get(where, S), File, Side);
+	none -> loop(U, Link, S)
+    end.
+
+%% What `//' may not send: what would end the link or take the running and
+%% stepping out of the bar's hands, and the panel would no longer show what
+%% happens. Anything else goes, the person's to answer for.
+direct_refused(Line) ->
+    case string:lexemes(Line, " ") of
+	[C | _] when C =:= "/quit"; C =:= "/exit" ->
+	    "not sent: it ends the program, and the panel with it";
+	[C | _] when C =:= "/pause"; C =:= "/resume"; C =:= "/step";
+		     C =:= "/commit" ->
+	    "not sent: go, pause and step are the bar's";
+	_ -> false
+    end.
+
+%% The tab shown saved: at its name, or where the person says -- the
+%% renderer's dialog (wse asks in the page and comes back with saveas=Name).
+save_ui(U, S = #{ws := Ws}, How) ->
+    case candid_file:active(Ws) of
+	none -> S;
+	F ->
+	    case save_path(U, S, F, How) of
+		cancel -> S;
+		Path ->
+		    case candid_file:save(F, Path) of
+			{ok, F1} ->
+			    io:format("saved ~s~n", [Path]),
+			    S1 = S#{ws := candid_file:update(Ws, F1)},
+			    ui(U, tabs, [maps:get(run, S1), tabs(S1)]),
+			    S1;
+			{error, Why} ->
+			    io:format("panel: not saved: ~p~n", [Why]),
+			    S
+		    end
+	    end
+    end.
+
+save_path(_U, _S, #{name := P}, save) when P =/= none -> P;
+save_path(U, S, F, How) when How =:= save; How =:= ask ->
+    case ui(U, save_file, [maps:get(run, S), work_dir(), save_name(F)]) of
+	{ok, P} -> P;
+	_ -> cancel
+    end;
+save_path(_U, _S, _F, {as, Name0}) ->
+    case string:trim(Name0) of
+	"" -> cancel;
+	Name ->
+	    P = filename:absname(Name, work_dir()),
+	    case filename:extension(P) of
+		"" -> P ++ ".csp";
+		_ -> P
+	    end
+    end.
+
+%% What save as offers: the name it has, a node's after the node.
+save_name(#{name := P}) when P =/= none -> filename:basename(P);
+save_name(#{origin := {node, Dev}}) ->
+    [case C of
+	 _ when C >= $a, C =< $z; C >= $A, C =< $Z; C >= $0, C =< $9 -> C;
+	 _ -> $_
+     end || C <- Dev] ++ ".csp";
+save_name(_) -> "new.csp".
+
 %% The event ids the renderer tells the chooser, the bar and the code view
 %% by: the bar's from a widget's by the id rather than by the payload, so a
 %% signal called "step" could not be mistaken for the button.
@@ -1331,7 +1656,23 @@ ids(S) ->
 act_ui(U, Link, S, {pick, File}) ->
     csp_link:close(Link),
     flush(),
-    render(U, maps:get(where, S), File, side(S));
+    render(U, maps:get(where, S), pick(File), side(S));
+%% open...: the renderer's own file dialog, where it has one.
+act_ui(U, Link, S, {bar, "open"}) ->
+    case ui(U, open_file, [work_dir()]) of
+	{ok, File} -> act_ui(U, Link, S, {pick, File});
+	_ -> loop(U, Link, S)
+    end;
+act_ui(U, Link, S, {bar, "new"}) ->
+    csp_link:close(Link),
+    flush(),
+    render(U, maps:get(where, S), new, side(S));
+act_ui(U, Link, S, {bar, "save"}) -> loop(U, Link, save_ui(U, S, save));
+act_ui(U, Link, S, {bar, "saveas"}) -> loop(U, Link, save_ui(U, S, ask));
+act_ui(U, Link, S, {bar, "saveas=" ++ Name}) ->
+    loop(U, Link, save_ui(U, S, {as, Name}));
+act_ui(U, Link, S, {bar, Tag = "tab=" ++ _}) -> tab_ui(U, Link, S, Tag);
+act_ui(U, Link, S, {bar, Tag = "close=" ++ _}) -> tab_ui(U, Link, S, Tag);
 %% run / pause / step, the target, the views: the bar.
 act_ui(U, Link, S, {bar, "target=" ++ Text}) ->
     {Link1, S1} = retarget(U, Link, S, Text),
@@ -1360,6 +1701,7 @@ act_ui(U, Link, S, {widgets, Ds}) ->
     [set_widget(Link, S, D) || D <- Ds],
     loop(U, Link, S);
 act_ui(_U, Link, _S, closed) ->
+    keep_settings(),
     csp_link:close(Link);
 act_ui(U, Link, S, none) ->
     loop(U, Link, S).
@@ -1375,9 +1717,26 @@ set_widget(Link, S, Data) ->
 
 %% What the code view asked csp for: a replayed trace's reset, inputs and
 %% steps. A replay runs paused, so the bar says so.
+%%
+%% While the code view walks a trace, the widgets and the clock show the
+%% cycle it is on -- the key pressed lit, the state the trace has -- and csp's
+%% own values come back when it stops.
 code_do(U, Link, S, Code0) ->
+    Was = csp_code:look(maps:get(code, S, undefined)),
     {Acts, Code} = csp_code:actions(Code0),
-    lists:foldl(fun(A, Si) -> act(U, Link, Si, A) end, S#{code := Code}, Acts).
+    S1 = lists:foldl(fun(A, Si) -> act(U, Link, Si, A) end, S#{code := Code},
+		     Acts),
+    case csp_code:look(Code) of
+	Was  -> S1;
+	none -> paint(U, S1, maps:to_list(maps:get(last, S1))),
+		erase(candid_clock),
+		show_clock(U, S1),
+		S1;
+	#{values := Vs} ->
+	    paint(U, S1, maps:to_list(Vs)),
+	    show_clock(U, S1),
+	    S1
+    end.
 
 act(U, Link, S = #{mode := run}, pause) -> control(U, Link, S, "mode=step");
 act(_U, _Link, S, pause)                -> S;
@@ -1398,8 +1757,14 @@ send_frame(Id, Bytes) ->
     end.
 
 %% Once a tick, and only when the text changed.
-show_clock(U, #{clock_box := B, clock := {N, Ms}}) ->
-    T = clock_text(N, Ms),
+show_clock(U, #{clock_box := B, clock := {N, Ms}, code := Code}) ->
+    T = case csp_code:look(Code) of
+	    none -> clock_text(N, Ms);
+	    #{step := I, steps := K, ms := Tm} ->
+		%% the cycle the code view shows, into step I
+		lists:flatten(io_lib:format("trace ~w\x{2192}~w / ~w   time ~s",
+					    [I - 1, I, K, secs(Tm)]))
+	end,
     case get(candid_clock) of
 	T -> ok;
 	_ -> put(candid_clock, T),
@@ -1454,7 +1819,7 @@ flush() ->
 	{csp_model, _}    -> flush();
 	{csp_exit, _}     -> flush();
 	{csp_link, _}     -> flush();
-	{csp_program, _}  -> flush();
+	{csp_program, _, _} -> flush();
 	tick              -> flush()
     after 0 -> ok
     end.
@@ -1469,8 +1834,9 @@ flush() ->
 %% writing what was already there. That was the lag, not the transport.
 update(U, S, Vals) ->
     Last = maps:get(last, S),
-    paint(U, S, [{N, V} || {N, V} <- Vals,
-			   maps:get(N, Last, undefined) =/= V]),
+    csp_code:look(maps:get(code, S, undefined)) =:= none andalso
+	paint(U, S, [{N, V} || {N, V} <- Vals,
+			       maps:get(N, Last, undefined) =/= V]),
     Last1 = maps:merge(Last, maps:from_list(Vals)),
     S#{last := Last1,
        code := csp_code:refresh(maps:get(code, S, undefined), Last1)}.
@@ -1575,7 +1941,8 @@ sample(Top, _Kind, V, #{colour := {On, _Off}}) ->
 available(Current) ->
     Found = lists:append([csp_in(D) || D <- lists:usort([demo_dir(), work_dir()])]
 			 ++ [csp_in(examples_dir())]),
-    lists:usort([Current | Found]).
+    New = filename:dirname(new_path(0)),
+    lists:usort([C || C <- [Current], filename:dirname(C) =/= New] ++ Found).
 
 csp_in(Dir) ->
     case file:list_dir(Dir) of
@@ -1589,13 +1956,6 @@ csp_in(Dir) ->
 shorten(Path) ->
     filename:join(
       lists:reverse(lists:sublist(lists:reverse(filename:split(Path)), 2))).
-
-default_file() ->
-    F = filename:join(demo_dir(), "gate.csp"),
-    case filelib:is_regular(F) of
-	true  -> F;
-	false -> hd(available(F))
-    end.
 
 %%% -------------------------------------------------------------------- paths
 

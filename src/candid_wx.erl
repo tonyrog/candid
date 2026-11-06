@@ -26,13 +26,17 @@
 -include("candid.hrl").
 
 -export([start/0, start/1, start0/0, code_view/0, chat_view/0, log_view/0]).
--export([clear/2, message/3, chooser/3, panel/3, event/2]).
+-export([clear/2, message/3, chooser/3, panel/3, event/2, open_file/2,
+	 save_file/4, tabs/3]).
 -export([status/3, trace_view/3, theme/2, view_buttons/4, mode/3]).
+-export([tc/3, is_light/1, theme_hook/3]).
+-export([rich/3, rich_add/4, rich_trim/3, rich_clear/2]).
+-export([btn/4, btn_on/3, btn_enable/3, btn_label/3, btn_group/3, menu_btn/5]).
 -export([paint/3, trace_clear/2, trace_column/3, plot/4]).
 -export([fg/3, bg/3, tc/2]).
 -export([colour/1, mix/3, font/1, label/2, relayout_up/1, canvas/4, redraw/3, register/3, register/4,
 	 forget/2, lookup/2, click/3, frame_box/2, text/4]).
--export([dock_pane/4, dock_show/3]).                % the log's and the chat's                          % csp_code_wx's
+-export([dock_pane/4, dock_show/3, in_scope/3, lookup_scope/2]).                % the log's and the chat's                          % csp_code_wx's
 
 -define(BG,      {18, 18, 18}).
 -define(INK,     {221, 221, 221}).
@@ -94,7 +98,9 @@ log_view() -> candid_log_wx.
 %% The window emptied for a rebuild, and a fresh root to build in. The dock
 %% stays.
 clear(H = #{ids := Ids, dock := Dock}, Frame) ->
+    Keep = [E || E = {K, _, _} <- ets:tab2list(Ids), outlives(K, Dock)],
     ets:delete_all_objects(Ids),
+    ets:insert(Ids, Keep),
     Fs = wxBoxSizer:new(?wxVERTICAL),
     wxWindow:setSizer(Frame, Fs),
     [wxWindow:destroy(W) || W <- wxWindow:getChildren(Frame),
@@ -107,6 +113,22 @@ clear(H = #{ids := Ids, dock := Dock}, Frame) ->
     wxSizer:add(Fs, Dock, [{flag, ?wxEXPAND}]),
     register(H, theme_root, Root),
     Root.
+
+%% What a rebuild leaves: the theme, and what the dock's panes coloured.
+outlives(theme, _Dock) -> true;
+outlives({rich, _}, _Dock) -> true;
+outlives({theme_hook, _}, _Dock) -> true;
+outlives({btn, W}, Dock) -> within(W, Dock);
+outlives({colour, W, _}, Dock) -> within(W, Dock);
+outlives(_, _Dock) -> false.
+
+within(W, Dock) ->
+    case wx:is_null(W) of
+	true -> false;
+	false ->
+	    element(2, W) =:= element(2, Dock) orelse
+		within(wxWindow:getParent(W), Dock)
+    end.
 
 %%% ------------------------------------------------------------ the dock
 %%%
@@ -124,10 +146,8 @@ dock_pane(H = #{dock := Dock}, Title, Where, Close) ->
     wxSizer:add(Head, text(H, P, Title, {153, 204, 255}),
 		[{proportion, 1}, {flag, ?wxALIGN_CENTER_VERTICAL bor ?wxLEFT},
 		 {border, 4}]),
-    X = wxButton:new(P, ?wxID_ANY, [{label, "close"}]),
     Pid = self(),
-    wxButton:connect(X, command_button_clicked,
-		     [{callback, fun(_E, _O) -> Pid ! Close end}]),
+    X = btn(H, P, "close", #{click => fun() -> Pid ! Close end}),
     wxSizer:add(Head, X),
     wxSizer:add(S, Head, [{flag, ?wxEXPAND bor ?wxALL}, {border, 2}]),
     Opts = [{proportion, 1}, {flag, ?wxEXPAND bor ?wxALL}, {border, 2}],
@@ -154,74 +174,129 @@ message(H, Root, Str) ->
 %% The bar: the chooser, the target, run/pause/step, the tick, the views and
 %% the chat. Back: the chooser's event (any term; the bar's events say what
 %% they are) and the bar's buttons, as candid_wse gives them.
-chooser(H, Root, #{file := Current, files := Files, target := Target,
-		   period := Now, periods := Periods, views := Views,
-		   chat := Chat}) ->
-    %% Two rows: what runs and how, then what is shown.
+chooser(H, Root, Spec = #{target := Target,
+			  period := Now, periods := Periods, views := Views,
+			  chat := Chat}) ->
+    %% The tabs, then two rows: what runs and how, then what is shown.
     Bar = wxBoxSizer:new(?wxVERTICAL),
+    Row0 = wxBoxSizer:new(?wxHORIZONTAL),
     Row1 = wxBoxSizer:new(?wxHORIZONTAL),
     Row2 = wxBoxSizer:new(?wxHORIZONTAL),
+    wxSizer:add(Bar, Row0, [{flag, ?wxBOTTOM}, {border, 4}]),
     wxSizer:add(Bar, Row1, []),
     wxSizer:add(Bar, Row2, []),
+    Pid = self(),
+    tabs(H, Root, Row0, maps:get(tabs, Spec, []), Pid),
     In = fun(Row) -> fun(W) -> wxSizer:add(Row, W, [{flag, ?wxALL bor
 						     ?wxALIGN_CENTER_VERTICAL},
 						    {border, 3}]), W end end,
+    %% The buttons that go together in a frame of their own, named on it:
+    %% run, and each view. The buttons side by side, no gap.
+    Group = fun(Row, Title) ->
+		    {G, Gs} = btn_group(H, Root, Title),
+		    wxSizer:add(Row, G, [{flag, ?wxLEFT bor ?wxRIGHT bor
+					  ?wxALIGN_CENTER_VERTICAL},
+					 {border, 3}]),
+		    {G, fun(W) -> wxSizer:add(Gs, W, [{flag, ?wxALIGN_CENTER_VERTICAL}]),
+				  W end}
+	    end,
+    Button = fun({G, In1}, Label, Tag) ->
+		     In1(btn(H, G, Label,
+			     #{click => fun() -> Pid ! {candid_wx, {bar, Tag}} end}))
+	     end,
+    File = Group(Row1, "file"),
+    Button(File, "open\x{2026}", "open"),
+    Button(File, "new", "new"),
+    Button(File, "save", "save"),
+    Button(File, "save as\x{2026}", "saveas"),
     Add = In(Row1),
-    Add2 = In(Row2),
-    Sel = Add(wxChoice:new(Root, ?wxID_ANY,
-			   [{choices, [candid:shorten(F) || F <- Files]}])),
-    wxChoice:setSelection(Sel, index_of(Current, Files)),
-    wxChoice:connect(Sel, command_choice_selected, [{userData, {pick, Files}}]),
     Tgt = Add(wxTextCtrl:new(Root, ?wxID_ANY,
 			     [{value, Target}, {size, {260, -1}},
 			      {style, ?wxTE_PROCESS_ENTER}])),
+    bg(H, Tgt, {34, 34, 34}),
+    fg(H, Tgt, ?INK),
+    wxWindow:setFont(Tgt, font(H)),
     wxWindow:setToolTip(Tgt, "local, or a can interface: a csp of our own on "
 			"that bus\nhost:port or /dev/tty...[@baud]: a node's "
 			"console\nrom | eeprom: without or with the EEPROM patch\n"
 			"image=SLOT: read a node's program from that flash slot"),
     wxTextCtrl:connect(Tgt, command_text_enter, [{userData, {bar_text, "target="}}]),
-    Toggle = fun(Label, Tag) ->
-		     B = Add(wxToggleButton:new(Root, ?wxID_ANY, Label)),
-		     wxToggleButton:connect(B, command_togglebutton_clicked,
-					    [{userData, {bar, Tag}}]),
-		     B
-	     end,
-    RunB = Toggle("run", "mode=run"),
-    PauseB = Toggle("pause", "mode=step"),
-    OneB = Add(wxButton:new(Root, ?wxID_ANY, [{label, "step"}])),
-    wxButton:connect(OneB, command_button_clicked, [{userData, {bar, "step=1"}}]),
-    Add(text(H, Root, "tick", ?DIM)),
+    Run = {RBox, RIn} = Group(Row1, "run"),
+    RunB = Button(Run, "go", "mode=run"),
+    PauseB = Button(Run, "pause", "mode=step"),
+    OneB = Button(Run, "step", "step=1"),
+    RIn(text(H, RBox, "  tick ", ?DIM)),
     Ps = lists:usort([Now | Periods]),
-    Tick = Add(wxChoice:new(Root, ?wxID_ANY,
-			    [{choices, [integer_to_list(P) ++ " ms" || P <- Ps]}])),
-    wxChoice:setSelection(Tick, index_of(Now, Ps)),
-    wxChoice:connect(Tick, command_choice_selected,
-		     [{userData, {bar_choice, "period=",
-				  [integer_to_list(P) || P <- Ps]}}]),
-    Toggle2 = fun(Label, Tag) ->
-		      B = Add2(wxToggleButton:new(Root, ?wxID_ANY, Label)),
-		      wxToggleButton:connect(B, command_togglebutton_clicked,
-					     [{userData, {bar, Tag}}]),
-		      B
-	      end,
+    RIn(menu_btn(H, RBox, [integer_to_list(P) ++ " ms" || P <- Ps],
+		 index_of(Now, Ps),
+		 fun(I) -> Pid ! {candid_wx, {bar, "period=" ++
+					      integer_to_list(lists:nth(I, Ps))}}
+		 end)),
     Vs = lists:append(
-	   [[{{K, V}, begin
-			  _ = (V =:= hd(Vals)) andalso
-			      Add2(text(H, Root, "  " ++ K, ?DIM)),
-			  Toggle2(V, K ++ "=" ++ V)
-		      end} || V <- Vals] || {K, Vals} <- Views]),
-    Chat andalso begin
-		     B = Add2(wxButton:new(Root, ?wxID_ANY, [{label, "chat"}])),
-		     wxButton:connect(B, command_button_clicked,
-				      [{userData, {bar, "chat=toggle"}}])
-		 end,
-    LogB = Add2(wxButton:new(Root, ?wxID_ANY, [{label, "log"}])),
-    wxButton:connect(LogB, command_button_clicked, [{userData, {bar, "log=toggle"}}]),
+	   [begin
+		G = Group(Row2, K),
+		[{{K, V}, Button(G, V, K ++ "=" ++ V)} || V <- Vals]
+	    end || {K, Vals} <- Views]),
+    Panes = Group(Row2, "panes"),
+    Chat andalso Button(Panes, "chat", "chat=toggle"),
+    Button(Panes, "log", "log=toggle"),
     wxSizer:add(wxWindow:getSizer(Root), Bar, [{flag, ?wxALL bor ?wxEXPAND},
 					       {border, 4}]),
     relayout(Root),
     {pick, #{event => bar, run => RunB, pause => PauseB, one => OneB,
-	     views => maps:from_list(Vs)}}.
+	     views => maps:from_list(Vs), tabs => {Root, Row0, Pid}}}.
+
+%% The tabs again, as they are now: a file saved under another name.
+tabs(H, #{tabs := {Root, Row, Pid}}, Tabs) ->
+    wxSizer:clear(Row, [{delete_windows, true}]),
+    tabs(H, Root, Row, Tabs, Pid),
+    relayout(Root).
+
+%% A tab per file open: its name, lit when it is the one shown, a node's
+%% marked live, and a cross to close it.
+tabs(H, Root, Row, Tabs, Pid) ->
+    Send = fun(Tag) -> fun() -> Pid ! {candid_wx, {bar, Tag}} end end,
+    [begin
+	 Id = integer_to_list(I),
+	 Label = case Live of
+		     true  -> "\x{25CF} " ++ L;
+		     false -> L
+		 end,
+	 B = btn(H, Root, Label, #{click => Send("tab=" ++ Id)}),
+	 Active andalso btn_on(H, B, true),
+	 Live andalso wxWindow:setToolTip(B, "live: a node's program, patch "
+					  "mode -- rules added and turned "
+					  "off, nothing else"),
+	 X = btn(H, Root, "\x{00D7}", #{click => Send("close=" ++ Id)}),
+	 wxSizer:add(Row, B, []),
+	 wxSizer:add(Row, X, [{flag, ?wxRIGHT}, {border, 6}])
+     end || #{id := I, label := L, live := Live, active := Active} <- Tabs],
+    ok.
+
+%% The desktop's own file dialog: {ok, Path} or cancel.
+open_file(#{frame := F}, Dir) ->
+    D = wxFileDialog:new(F, [{message, "open a program"}, {defaultDir, Dir},
+			     {wildCard, "CandySpeak (*.csp)|*.csp|all files|*"},
+			     {style, ?wxFD_OPEN bor ?wxFD_FILE_MUST_EXIST}]),
+    R = case wxFileDialog:showModal(D) of
+	    ?wxID_OK -> {ok, wxFileDialog:getPath(D)};
+	    _ -> cancel
+	end,
+    wxFileDialog:destroy(D),
+    R.
+
+%% The same for saving, Name offered: {ok, Path} or cancel.
+save_file(#{frame := F}, _Bar, Dir, Name) ->
+    D = wxFileDialog:new(F, [{message, "save the program as"},
+			     {defaultDir, Dir}, {defaultFile, Name},
+			     {wildCard, "CandySpeak (*.csp)|*.csp|all files|*"},
+			     {style, ?wxFD_SAVE bor ?wxFD_OVERWRITE_PROMPT}]),
+    R = case wxFileDialog:showModal(D) of
+	    ?wxID_OK -> {ok, wxFileDialog:getPath(D)};
+	    _ -> cancel
+	end,
+    wxFileDialog:destroy(D),
+    R.
 
 index_of(X, L) -> index_of(X, L, 0).
 index_of(X, [X | _], I) -> I;
@@ -286,16 +361,8 @@ scrolled(Parent) ->
     W.
 
 %% What the window said, as the core reads it.
-event(_Ids, #wx{userData = {pick, Files}, event = #wxCommand{commandInt = I}}) ->
-    {pick, lists:nth(I + 1, Files)};
 event(_Ids, #wx{userData = {bar_text, Pre}, event = #wxCommand{cmdString = S}}) ->
     {bar, Pre ++ S};
-event(_Ids, #wx{userData = {bar_choice, Pre, Vals},
-		event = #wxCommand{commandInt = I}}) ->
-    {bar, Pre ++ lists:nth(I + 1, Vals)};
-event(_Ids, #wx{userData = {code_choice, Pre, Vals},
-		event = #wxCommand{commandInt = I}}) ->
-    {code, Pre ++ lists:nth(I + 1, Vals)};
 event(_Ids, #wx{userData = {bar, Tag}})    -> {bar, Tag};
 event(_Ids, #wx{userData = {code, Tag}})   -> {code, Tag};
 event(_Ids, #wx{userData = {widget, D}})   -> {widget, D};
@@ -323,20 +390,23 @@ trace_view(_H, TraceBox, Show) ->
 %% own colours -- a lamp, a contact -- stay: they say something.
 theme(H = #{ids := Ids}, T) ->
     ets:insert(Ids, {theme, T, perm}),
-    [wx_colour(W, Which, tc(H, C)) || {{colour, W, Which}, C, _} <- ets:tab2list(Ids)],
+    [wx_colour(W, Which, tc(H, C, Which))
+     || {{colour, W, Which}, C, _} <- ets:tab2list(Ids)],
+    [Fun(T) || {{theme_hook, _}, Fun, _} <- ets:tab2list(Ids)],
     [wxWindow:refresh(W) || {theme_root, W, _} <- ets:lookup(Ids, theme_root)],
+    wxWindow:refresh(maps:get(dock, H)),
     ok.
 
-view_buttons(_H, #{views := Views}, Key, V) ->
-    [wxToggleButton:setValue(B, Val =:= V)
+view_buttons(H, #{views := Views}, Key, V) ->
+    [btn_on(H, B, Val =:= V)
      || {{K1, Val}, B} <- maps:to_list(Views), K1 =:= Key],
     ok.
 
-mode(_H, #{run := RunB, pause := PauseB, one := OneB}, Step) ->
-    wxToggleButton:setValue(RunB, not Step),
-    wxToggleButton:setValue(PauseB, Step),
+mode(H, #{run := RunB, pause := PauseB, one := OneB}, Step) ->
+    btn_on(H, RunB, not Step),
+    btn_on(H, PauseB, Step),
     %% the step button is only live while stopped
-    wxWindow:enable(OneB, [{enable, Step}]).
+    btn_enable(H, OneB, Step).
 
 paint(H, Node, V) ->
     paint1(H, Node, V).
@@ -350,10 +420,20 @@ trace_clear(_H, {P, Bmp}) ->
 trace_column(_H, {P, Bmp}, Items) ->
     redraw(P, Bmp, fun(DC) -> column(DC, Items) end).
 
-column(DC, [X, Y, C | T]) ->
-    rect(DC, {X, Y, ?STEP, 3}, colour(C)),
-    column(DC, T);
-column(_DC, []) -> ok.
+%% A brush per colour, not per item: a column is every signal, every tick.
+column(DC, Items) ->
+    wxDC:setPen(DC, ?wxTRANSPARENT_PEN),
+    [begin
+	 Br = wxBrush:new(colour(C)),
+	 wxDC:setBrush(DC, Br),
+	 [wxDC:drawRectangle(DC, {X, Y, ?STEP, 3}) || {X, Y} <- XYs],
+	 wxBrush:destroy(Br)
+     end || {C, XYs} <- maps:to_list(by_colour(Items, #{}))],
+    ok.
+
+by_colour([X, Y, C | T], M) ->
+    by_colour(T, maps:update_with(C, fun(L) -> [{X, Y} | L] end, [{X, Y}], M));
+by_colour([], M) -> M.
 
 %% One frame of a plot: everything already drawn decays toward the glass by
 %% Keep, then the graticule, then per channel the segment and its dot.
@@ -485,7 +565,7 @@ keypad(H, Left, #{label := Label, cols := Cols, keys := Keys}) ->
 					      push   -> push(H, Left, Grid, Name, Look);
 					      toggle -> switch(H, Left, Grid, Name, Look)
 					  end,
-		 label(B, maps:get(label, Look)),
+		 btn_label(H, B, maps:get(label, Look)),
 		 {Name, {key, B, Hue, Idle}}
 	     end || {{Kind, Name, _}, Look} <- Keys],
     wxSizer:add(Row, Grid, []),
@@ -511,10 +591,10 @@ click(W, Ev, Pid) ->
 
 switch(H, Left, Row, Name, Look = #{colour := Hue}) ->
     Idle = maps:get(idle, Look, 0),
-    B = wxButton:new(Left, ?wxID_ANY, [{label, integer_to_list(Idle)},
-				       {size, {60, -1}}]),
-    wxWindow:setFont(B, font(H)),
-    wxButton:connect(B, command_button_clicked, [{userData, {widget, Name}}]),
+    Pid = self(),
+    B = btn(H, Left, integer_to_list(Idle),
+	    #{min_w => 60,
+	      click => fun() -> Pid ! {candid_wx, {widget, Name}} end}),
     wxSizer:add(Row, B, []),
     {switch, B, Hue, Idle}.
 
@@ -522,20 +602,14 @@ switch(H, Left, Row, Name, Look = #{colour := Hue}) ->
 %% one on release -- 1 and 0, or 0 and 1 for a button to ground.
 push(H, Left, Row, Name, Look = #{colour := Hue}) ->
     Idle = maps:get(idle, Look, 0),
-    B = wxButton:new(Left, ?wxID_ANY, [{label, integer_to_list(Idle)},
-				       {size, {60, -1}}]),
-    wxWindow:setFont(B, font(H)),
     Pid = self(),
-    Send = fun(V) -> fun(_E, O) ->
-			     Pid ! {candid_wx, {widget, Name ++ "=" ++
-						integer_to_list(V)}},
-			     wxEvent:skip(O)
+    Send = fun(V) -> fun() -> Pid ! {candid_wx, {widget, Name ++ "=" ++
+					     integer_to_list(V)}}
 		     end
 	   end,
-    wxWindow:connect(B, left_down, [{callback, Send(1 - Idle)}]),
-    wxWindow:connect(B, left_up, [{callback, Send(Idle)}]),
-    %% dragging off must not leave it held
-    wxWindow:connect(B, leave_window, [{callback, Send(Idle)}]),
+    %% dragging off must not leave it held: btn lets go on leaving
+    B = btn(H, Left, integer_to_list(Idle),
+	    #{min_w => 60, down => Send(1 - Idle), up => Send(Idle)}),
     wxSizer:add(Row, B, []),
     {switch, B, Hue, Idle}.
 
@@ -738,8 +812,7 @@ paint1(H, {ok, {switch, B, {On, _Off}, Idle}}, V) ->
 	false -> bg(H, B, colour(On)),
 		 fg(H, B, {17, 17, 17})
     end,
-    wxButton:setLabel(B, case V of 0 -> "0"; _ -> "1" end),
-    wxWindow:refresh(B);
+    btn_label(H, B, case V of 0 -> "0"; _ -> "1" end);
 %% A key keeps its name and only lights.
 paint1(H, {ok, {key, B, {On, _Off}, Idle}}, V) ->
     case V =:= Idle of
@@ -793,20 +866,300 @@ font(#{font := F}) -> F.
 fg(H, W, C) -> set_colour(H, W, fg, C).
 bg(H, W, C) -> set_colour(H, W, bg, C).
 
+%% A window keeps the scope it was coloured in first; a new one takes the one
+%% in force (in_scope/3).
 set_colour(#{ids := Ids} = H, W, Which, C0) ->
     C = colour(C0),
-    ets:insert(Ids, {{colour, W, Which}, C, perm}),
-    wx_colour(W, Which, tc(H, C)).
+    K = {colour, W, Which},
+    Scope = case {ets:lookup(Ids, K), ets:lookup(Ids, colour_scope)} of
+		{[{_, _, Sc}], _} -> Sc;
+		{[], [{_, Sc, _}]} -> Sc;
+		{[], []} -> perm
+	    end,
+    ets:insert(Ids, {K, C, Scope}),
+    wx_colour(W, Which, tc(H, C, Which)).
 
 wx_colour(W, fg, C) -> wxWindow:setForegroundColour(W, C);
 wx_colour(W, bg, C) -> wxWindow:setBackgroundColour(W, C).
 
-%% A colour as the theme in force shows it.
-tc(#{ids := Ids}, C) ->
-    case ets:lookup(Ids, theme) of
-	[{theme, "light", _}] -> light(C);
-	_ -> C
+%% A colour as the theme in force shows it, as a background or as what is
+%% drawn on one. Turned over, a bright text colour -- the lit green, the link
+%% blue -- comes out mid-light on a pale ground, which does not read: in
+%% the light theme what is drawn is never lighter than ?LIGHT_FG.
+tc(H, C) -> tc(H, C, bg).
+
+tc(H, C, Which) ->
+    case is_light(H) of
+	true when Which =:= bg -> light(C);
+	true -> light_fg(C);
+	false -> C
     end.
+
+is_light(#{ids := Ids}) ->
+    case ets:lookup(Ids, theme) of
+	[{theme, "light", _}] -> true;
+	_ -> false
+    end.
+
+%% F(Theme) when the theme changes, for what is coloured some other way
+%% than by fg/3 and bg/3 (the log's lines). Key names it, once.
+theme_hook(#{ids := Ids}, Key, F) ->
+    ets:insert(Ids, {{theme_hook, Key}, F, perm}),
+    ok.
+
+-define(LIGHT_FG, 0.30).
+
+%% Only what is light to begin with, what is drawn on the dark ground: a dark
+%% colour is ink on a lit fill, and turns over with the fill.
+light_fg({R, G, B}) ->
+    {H, S, L} = hsl(R / 255, G / 255, B / 255),
+    L1 = case L > 0.5 of
+	     true  -> min(0.92 - 0.84 * L, ?LIGHT_FG);
+	     false -> 0.92 - 0.84 * L
+	 end,
+    {R1, G1, B1} = rgb(H, S, L1),
+    {round(R1 * 255), round(G1 * 255), round(B1 * 255)}.
+
+%%% A BUTTON as wse draws one: flat, square, a line round it, lit in the
+%%% panel's blue when it is on. Drawn here, as GTK's own are round and take
+%%% no colour. Opts:
+%%%
+%%%   click => fun()       on a press
+%%%   down, up => fun()    held: pressed, and let go (or dragged off)
+%%%   min_w => Px          at least this wide
+%%%
+%%% Its colours are the window's own, set by bg/3 and fg/3, so the theme and
+%%% a switch's lit colour reach it as they reach anything.
+
+-define(BTN_BG, {51, 51, 51}).
+-define(BTN_FG, {204, 204, 204}).
+-define(BTN_ON, {51, 170, 255}).
+
+btn(H, Parent, Label, Opts) ->
+    W = wxPanel:new(Parent, [{style, ?wxBORDER_NONE}]),
+    wxWindow:setFont(W, font(H)),
+    Scope = case ets:lookup(maps:get(ids, H), colour_scope) of
+		[{_, Sc, _}] -> Sc;
+		[] -> perm
+	    end,
+    register(H, {btn, W}, #{label => Label, on => false, enabled => true,
+			    min_w => maps:get(min_w, Opts, 0)}, Scope),
+    bg(H, W, ?BTN_BG),
+    fg(H, W, ?BTN_FG),
+    btn_size(W, Label, maps:get(min_w, Opts, 0)),
+    wxPanel:connect(W, paint, [{callback, fun(_E, _O) -> btn_paint(H, W) end}]),
+    Live = fun() -> maps:get(enabled, btn_state(H, W)) end,
+    case Opts of
+	#{click := F} ->
+	    wxWindow:connect(W, left_down,
+			     [{callback, fun(_E, _O) -> Live() andalso F() end}]);
+	#{down := D, up := U} ->
+	    Held = fun(E, _O) -> Live() andalso D(), wxEvent:skip(E) end,
+	    Off = fun(_E, _O) -> Live() andalso U() end,
+	    wxWindow:connect(W, left_down, [{callback, Held}]),
+	    wxWindow:connect(W, left_up, [{callback, Off}]),
+	    wxWindow:connect(W, leave_window, [{callback, Off}]);
+	_ -> ok
+    end,
+    W.
+
+btn_size(W, Label, MinW) ->
+    {Tw, Th, _, _} = wxWindow:getTextExtent(W, Label),
+    wxWindow:setMinSize(W, {max(MinW, Tw + 18), Th + 8}).
+
+btn_state(#{ids := Ids}, W) ->
+    case ets:lookup(Ids, {btn, W}) of
+	[{_, St, _}] -> St;
+	[] -> #{label => "", on => false, enabled => true, min_w => 0}
+    end.
+
+btn_set(H = #{ids := Ids}, W, Kv) ->
+    [{K, St, Sc}] = ets:lookup(Ids, {btn, W}),
+    ets:insert(Ids, {K, maps:merge(St, Kv), Sc}),
+    wxWindow:refresh(W),
+    H.
+
+%% A CHOICE as a button: what is chosen, and a menu of the rest on a click --
+%% the flat look of the bar, where a wxChoice is the desktop's own. Pick(I)
+%% with I from 1.
+menu_btn(H, Parent, Labels, Ix0, Pick) ->
+    Mark = fun(I) -> lists:nth(I, Labels) ++ " \x{25BE}" end,
+    W = btn(H, Parent, Mark(Ix0 + 1), #{}),
+    %% as wide as its widest choice, so picking one does not move the bar
+    MinW = lists:max([element(1, wxWindow:getTextExtent(W, Mark(I))) + 18
+		      || I <- lists:seq(1, length(Labels))]),
+    btn_set(H, W, #{min_w => MinW}),
+    btn_label(H, W, Mark(Ix0 + 1)),
+    Show = fun(_, _) ->
+		   M = wxMenu:new(),
+		   [wxMenu:append(M, I, L)
+		    || {I, L} <- lists:zip(lists:seq(1, length(Labels)), Labels)],
+		   wxMenu:connect(M, command_menu_selected,
+				  [{callback, fun(#wx{id = I}, _) ->
+						      btn_label(H, W, Mark(I)),
+						      Pick(I)
+					      end}]),
+		   {_, Bh} = wxWindow:getSize(W),
+		   wxWindow:popupMenu(W, M, [{pos, {0, Bh}}]),
+		   wxMenu:destroy(M)
+	   end,
+    wxWindow:connect(W, left_down, [{callback, Show}]),
+    W.
+
+%% A toggle's state: lit, or not.
+btn_on(H, W, On) ->
+    case On of
+	true  -> bg(H, W, ?BTN_ON), fg(H, W, {17, 17, 17});
+	false -> bg(H, W, ?BTN_BG), fg(H, W, ?BTN_FG)
+    end,
+    btn_set(H, W, #{on => On}),
+    ok.
+
+btn_enable(H, W, On) ->
+    btn_set(H, W, #{enabled => On}),
+    ok.
+
+btn_label(H, W, Label) ->
+    btn_size(W, Label, maps:get(min_w, btn_state(H, W), 0)),
+    btn_set(H, W, #{label => Label}),
+    ok.
+
+btn_paint(H, W) ->
+    #{label := L, on := On, enabled := En} = btn_state(H, W),
+    DC = wxPaintDC:new(W),
+    {Ww, Wh} = wxWindow:getClientSize(W),
+    Bg = wxWindow:getBackgroundColour(W),
+    Fg = case En of
+	     true  -> wxWindow:getForegroundColour(W);
+	     false -> tc(H, {110, 110, 110}, fg)
+	 end,
+    Br = wxBrush:new(Bg),
+    Pen = wxPen:new(case is_light(H) of
+			true  -> {120, 120, 120};
+			false -> {85, 85, 85}
+		    end, [{width, 1}]),
+    wxDC:setBrush(DC, Br),
+    wxDC:setPen(DC, Pen),
+    wxDC:drawRectangle(DC, {0, 0, Ww, Wh}),
+    Font = font(H),
+    wxFont:setWeight(Font, case On of true -> ?wxFONTWEIGHT_BOLD;
+				       false -> ?wxFONTWEIGHT_NORMAL end),
+    wxDC:setFont(DC, Font),
+    wxDC:setTextForeground(DC, Fg),
+    {Tw, Th} = wxDC:getTextExtent(DC, L),
+    wxDC:drawText(DC, L, {(Ww - Tw) div 2, (Wh - Th) div 2}),
+    wxFont:setWeight(Font, ?wxFONTWEIGHT_NORMAL),
+    wxBrush:destroy(Br),
+    wxPen:destroy(Pen),
+    wxPaintDC:destroy(DC).
+
+%% A GROUP of buttons that go together: a line round them and their name on
+%% it, small, as a fieldset's legend in wse. Back: the panel to make them in
+%% and the sizer to put them in.
+group_font() ->
+    wxFont:new(8, ?wxFONTFAMILY_TELETYPE, ?wxFONTSTYLE_NORMAL,
+	       ?wxFONTWEIGHT_NORMAL).
+
+btn_group(H, Parent, Title) ->
+    G = wxPanel:new(Parent),
+    bg(H, G, ?BG),
+    Legend = " " ++ Title ++ " ",
+    Font = group_font(),
+    {Lw, Lh, _, _} = wxWindow:getTextExtent(G, Legend, [{theFont, Font}]),
+    wxFont:destroy(Font),
+    %% room on top for the name, and at least its width
+    S = wxBoxSizer:new(?wxVERTICAL),
+    wxWindow:setSizer(G, S),
+    wxSizer:add(S, Lw + 16, Lh + 2),
+    In = wxBoxSizer:new(?wxHORIZONTAL),
+    wxSizer:add(S, In, [{flag, ?wxLEFT bor ?wxRIGHT bor ?wxBOTTOM}, {border, 4}]),
+    wxPanel:connect(G, paint,
+		    [{callback,
+		      fun(_E, _O) ->
+			      DC = wxPaintDC:new(G),
+			      {Gw, Gh} = wxWindow:getClientSize(G),
+			      Light = is_light(H),
+			      Pen = wxPen:new(case Light of
+						  true  -> {150, 150, 150};
+						  false -> {68, 68, 68}
+					      end, [{width, 1}]),
+			      wxDC:setPen(DC, Pen),
+			      wxDC:setBrush(DC, ?wxTRANSPARENT_BRUSH),
+			      Y0 = Lh div 2,
+			      wxDC:drawRectangle(DC, {0, Y0, Gw, Gh - Y0}),
+			      F = group_font(),
+			      wxDC:setFont(DC, F),
+			      wxDC:setBackgroundMode(DC, ?wxSOLID),
+			      wxDC:setTextBackground(DC, wxWindow:getBackgroundColour(G)),
+			      wxDC:setTextForeground(DC, tc(H, ?DIM, fg)),
+			      wxDC:drawText(DC, Legend, {6, 0}),
+			      wxFont:destroy(F),
+			      wxPen:destroy(Pen),
+			      wxPaintDC:destroy(DC)
+		      end}]),
+    {G, In}.
+
+%%% A RICH text control (the log, the chat): text in colours of its own
+%%% kinds, Colour(Light, Kind) -> {R, G, B}, a colour for each theme. What is
+%%% in it is kept as spans, {Kind, From, To} by position, so a change of
+%%% theme colours it all again.
+
+rich(H, Ctrl, Colour) ->
+    ets:insert(maps:get(ids, H), {{rich, Ctrl}, {Colour, []}, perm}),
+    theme_hook(H, {rich, Ctrl}, fun(_T) -> restyle(H, Ctrl) end).
+
+rich_add(H, Ctrl, Kind, Text) ->
+    {Colour, Spans} = rich_get(H, Ctrl),
+    From = wxTextCtrl:getLastPosition(Ctrl),
+    A = attr(H, Ctrl, Colour(is_light(H), Kind)),
+    wxTextCtrl:setDefaultStyle(Ctrl, A),
+    wxTextCtrl:appendText(Ctrl, Text),
+    wxTextAttr:destroy(A),
+    To = wxTextCtrl:getLastPosition(Ctrl),
+    rich_put(H, Ctrl, {Colour, [{Kind, From, To} | Spans]}).
+
+%% The first N lines gone.
+rich_trim(H, Ctrl, N) ->
+    Cut = wxTextCtrl:xYToPosition(Ctrl, 0, N),
+    wxTextCtrl:remove(Ctrl, 0, Cut),
+    {Colour, Spans} = rich_get(H, Ctrl),
+    rich_put(H, Ctrl, {Colour, [{K, max(0, F - Cut), T - Cut}
+				|| {K, F, T} <- Spans, T > Cut]}).
+
+rich_clear(H, Ctrl) ->
+    wxTextCtrl:clear(Ctrl),
+    {Colour, _} = rich_get(H, Ctrl),
+    rich_put(H, Ctrl, {Colour, []}).
+
+rich_get(#{ids := Ids}, Ctrl) ->
+    [{_, V, _}] = ets:lookup(Ids, {rich, Ctrl}),
+    V.
+
+rich_put(#{ids := Ids}, Ctrl, V) ->
+    ets:insert(Ids, {{rich, Ctrl}, V, perm}),
+    ok.
+
+restyle(H, Ctrl) ->
+    {Colour, Spans} = rich_get(H, Ctrl),
+    Light = is_light(H),
+    [begin
+	 A = attr(H, Ctrl, Colour(Light, K)),
+	 wxTextCtrl:setStyle(Ctrl, F, T, A),
+	 wxTextAttr:destroy(A)
+     end || {K, F, T} <- merge(lists:reverse(Spans))],
+    ok.
+
+%% The text's colour on the control's own ground: a span keeps the ground it
+%% was written on, so the theme's must be said too.
+attr(H = #{ids := Ids}, Ctrl, Fg) ->
+    case ets:lookup(Ids, {colour, Ctrl, bg}) of
+	[{_, Bg, _}] -> wxTextAttr:new(Fg, [{colBack, tc(H, Bg, bg)}]);
+	[] -> wxTextAttr:new(Fg)
+    end.
+
+merge([{K, F, _}, {K, _, T} | Ss]) -> merge([{K, F, T} | Ss]);
+merge([S | Ss]) -> [S | merge(Ss)];
+merge([]) -> [].
 
 light({R, G, B}) ->
     {H, S, L} = hsl(R / 255, G / 255, B / 255),
@@ -899,10 +1252,25 @@ register(#{ids := Ids}, Id, What, Scope) -> ets:insert(Ids, {Id, What, Scope}).
 
 forget(#{ids := Ids}, Scope) -> ets:match_delete(Ids, {'_', '_', Scope}).
 
+%% F run with Scope as the scope of the colours set in it, so forget/2 drops
+%% them with the windows registered there. theme/2 sets the colour of every
+%% window it knows, and one that is gone takes the whole emulator down -- a
+%% segfault, not an error.
+in_scope(#{ids := Ids}, Scope, F) ->
+    ets:insert(Ids, {colour_scope, Scope, perm}),
+    try F() after ets:delete(Ids, colour_scope) end.
+
 lookup(#{ids := Ids}, Id) ->
     case ets:lookup(Ids, Id) of
 	[{_, W, _}] -> {ok, W};
 	[]          -> error
+    end.
+
+%% And the scope it was registered in.
+lookup_scope(#{ids := Ids}, Id) ->
+    case ets:lookup(Ids, Id) of
+	[{_, W, Scope}] -> {ok, W, Scope};
+	[]              -> error
     end.
 
 %% A css colour as the panel writes them -- #rgb, #rrggbb, rgb(r,g,b) -- as

@@ -13,10 +13,12 @@
 -module(candid_wse).
 
 -export([start/2, code_view/0, chat_view/0, log_view/0]).
--export([clear/2, message/3, chooser/3, panel/3, event/2]).
+-export([clear/2, message/3, chooser/3, panel/3, event/2, save_file/4,
+	 tabs/3]).
 -export([status/3, trace_view/3, theme/2, view_buttons/4, mode/3]).
 -export([paint/3, trace_clear/2, trace_column/3, plot/4]).
--export([dock_pane/3, dock_show/3]).                % the log's and the chat's
+-export([dock_pane/3, dock_show/3]).
+-export([u/1, btn_style/1]).                % the log's and the chat's
 
 -include("candid.hrl").
 
@@ -82,6 +84,20 @@ code_view() -> csp_code_wse.
 chat_view() -> csp_chat_wse.
 log_view() -> candid_log_wse.
 
+%% Text as wse is to send it. Its ej.js reads a string as UTF-8 bytes, so a
+%% character past ASCII goes as its bytes: `lås' sent as three Latin-1
+%% characters comes out as one Chinese one.
+u(S) ->
+    L = lists:flatten(S),
+    case lists:all(fun(C) -> is_integer(C) andalso C < 128 end, L) of
+	true -> L;
+	false ->
+	    case unicode:characters_to_binary(L) of
+		B when is_binary(B) -> binary_to_list(B);
+		_ -> L
+	    end
+    end.
+
 %%% ------------------------------------------------------------ the dock
 %%%
 %%% The log on the left, the chat on the right, each with its title and a
@@ -101,10 +117,10 @@ dock_pane(Ws, Title, Where) ->
     Head = el(Ws, Box, "div", "display:flex;align-items:center;gap:8px;"
 	      "padding:4px 8px;border-bottom:1px solid #333"),
     Title1 = el(Ws, Head, "span", "flex:1;color:#9cf"),
-    wse:appendChild(Ws, Title1, wse:createTextNode(Ws, Title)),
+    wse:appendChild(Ws, Title1, wse:createTextNode(Ws, candid_wse:u(Title))),
     {ok, Close} = wse:create_event(Ws),
-    X = el(Ws, Head, "button", "font:12px monospace"),
-    wse:appendChild(Ws, X, wse:createTextNode(Ws, "close")),
+    X = el(Ws, Head, "button", lists:flatten(btn_style(false))),
+    wse:appendChild(Ws, X, wse:createTextNode(Ws, candid_wse:u("close"))),
     wse:set(Ws, X, "onclick", wse:newf(Ws, "", "{ Wse.notify(" ++
 					     integer_to_list(Close) ++
 					     ", 'x'); }")),
@@ -115,6 +131,7 @@ dock_pane(Ws, Title, Where) ->
 		      "position:fixed;left:0;right:0;bottom:0;height:35vh;"
 		      "z-index:9;display:none;gap:4px;padding:2px;"
 		      "background:#111;border-top:1px solid #444';"
+		      " d.style.filter = window.candidFilter || 'none';"
 		      " document.body.appendChild(d); }"
 		      " if (left) d.insertBefore(e, d.firstChild);"
 		      " else d.appendChild(e); }"),
@@ -146,7 +163,7 @@ el(Ws, Parent, Tag, Style) ->
 %% Where the panel goes, emptied: a rebuild starts the page over.
 clear(Ws, Where) ->
     Root = wse:id(Where),
-    wse:set(Ws, Root, "innerHTML", ""),
+    wse:set(Ws, Root, "innerHTML", candid_wse:u("")),
     Root.
 
 message(Ws, Root, Str) ->
@@ -199,7 +216,7 @@ event(_Ids, _Msg)                               -> none.
 
 %% A status box's text: the link, the clock.
 status(Ws, {B, F}, Text) ->
-    wse:cast(Ws, F, "call", [null, B, lists:flatten(Text)]).
+    wse:cast(Ws, F, "call", [null, B, u(Text)]).
 
 trace_view(Ws, TraceBox, Show) ->
     style(Ws, TraceBox, [?TRACE_BOX, case Show of true  -> "display:block";
@@ -257,7 +274,8 @@ box(Ws, Parent, Style) ->
 
 %% LIGHT is the dark panel inverted and turned back to its own hues, on a pale
 %% blue page: every colour in the panel is written inline, and one filter on
-%% the root is the change that reaches all of them, the canvases included. A
+%% the root is the change that reaches all of them, the canvases included --
+%% and the dock's, the log and the chat, which hang off the page beside it. A
 %% lamp stays red; a glow becomes a shade instead, which reads fine on white.
 theme(Ws, T) ->
     {Bg, Filter} = case T of
@@ -266,7 +284,10 @@ theme(Ws, T) ->
 		   end,
     F = wse:newf(Ws, "bg,f",
 		 "{ document.body.style.background = bg;"
-		 "  document.getElementById('panel').style.filter = f; }"),
+		 "  window.candidFilter = f;"
+		 "  document.getElementById('panel').style.filter = f;"
+		 "  var d = document.getElementById('candid_dock');"
+		 "  if (d) d.style.filter = f; }"),
     wse:cast(Ws, F, "call", [null, Bg, Filter]).
 
 %% The bar: the program chooser -- every .csp under demo/ and the tree's
@@ -283,7 +304,7 @@ chooser(Ws, Root, Spec = #{file := Current, files := Files}) ->
       fun(F) ->
 	      O = wse:createElement(Ws, "option"),
 	      wse:set(Ws, O, "value", F),
-	      wse:appendChild(Ws, O, wse:createTextNode(Ws, candid:shorten(F))),
+	      wse:appendChild(Ws, O, wse:createTextNode(Ws, candid_wse:u(candid:shorten(F)))),
 	      case F =:= Current of
 		  true  -> wse:set(Ws, O, "selected", true);
 		  false -> ok
@@ -297,7 +318,10 @@ chooser(Ws, Root, Spec = #{file := Current, files := Files}) ->
 			", this.value); }"),
     wse:set(Ws, Sel, "onchange", Func),
     wse:appendChild(Ws, Bar, Sel),
-    Run = runstep(Ws, Bar, Spec),
+    Tabs = wse:createElement(Ws, "div"),
+    wse:setStyle(Ws, Tabs, "margin-bottom:8px"),
+    wse:appendChild(Ws, Root, Tabs),
+    Run = runstep(Ws, Bar, Spec#{tabs_div => Tabs}),
     wse:appendChild(Ws, Root, Bar),
     {Id, Run}.
 
@@ -315,50 +339,89 @@ runstep(Ws, Bar, Spec = #{views := Vs, chat := Chat}) ->
     Wrap = wse:createElement(Ws, "span"),
     wse:setStyle(Ws, Wrap, "margin-left:16px"),
     {ok, Id} = wse:create_event(Ws),
-    Mk = fun(Label, Tag) ->
-		 B = wse:createElement(Ws, "button"),
-		 wse:setStyle(Ws, B, lists:flatten(btn_style(false))),
-		 wse:appendChild(Ws, B, wse:createTextNode(Ws, Label)),
-		 F = wse:newf(Ws, "", "{ Wse.notify(" ++ integer_to_list(Id) ++
-				  ", '" ++ Tag ++ "'); }"),
-		 wse:set(Ws, B, "onclick", F),
-		 wse:appendChild(Ws, Wrap, B),
-		 B
-	 end,
+    Mk = fun(In, Label, Tag) -> mk(Ws, Id, In, Label, Tag) end,
+    %% The buttons that go together in a box of their own, titled: run, and
+    %% each view.
+    Box = fun(Title) ->
+		  Fs = wse:createElement(Ws, "fieldset"),
+		  wse:setStyle(Ws, Fs, "display:inline-block;margin:0 4px;"
+			       "padding:0 4px 3px;border:1px solid #555;"
+			       "vertical-align:middle"),
+		  Lg = wse:createElement(Ws, "legend"),
+		  wse:setStyle(Ws, Lg, "color:#888;font:11px monospace;"
+			       "padding:0 3px"),
+		  wse:appendChild(Ws, Lg, wse:createTextNode(Ws, candid_wse:u(Title))),
+		  wse:appendChild(Ws, Fs, Lg),
+		  wse:appendChild(Ws, Wrap, Fs),
+		  Fs
+	  end,
+    TabsDiv = maps:get(tabs_div, Spec),
+    tab_buttons(Ws, Id, TabsDiv, maps:get(tabs, Spec, [])),
+    File = Box("file"),
+    Mk(File, "new", "new"),
+    Mk(File, "save", "save"),
+    Mk(File, "save as\x{2026}", "saveas"),
     target_field(Ws, Wrap, Id, maps:get(target, Spec)),
-    RunB  = Mk("run",   "mode=run"),
-    PauseB = Mk("pause", "mode=step"),
-    OneB  = Mk("step",  "step=1"),
+    Run = Box("run"),
+    RunB  = Mk(Run, "go",    "mode=run"),
+    PauseB = Mk(Run, "pause", "mode=step"),
+    OneB  = Mk(Run, "step",  "step=1"),
     %% The tick, on the SAME event as the buttons: the loop already tells the
     %% bar's events from a widget's by the id, and tags its payloads, so this
     %% needs no second wire. `period=25' lands in control/4 beside `mode=run'.
-    tick_select(Ws, Wrap, Id, maps:get(period, Spec), maps:get(periods, Spec)),
+    tick_select(Ws, Run, Id, maps:get(period, Spec), maps:get(periods, Spec)),
     %% What is shown, on the same event: `trace=show' and the like.
-    Group = fun(Label, Key, Vals) ->
-		    L = wse:createElement(Ws, "span"),
-		    wse:setStyle(Ws, L, "margin:0 6px 0 16px;color:#888;"
-				 "font:12px monospace"),
-		    wse:appendChild(Ws, L, wse:createTextNode(Ws, Label)),
-		    wse:appendChild(Ws, Wrap, L),
-		    [{{Key, V}, Mk(V, Key ++ "=" ++ V)} || V <- Vals]
-	    end,
-    Views = lists:append([Group(case K of "theme" -> ""; _ -> K end, K, Vals)
-			  || {K, Vals} <- Vs]),
+    Views = lists:append([begin
+			      G = Box(K),
+			      [{{K, V}, Mk(G, V, K ++ "=" ++ V)} || V <- Vals]
+			  end || {K, Vals} <- Vs]),
+    Panes = Box("panes"),
     %% Only when there is a chat to open: ellm on the path, not switched off.
-    Chat andalso
-	begin
-	    L = wse:createElement(Ws, "span"),
-	    wse:setStyle(Ws, L, "margin-left:16px"),
-	    wse:appendChild(Ws, Wrap, L),
-	    Mk("chat", "chat=toggle")
-	end,
-    Gap = wse:createElement(Ws, "span"),
-    wse:setStyle(Ws, Gap, "margin-left:16px"),
-    wse:appendChild(Ws, Wrap, Gap),
-    Mk("log", "log=toggle"),
+    Chat andalso Mk(Panes, "chat", "chat=toggle"),
+    Mk(Panes, "log", "log=toggle"),
     wse:appendChild(Ws, Bar, Wrap),
     #{event => Id, run => RunB, pause => PauseB, one => OneB,
-      views => maps:from_list(Views)}.
+      views => maps:from_list(Views), tabs => TabsDiv}.
+
+mk(Ws, Id, In, Label, Tag) ->
+    B = wse:createElement(Ws, "button"),
+    wse:setStyle(Ws, B, lists:flatten(btn_style(false))),
+    wse:appendChild(Ws, B, wse:createTextNode(Ws, candid_wse:u(Label))),
+    F = wse:newf(Ws, "", "{ Wse.notify(" ++ integer_to_list(Id) ++
+		     ", '" ++ Tag ++ "'); }"),
+    wse:set(Ws, B, "onclick", F),
+    wse:appendChild(Ws, In, B),
+    B.
+
+%% A tab per file open, on the bar's event: its name, lit when it is the one
+%% shown, a node's marked live, and a cross to close it.
+tab_buttons(Ws, Id, Div, Tabs) ->
+    [begin
+	 Ix = integer_to_list(I),
+	 B = mk(Ws, Id, Div,
+		case Live of true -> "\x{25CF} " ++ L; false -> L end,
+		"tab=" ++ Ix),
+	 Active andalso wse:setStyle(Ws, B, lists:flatten(btn_style(true))),
+	 X = mk(Ws, Id, Div, "\x{00D7}", "close=" ++ Ix),
+	 wse:setStyle(Ws, X, lists:flatten([btn_style(false),
+					    ";margin-right:8px"]))
+     end || #{id := I, label := L, live := Live, active := Active} <- Tabs],
+    ok.
+
+%% The tabs again, as they are now: a file saved under another name.
+tabs(Ws, #{event := Id, tabs := Div}, Tabs) ->
+    wse:set(Ws, Div, "innerHTML", ""),
+    tab_buttons(Ws, Id, Div, Tabs).
+
+%% A page cannot show the server's files: the name is asked for in the page
+%% and comes back as the bar's saveas=Name, relative to Dir.
+save_file(Ws, #{event := Id}, _Dir, Name) ->
+    F = wse:newf(Ws, "n", "{ var r = prompt('save as (in the work "
+		 "directory, or a full path)', n);"
+		 "  if (r) Wse.notify(" ++ integer_to_list(Id) ++
+		     ", 'saveas=' + r); }"),
+    wse:cast(Ws, F, "call", [null, u(Name)]),
+    cancel.
 
 %% Where the program runs: a csp of our own, or a node. Read by
 %% csp_link:target/1, sent on Enter.
@@ -386,7 +449,7 @@ target_field(Ws, Wrap, Id, Target) ->
 tick_select(Ws, Wrap, Id, Now, Periods) ->
     Lbl = wse:createElement(Ws, "span"),
     wse:setStyle(Ws, Lbl, "margin-left:12px;color:#888;font:12px monospace"),
-    wse:appendChild(Ws, Lbl, wse:createTextNode(Ws, "tick")),
+    wse:appendChild(Ws, Lbl, wse:createTextNode(Ws, candid_wse:u("tick"))),
     wse:appendChild(Ws, Wrap, Lbl),
     Sel = wse:createElement(Ws, "select"),
     wse:setStyle(Ws, Sel, "margin-left:6px;font:12px monospace;background:#222;"
@@ -410,7 +473,7 @@ tick_select(Ws, Wrap, Id, Now, Periods) ->
     Sel.
 
 btn_style(Active) ->
-    ["font:13px monospace;padding:3px 9px;margin-right:4px;"
+    ["font:13px monospace;padding:3px 9px;margin-right:-1px;"
      "border:1px solid #555;",
      case Active of
 	 true  -> "background:#3af;color:#111;font-weight:bold";
@@ -425,7 +488,7 @@ row(Ws, Root, {Kind, Name, _W}, Look) ->
     wse:setStyle(Ws, Row, "margin:6px 0;font:14px monospace"),
     Label = wse:createElement(Ws, "span"),
     wse:setStyle(Ws, Label, "display:inline-block;width:110px;color:#ccc"),
-    wse:appendChild(Ws, Label, wse:createTextNode(Ws, maps:get(label, Look))),
+    wse:appendChild(Ws, Label, wse:createTextNode(Ws, candid_wse:u(maps:get(label, Look)))),
     %% The label is the signal, to mark for the model view (csp_code).
     wse:set(Ws, Label, "id", "sl_" ++ Name),
     wse:cast(Ws, Label, "setAttribute", ["data-sig", Name]),
@@ -456,7 +519,7 @@ group(Ws, Root, #{label := Label, rows := Rows}) ->
 		 "border-left:2px solid #444"),
     H = wse:createElement(Ws, "div"),
     wse:setStyle(Ws, H, "color:#8ab;font:13px monospace;margin-bottom:2px"),
-    wse:appendChild(Ws, H, wse:createTextNode(Ws, Label)),
+    wse:appendChild(Ws, H, wse:createTextNode(Ws, candid_wse:u(Label))),
     wse:appendChild(Ws, Box, H),
     Nodes = [{Name, row(Ws, Box, W, Look)} || {W = {_, Name, _}, Look} <- Rows],
     wse:appendChild(Ws, Root, Box),
@@ -471,7 +534,7 @@ keypad(Ws, Root, #{label := Label, cols := Cols, keys := Keys}) ->
     L = wse:createElement(Ws, "span"),
     wse:setStyle(Ws, L, "display:inline-block;width:110px;color:#ccc;"
 		 "vertical-align:top"),
-    wse:appendChild(Ws, L, wse:createTextNode(Ws, Label)),
+    wse:appendChild(Ws, L, wse:createTextNode(Ws, candid_wse:u(Label))),
     wse:appendChild(Ws, Row, L),
     Grid = wse:createElement(Ws, "span"),
     style(Ws, Grid, ["display:inline-grid;gap:4px;grid-template-columns:repeat(",
@@ -482,7 +545,7 @@ keypad(Ws, Root, #{label := Label, cols := Cols, keys := Keys}) ->
 					      push   -> push(Ws, Grid, Name, Look);
 					      toggle -> switch(Ws, Grid, Name, Look)
 					  end,
-		 wse:set(Ws, B, "textContent", maps:get(label, Look)),
+		 wse:set(Ws, B, "textContent", candid_wse:u(maps:get(label, Look))),
 		 {Name, {key, B, Hue, Idle}}
 	     end || {{Kind, Name, _}, Look} <- Keys],
     wse:appendChild(Ws, Root, Row),
@@ -516,7 +579,7 @@ push(Ws, Row, Name, Look = #{colour := Hue}) ->
     B = wse:createElement(Ws, "button"),
     wse:setStyle(Ws, B, "width:60px;padding:4px;font:14px monospace;"
 		 "background:#333;color:#eee;border:1px solid #555"),
-    wse:appendChild(Ws, B, wse:createTextNode(Ws, integer_to_list(Idle))),
+    wse:appendChild(Ws, B, wse:createTextNode(Ws, candid_wse:u(integer_to_list(Idle)))),
     {ok, Id} = wse:create_event(Ws),
     Down = wse:newf(Ws, "", "{ Wse.notify(" ++ integer_to_list(Id) ++
 			", '" ++ Name ++ "=" ++ integer_to_list(1 - Idle) ++
@@ -534,7 +597,7 @@ push(Ws, Row, Name, Look = #{colour := Hue}) ->
 action(Ws, Row, #{colour := Hue}) ->
     A = wse:createElement(Ws, "span"),
     style(Ws, A, action_style(0, Hue)),
-    wse:appendChild(Ws, A, wse:createTextNode(Ws, "off")),
+    wse:appendChild(Ws, A, wse:createTextNode(Ws, candid_wse:u("off"))),
     wse:appendChild(Ws, Row, A),
     {action, A, Hue}.
 
@@ -588,7 +651,7 @@ value_out(Ws, Row, Look = #{colour := {On, _}}) ->
     T = wse:createElement(Ws, "span"),
     style(Ws, T, ["font:14px monospace;color:", On, ";min-width:60px;"
 		  "display:inline-block"]),
-    wse:appendChild(Ws, T, wse:createTextNode(Ws, "0")),
+    wse:appendChild(Ws, T, wse:createTextNode(Ws, candid_wse:u("0"))),
     wse:appendChild(Ws, Row, T),
     {value, T, Look}.
 
@@ -613,7 +676,7 @@ strip(Ws, Root, Pixels) ->
     wse:setStyle(Ws, Row, "margin:12px 0;font:14px monospace"),
     Label = wse:createElement(Ws, "span"),
     wse:setStyle(Ws, Label, "display:inline-block;width:110px;color:#ccc"),
-    wse:appendChild(Ws, Label, wse:createTextNode(Ws, "port 9")),
+    wse:appendChild(Ws, Label, wse:createTextNode(Ws, candid_wse:u("port 9"))),
     wse:appendChild(Ws, Row, Label),
     Nodes = [{Name, cell(Ws, Row, maps:get(label, Look))}
 	     || {Name, Look} <- Pixels],
@@ -644,7 +707,7 @@ plot_panel(Ws, Root, G = #{id := Id, x := X, ys := Ys}, Plot) ->
     Label = wse:createElement(Ws, "span"),
     wse:setStyle(Ws, Label, "display:inline-block;width:110px;color:#ccc;"
 		 "vertical-align:top"),
-    wse:appendChild(Ws, Label, wse:createTextNode(Ws, Id)),
+    wse:appendChild(Ws, Label, wse:createTextNode(Ws, candid_wse:u(Id))),
     wse:appendChild(Ws, Box, Label),
     C = wse:createElement(Ws, "canvas"),
     wse:set(Ws, C, "width", ?PLOT_W),
@@ -681,7 +744,7 @@ plot_row(Ws, Side, Axis, M) ->
     wse:appendChild(Ws, Row, Tag),
     V = wse:createElement(Ws, "span"),
     wse:setStyle(Ws, V, "display:block;color:#888;font:12px monospace"),
-    wse:appendChild(Ws, V, wse:createTextNode(Ws, "")),
+    wse:appendChild(Ws, V, wse:createTextNode(Ws, candid_wse:u(""))),
     wse:appendChild(Ws, Row, V),
     wse:appendChild(Ws, Side, Row),
     V.
@@ -845,7 +908,7 @@ plotter(Ws) ->
 readout(Ws, Row) ->
     T = wse:createElement(Ws, "span"),
     wse:setStyle(Ws, T, "margin-left:10px;color:#888;font:12px monospace"),
-    wse:appendChild(Ws, T, wse:createTextNode(Ws, "")),
+    wse:appendChild(Ws, T, wse:createTextNode(Ws, candid_wse:u(""))),
     wse:appendChild(Ws, Row, T),
     T.
 
@@ -854,7 +917,7 @@ switch(Ws, Row, Name, Look = #{colour := Hue}) ->
     B = wse:createElement(Ws, "button"),
     wse:setStyle(Ws, B, "width:60px;padding:4px;font:14px monospace;"
 		 "background:#333;color:#eee;border:1px solid #555"),
-    wse:appendChild(Ws, B, wse:createTextNode(Ws, integer_to_list(Idle))),
+    wse:appendChild(Ws, B, wse:createTextNode(Ws, candid_wse:u(integer_to_list(Idle)))),
     {ok, Id} = wse:create_event(Ws),
     Func = wse:newf(Ws, "", "{ Wse.notify(" ++ integer_to_list(Id) ++
 			",'" ++ Name ++ "'); }"),
@@ -939,7 +1002,7 @@ paint1(Ws, {ok, {switch, Node, {On, _Off}, Idle}}, V) ->
 			 true -> "background:#333;color:#eee";
 			 false -> ["background:", On, ";color:#111;font-weight:bold"]
 		     end]),
-    wse:set(Ws, Node, "textContent", label(V));
+    wse:set(Ws, Node, "textContent", candid_wse:u(label(V)));
 %% A key keeps its name and only lights.
 paint1(Ws, {ok, {key, Node, {On, _Off}, Idle}}, V) ->
     style(Ws, Node, ["width:60px;padding:4px;font:14px monospace;"
@@ -952,15 +1015,15 @@ paint1(Ws, {ok, {meter, Bar, Out, Look = #{colour := {On, _}}}}, V) ->
     Pct = trunc(100 * candid:frac(V, Look)),
     style(Ws, Bar, io_lib:format("display:block;height:100%;"
 				 "background:~s;width:~w%", [On, Pct])),
-    wse:set(Ws, Out, "textContent", lists:flatten(candid:eng(V, Look)));
+    wse:set(Ws, Out, "textContent", candid_wse:u(lists:flatten(candid:eng(V, Look))));
 paint1(Ws, {ok, {action, Node, Hue}}, V) ->
     style(Ws, Node, action_style(V, Hue)),
-    wse:set(Ws, Node, "textContent", case V of 0 -> "off"; _ -> "ON" end);
+    wse:set(Ws, Node, "textContent", candid_wse:u(case V of 0 -> "off"; _ -> "ON" end));
 paint1(Ws, {ok, {dial, Needle, _S, Out, Look}}, V) ->
     style(Ws, Needle, needle_style(V, Look)),
-    wse:set(Ws, Out, "textContent", lists:flatten(candid:eng(V, Look)));
+    wse:set(Ws, Out, "textContent", candid_wse:u(lists:flatten(candid:eng(V, Look))));
 paint1(Ws, {ok, {value, Node, Look}}, V) ->
-    wse:set(Ws, Node, "textContent", lists:flatten(candid:eng(V, Look)));
+    wse:set(Ws, Node, "textContent", candid_wse:u(lists:flatten(candid:eng(V, Look))));
 %% An input's field is left alone while it is being typed in, same reasoning as
 %% the slider: csp owning it would fight the hand.
 paint1(_Ws, {ok, {invalue, _Node}}, _V) ->
@@ -968,13 +1031,13 @@ paint1(_Ws, {ok, {invalue, _Node}}, _V) ->
 %% A plot channel's number, in engineering units when the annotation gave enough
 %% to work them out. The beam is drawn on the tick, not here.
 paint1(Ws, {ok, {plotval, Node, M}}, V) ->
-    wse:set(Ws, Node, "textContent", lists:flatten(candid:eng(V, M)));
+    wse:set(Ws, Node, "textContent", candid_wse:u(lists:flatten(candid:eng(V, M))));
 paint1(Ws, {ok, {pixel, Node}}, V) ->
     style(Ws, Node, [?PIXEL, "background:", candid:rgb565(V)]);
 %% A slider is an INPUT: csp owning the value would fight the drag, so only the
 %% readout follows. The control itself is left where the hand put it.
 paint1(Ws, {ok, {slider, _S, Out, Look}}, V) ->
-    wse:set(Ws, Out, "textContent", lists:flatten(candid:eng(V, Look)));
+    wse:set(Ws, Out, "textContent", candid_wse:u(lists:flatten(candid:eng(V, Look))));
 paint1(_Ws, _, _V) ->
     ok.
 
@@ -990,7 +1053,7 @@ style(Ws, Node, IoList) ->
 text(Ws, Root, Str) ->
     P = wse:createElement(Ws, "pre"),
     wse:setStyle(Ws, P, "color:#e77;font:13px monospace"),
-    wse:appendChild(Ws, P, wse:createTextNode(Ws, lists:flatten(Str))),
+    wse:appendChild(Ws, P, wse:createTextNode(Ws, candid_wse:u(lists:flatten(Str)))),
     wse:appendChild(Ws, Root, P).
 
 %% wse's priv/, taken from where its beam actually is, so the aliased scripts

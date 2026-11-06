@@ -13,8 +13,8 @@ pane(Ws, Title) ->
     Foot = el(Ws, Box, "div", "display:flex;justify-content:flex-end;"
 	      "padding:2px 8px;border-top:1px solid #333"),
     {ok, Clear} = wse:create_event(Ws),
-    B = el(Ws, Foot, "button", "font:12px monospace"),
-    wse:appendChild(Ws, B, wse:createTextNode(Ws, "clear")),
+    B = el(Ws, Foot, "button", lists:flatten(candid_wse:btn_style(false))),
+    wse:appendChild(Ws, B, wse:createTextNode(Ws, candid_wse:u("clear"))),
     wse:set(Ws, B, "onclick", wse:newf(Ws, "", "{ Wse.notify(" ++
 					     integer_to_list(Clear) ++
 					     ", 'x'); }")),
@@ -29,7 +29,7 @@ show(Ws, #{box := Box}, On) ->
 
 add(Ws, #{log := Log, scroll := Scroll}, Kind, Text) ->
     D = el(Ws, Log, "div", "color:" ++ colour(Kind)),
-    wse:appendChild(Ws, D, wse:createTextNode(Ws, Text)),
+    wse:appendChild(Ws, D, wse:createTextNode(Ws, candid_wse:u(Text))),
     wse:cast(Ws, Scroll, "call", [null, Log]).
 
 %% The N oldest lines go.

@@ -1,21 +1,20 @@
 %%% The code view's renderer for the desktop: csp_code decides what the view
-%%% shows, this builds it out of wx widgets and lights them.
+%%% shows, this draws it and lights it.
 %%%
-%%% The contract is csp_code_wse's -- the ids and the classes, see there. A
-%%% rung is nested sizers, the way the html is nested flex boxes: an AND runs
-%%% across, an OR stacks its branches in a box of their own. A contact is a
-%%% text in a frame, the frame's colour being the mark, since wx has no
-%%% outline. Every piece is registered by its id (candid_wx:register/4), so
-%%% paint/4 finds it by name as the browser does.
+%%% The rungs are csp_ladder's picture, drawn on one panel when wx paints it
+%%% (the canvas below); a click goes back as `xy=X,Y'. The rest -- the tab
+%%% buttons, an object's values, the model frame and the trace table -- are
+%%% widgets, registered by the ids of csp_code_wse's contract
+%%% (candid_wx:register/4), so paint/4 finds them by name as the browser does.
 
 -module(csp_code_wx).
 
 -include_lib("wx/include/wx.hrl").
 
--export([new/4, shown/3, rungs/5, paint/4, goal/3, answer/5]).
+-export([new/4, metrics/2, shown/3, rungs/6, draw/3, paint/4, goal/3,
+	 answer/5]).
 
 -define(BG, {18, 18, 18}).
--define(WIRE, {102, 102, 102}).
 
 %% The view, hidden, with its tab buttons; the model frame (goal, clear,
 %% solve, k) in the top frame's status row, the answer and the program's own
@@ -26,22 +25,25 @@ new(H, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
     BoxS = wxBoxSizer:new(?wxVERTICAL),
     wxWindow:setSizer(Box, BoxS),
     Bar = wxBoxSizer:new(?wxHORIZONTAL),
+    Pid = self(),
     Btns = case Tabs of
 	       [_] -> [];
 	       _ ->
 		   [begin
-			B = wxToggleButton:new(Box, ?wxID_ANY, Name),
-			wxToggleButton:connect(B, command_togglebutton_clicked,
-					       [{userData, {code, "tab=" ++
-								integer_to_list(I)}}]),
-			wxSizer:add(Bar, B, [{flag, ?wxRIGHT}, {border, 4}]),
+			Tab = "tab=" ++ integer_to_list(I),
+			B = candid_wx:btn(H, Box, Name,
+					  #{click => fun() -> Pid ! {candid_wx, {code, Tab}}
+						     end}),
+			wxSizer:add(Bar, B, []),
 			B
 		    end || {I, #{name := Name}} <- enum(Tabs)]
 	   end,
     wxSizer:add(BoxS, Bar, [{flag, ?wxBOTTOM}, {border, 8}]),
     Body = wxPanel:new(Box),
     wxWindow:setSizer(Body, wxBoxSizer:new(?wxVERTICAL)),
-    wxSizer:add(BoxS, Body, [{proportion, 1}, {flag, ?wxEXPAND}]),
+    wxSizer:add(BoxS, Body, []),
+    Canvas = canvas(H, Box),
+    wxSizer:add(BoxS, Canvas, []),
     wxSizer:add(wxWindow:getSizer(Right), Box, [{proportion, 1}, {flag, ?wxEXPAND}]),
     wxWindow:hide(Box),
     %% The model frame.
@@ -51,16 +53,17 @@ new(H, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
     wxSizer:add(Row, GoalF, [{flag, ?wxLEFT bor ?wxALIGN_CENTER_VERTICAL},
 			     {border, 12}]),
     [begin
-	 B = wxButton:new(Top, ?wxID_ANY, [{label, L}]),
-	 wxButton:connect(B, command_button_clicked, [{userData, {code, L}}]),
+	 B = candid_wx:btn(H, Top, L,
+			   #{click => fun() -> Pid ! {candid_wx, {code, L}} end}),
 	 wxSizer:add(Row, B, [{flag, ?wxLEFT bor ?wxALIGN_CENTER_VERTICAL},
-			      {border, 4}])
+			      {border, case L of "clear" -> 4; _ -> 0 end}])
      end || L <- ["clear", "solve"]],
-    Sel = wxChoice:new(Top, ?wxID_ANY,
-		       [{choices, ["k \x{2264} " ++ integer_to_list(K) || K <- Ks]}]),
-    wxChoice:setSelection(Sel, length(lists:takewhile(fun(K) -> K =/= K0 end, Ks))),
-    wxChoice:connect(Sel, command_choice_selected,
-		     [{userData, {code_choice, "k=", [integer_to_list(K) || K <- Ks]}}]),
+    Sel = candid_wx:menu_btn(H, Top, ["k \x{2264} " ++ integer_to_list(K)
+				      || K <- Ks],
+			     length(lists:takewhile(fun(K) -> K =/= K0 end, Ks)),
+			     fun(I) -> Pid ! {candid_wx, {code, "k=" ++
+						 integer_to_list(lists:nth(I, Ks))}}
+			     end),
     wxSizer:add(Row, Sel, [{flag, ?wxLEFT bor ?wxALIGN_CENTER_VERTICAL}, {border, 4}]),
     %% The answer: its text, and what a found trace brings.
     Res = wxPanel:new(Top),
@@ -75,7 +78,7 @@ new(H, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
     #{vars := MainVars} = hd(Tabs),
     vals(H, Top, TopS, "m_", none, MainVars, perm),
     wxWindow:layout(Top),
-    #{box => Box, body => Body, right => Right, top => Top,
+    #{box => Box, body => Body, canvas => Canvas, right => Right, top => Top,
       tab_buttons => Btns, event => code, goal => Goal, goal_frame => GoalF,
       res => ResT, extra => Extra, colours => Colours}.
 
@@ -110,17 +113,29 @@ shown(_H, #{box := Box, right := Right}, Show) ->
     wxWindow:layout(Right),
     wxScrolledWindow:fitInside(Right).
 
-%% Tab I's rungs, drawn as ladder or code.
-rungs(H, Hd = #{body := Body, right := Right, tab_buttons := Btns}, Mode, I, Tab) ->
-    [wxToggleButton:setValue(B, J =:= I) || {J, B} <- enum(Btns)],
+%% Tab I: its buttons, an object's bindings and values, and the canvas the
+%% rungs are drawn on, Size big. Frozen and in one batch, so the head is not
+%% seen at 0,0 before the layout puts it in its place.
+rungs(H, Hd = #{right := Right}, _Mode, I, Tab, Size) ->
+    wxWindow:freeze(Right),
+    try wx:batch(fun() ->
+			 candid_wx:in_scope(H, rung,
+					    fun() -> rungs1(H, Hd, I, Tab, Size) end)
+		 end)
+    after wxWindow:thaw(Right)
+    end.
+
+rungs1(H, #{body := Body, canvas := C, box := Box, right := Right,
+	    tab_buttons := Btns}, I, Tab, Size) ->
+    [candid_wx:btn_on(H, B, J =:= I) || {J, B} <- enum(Btns)],
     candid_wx:forget(H, rung),
     wxWindow:destroyChildren(Body),
-    BS = wxWindow:getSizer(Body),
-    head(H, Body, BS, Tab),
-    Ctx = #{env => maps:get(env, Tab), prefix => maps:get(prefix, Tab), hd => Hd},
-    lists:foldl(fun(R, G) -> row(H, Body, BS, R, G, Mode, Ctx) end, 0,
-		maps:get(rules, Tab)),
+    head(H, Body, wxWindow:getSizer(Body), Tab),
+    candid_wx:register(H, code_ops, [], perm),
+    wxWindow:setMinSize(C, Size),
+    wxWindow:setSize(C, Size),
     wxWindow:layout(Body),
+    wxWindow:layout(Box),
     wxWindow:layout(Right),
     wxScrolledWindow:fitInside(Right),
     ok.
@@ -134,131 +149,132 @@ head(H, Body, BS, Tab = #{binds := {M, Bs}, vars := Vars, prefix := P}) ->
     wxSizer:add(BS, T, [{flag, ?wxBOTTOM}, {border, 8}]),
     vals(H, Body, BS, "v_", P, Vars, rung).
 
-row(H, Body, BS, {gate, 'end', _}, G, _Mode, _Ctx) ->
-    T = candid_wx:text(H, Body, "#end", {68, 85, 102}),
-    wxSizer:add(BS, T, [{flag, ?wxBOTTOM}, {border, 8}]),
-    G;
-row(H, Body, BS, {gate, Kind, Arg}, G, _Mode, _Ctx) ->
-    Txt = case Kind of
-	      in     -> ["#in ", lists:join(" ", Arg)];
-	      'when' -> ["#when ", candyspeak_eval:text(Arg)]
-	  end,
-    T = candid_wx:text(H, Body, flat(Txt), {102, 136, 170}),
-    candid_wx:register(H, "g" ++ integer_to_list(G), {hd, T}, rung),
-    wxSizer:add(BS, T, [{flag, ?wxTOP}, {border, 10}]),
-    G + 1;
-row(H, Body, BS, R = #{no := N, line := Ln, guard := Gd, assigns := As}, G,
-    Mode, Ctx) ->
-    K = "k" ++ integer_to_list(N),
-    P = wxPanel:new(Body),
-    S = wxBoxSizer:new(?wxHORIZONTAL),
-    wxWindow:setSizer(P, S),
-    LnT = candid_wx:text(H, P, integer_to_list(Ln), {85, 85, 85}),
-    wxWindow:setMinSize(LnT, {40, -1}),
-    wxSizer:add(S, LnT, [{flag, ?wxALIGN_CENTER_VERTICAL}]),
-    Label = case {Mode, R} of
-		{ladder, #{coil := Tgt}} -> candyspeak_eval:text(Tgt);
-		{code, #{coil := Tgt}}   -> [candyspeak_eval:text(Tgt), " ="];
-		_ -> lists:join(", ", [csp_code:assign(A) || A <- As])
-	    end,
-    Coil = fun() ->
-		   {F, T} = candid_wx:frame_box(P, flat(Label)),
-		   wxWindow:setFont(T, candid_wx:font(H)),
-		   candid_wx:register(H, K, {coil, F, T}, rung),
-		   F
-	   end,
-    Add = fun(W) -> wxSizer:add(S, W, [{flag, ?wxALIGN_CENTER_VERTICAL}]) end,
-    case {Mode, Gd} of
-	{ladder, undefined} ->
-	    Add(wire(H, P, 4)), Add(Coil());
-	{ladder, _} ->
-	    Add(wire(H, P, 1)),
-	    {L, _} = ladder(H, P, Gd, K, 0, Ctx),
-	    wxSizer:add(S, L, [{flag, ?wxALIGN_CENTER_VERTICAL}]),
-	    Add(wire(H, P, 1)), Add(Coil());
-	{code, undefined} ->
-	    Add(Coil());
-	{code, _} ->
-	    Add(Coil()),
-	    case R of
-		#{coil := _} -> ok;
-		_ -> Add(candid_wx:text(H, P, " ? ", {119, 119, 119}))
-	    end,
-	    {T, _} = code(H, P, Gd, K, 0, 0, Ctx),
-	    wxSizer:add(S, T, [{flag, ?wxALIGN_CENTER_VERTICAL}])
-    end,
-    candid_wx:register(H, "r" ++ integer_to_list(N), {row, P, LnT}, rung),
-    wxSizer:add(BS, P, [{flag, ?wxTOP}, {border, 3}]),
-    G.
+%%% ------------------------------------------------------------- the canvas
+%%%
+%%% The rungs are csp_ladder's ops, drawn when the panel is painted -- so a
+%%% scroll or the theme draws them again as they are -- and kept in the id
+%%% table for that. A click goes to csp_code as `xy=X,Y', which says what is
+%%% there.
 
-wire(H, P, N) ->
-    candid_wx:text(H, P, lists:duplicate(N, $\x{2500}), ?WIRE).
+canvas(H, Parent) ->
+    C = wxPanel:new(Parent, [{style, ?wxFULL_REPAINT_ON_RESIZE}]),
+    wxWindow:setFont(C, candid_wx:font(H)),
+    wxWindow:setBackgroundStyle(C, ?wxBG_STYLE_PAINT),
+    Pid = self(),
+    wxPanel:connect(C, paint, [{callback,
+				fun(_E, _O) ->
+					DC = wxBufferedPaintDC:new(C),
+					paint_ops(H, DC, ops(H)),
+					wxBufferedPaintDC:destroy(DC)
+				end}]),
+    wxPanel:connect(C, left_down, [{callback,
+				    fun(#wx{event = #wxMouse{x = X, y = Y}}, O) ->
+					    Pid ! {candid_wx, {code, xy(X, Y)}},
+					    wxEvent:skip(O)
+				    end}]),
+    C.
 
-%% AND across, OR down. Returns {Sizer, NextContact}.
-ladder(H, P, X = {'&&', _, _, _}, K, I, Ctx) ->
-    S = wxBoxSizer:new(?wxHORIZONTAL),
-    I1 = lists:foldl(fun(C, J) ->
-			     J =/= I andalso
-				 wxSizer:add(S, wire(H, P, 1),
-					     [{flag, ?wxALIGN_CENTER_VERTICAL}]),
-			     {W, J1} = ladder(H, P, C, K, J, Ctx),
-			     wxSizer:add(S, W, [{flag, ?wxALIGN_CENTER_VERTICAL}]),
-			     J1
-		     end, I, csp_code:chain('&&', X)),
-    {S, I1};
-ladder(H, P, X = {'||', _, _, _}, K, I, Ctx) ->
-    S = wxStaticBoxSizer:new(?wxVERTICAL, P),
-    I1 = lists:foldl(fun(C, J) ->
-			     B = wxBoxSizer:new(?wxHORIZONTAL),
-			     {W, J1} = ladder(H, P, C, K, J, Ctx),
-			     wxSizer:add(B, W, [{flag, ?wxALIGN_CENTER_VERTICAL}]),
-			     wxSizer:add(S, B, [{flag, ?wxALL}, {border, 1}]),
-			     J1
-		     end, I, csp_code:chain('||', X)),
-    {S, I1};
-ladder(H, P, X, K, I, Ctx) ->
-    {contact(H, P, X, K, I, Ctx), I + 1}.
+xy(X, Y) -> "xy=" ++ integer_to_list(X) ++ "," ++ integer_to_list(Y).
 
-%% The same walk as text: the contacts in order, the operators between.
-code(H, P, X = {Op, _, _, _}, K, I, Pr, Ctx) when Op =:= '&&'; Op =:= '||' ->
-    Q = case Op of '||' -> 1; '&&' -> 2 end,
-    S = wxBoxSizer:new(?wxHORIZONTAL),
-    Txt = fun(T) -> wxSizer:add(S, candid_wx:text(H, P, T, {119, 119, 119}),
-				[{flag, ?wxALIGN_CENTER_VERTICAL}]) end,
-    Q < Pr andalso Txt("("),
-    I1 = lists:foldl(fun(C, J) ->
-			     J =/= I andalso Txt(" " ++ atom_to_list(Op) ++ " "),
-			     {W, J1} = code(H, P, C, K, J, Q + 1, Ctx),
-			     wxSizer:add(S, W, [{flag, ?wxALIGN_CENTER_VERTICAL}]),
-			     J1
-		     end, I, csp_code:chain(Op, X)),
-    Q < Pr andalso Txt(")"),
-    {S, I1};
-code(H, P, X, K, I, _Pr, Ctx) ->
-    {contact(H, P, X, K, I, Ctx), I + 1}.
+ops(H) ->
+    case candid_wx:lookup(H, code_ops) of
+	{ok, Ops} -> Ops;
+	error     -> []
+    end.
 
-%% A contact. A click marks it, see csp_code:control/2.
-contact(H, P, X, K, I, _Ctx) ->
-    Id = K ++ "_" ++ integer_to_list(I),
-    {F, T} = candid_wx:frame_box(P, flat(candyspeak_eval:text(X))),
-    wxWindow:setFont(T, candid_wx:font(H)),
-    candid_wx:click(T, {code, "ct=" ++ Id}, self()),
-    candid_wx:register(H, Id, {contact, F, T}, rung),
-    F.
+%% The width of a character and the height of a line in the view's font.
+metrics(_H, #{canvas := C}) ->
+    {W, Ht, _, _} = wxWindow:getTextExtent(C, "MMMMMMMMMM"),
+    #{cw => W / 10, ch => Ht}.
+
+%% The whole picture again.
+draw(H, #{canvas := C}, Ops) ->
+    candid_wx:register(H, code_ops, Ops, perm),
+    wxWindow:refresh(C, [{eraseBackground, false}]).
+
+%% A pen and a brush per colour and style, made once a paint.
+paint_ops(H, DC, Ops) ->
+    {W, Ht} = wxDC:getSize(DC),
+    Bg = wxBrush:new(candid_wx:tc(H, ?BG)),
+    wxDC:setBackground(DC, Bg),
+    wxDC:clear(DC),
+    wxBrush:destroy(Bg),
+    _ = {W, Ht},
+    Font = candid_wx:font(H),
+    Bold = wxFont:new(wxFont:getPointSize(Font), ?wxFONTFAMILY_TELETYPE,
+		      ?wxFONTSTYLE_NORMAL, ?wxFONTWEIGHT_BOLD),
+    wxDC:setFont(DC, Font),
+    Tools = lists:foldl(fun(Op, T) -> op(H, DC, Op, T, Font, Bold) end, #{}, Ops),
+    [case K of
+	 {pen, _, _, _} -> wxPen:destroy(X);
+	 {brush, _}     -> wxBrush:destroy(X)
+     end || {K, X} <- maps:to_list(Tools)],
+    wxFont:destroy(Bold),
+    ok.
+
+op(H, DC, {rect, X, Y, W, Ht, R, F, S, D}, T0, _F, _B) ->
+    {Br, T1} = brush(H, F, T0),
+    {Pen, T2} = pen(H, S, 1, D, T1),
+    wxDC:setBrush(DC, Br),
+    wxDC:setPen(DC, Pen),
+    wxDC:drawRoundedRectangle(DC, {X, Y, W, Ht}, R),
+    T2;
+op(H, DC, {line, X1, Y1, X2, Y2, C, W, D}, T0, _F, _B) ->
+    {Pen, T1} = pen(H, C, W, D, T0),
+    wxDC:setPen(DC, Pen),
+    wxDC:drawLine(DC, {X1, Y1}, {X2, Y2}),
+    T1;
+op(H, DC, {text, X, Y, Txt, C, Bold}, T, Font, BoldF) ->
+    Bold andalso wxDC:setFont(DC, BoldF),
+    wxDC:setTextForeground(DC, candid_wx:tc(H, C, fg)),
+    wxDC:drawText(DC, Txt, {X, Y}),
+    Bold andalso wxDC:setFont(DC, Font),
+    T.
+
+brush(_H, none, T) -> {?wxTRANSPARENT_BRUSH, T};
+brush(H, C, T) ->
+    case maps:find({brush, C}, T) of
+	{ok, B} -> {B, T};
+	error   -> B = wxBrush:new(candid_wx:tc(H, C)), {B, T#{{brush, C} => B}}
+    end.
+
+pen(_H, none, _W, _D, T) -> {?wxTRANSPARENT_PEN, T};
+pen(H, C, W, D, T) ->
+    K = {pen, C, W, D},
+    case maps:find(K, T) of
+	{ok, P} -> {P, T};
+	error ->
+	    Style = case D of true -> ?wxPENSTYLE_SHORT_DASH; false -> ?wxPENSTYLE_SOLID end,
+	    P = wxPen:new(candid_wx:tc(H, C, fg), [{width, W}, {style, Style}]),
+	    {P, T#{K => P}}
+    end.
 
 %%% ------------------------------------------------------------ painting
 
 %% The classes and texts that changed: [Id, Class ...], [Id, Text ...].
-paint(H, Hd, Cs, Ts) ->
+%% Frozen and batched, as rungs/5.
+paint(_H, _Hd, [], []) -> ok;
+paint(H, Hd = #{box := Box}, Cs, Ts) ->
+    wxWindow:freeze(Box),
+    try wx:batch(fun() -> paint1(H, Hd, Cs, Ts) end)
+    after wxWindow:thaw(Box)
+    end.
+
+paint1(H, Hd, Cs, Ts) ->
     classes(H, Hd, Cs),
     texts(H, Ts),
     Ts =/= [] andalso wxWindow:layout(maps:get(top, Hd)),
     ok.
 
+%% A window is coloured in the scope it was registered in, so it goes with
+%% the rest of it (candid_wx:in_scope/3).
 classes(H, Hd, [Id, C | T]) ->
-    case candid_wx:lookup(H, Id) of
-	{ok, What} -> style(H, What, string:lexemes(C, " "), Hd);
-	error      -> ok
+    case candid_wx:lookup_scope(H, Id) of
+	{ok, What, Scope} ->
+	    candid_wx:in_scope(H, Scope, fun() ->
+						 style(H, What, string:lexemes(C, " "), Hd)
+					 end);
+	error -> ok
     end,
     classes(H, Hd, T);
 classes(_H, _Hd, []) -> ok.
@@ -271,31 +287,6 @@ texts(H, [Id, Txt | T]) ->
     texts(H, T);
 texts(_H, []) -> ok.
 
-style(H, {contact, F, T}, Cls, Hd) ->
-    {Bg, Fg} = case {lists:member("t", Cls), lists:member("u", Cls)} of
-		   {true, _} -> {fill(true, Hd), ink(true, Hd)};
-		   {_, true} -> {{30, 30, 30}, {102, 102, 102}};
-		   _         -> {{30, 30, 30}, {153, 153, 153}}
-	       end,
-    colours(H, T, Bg, Fg),
-    frame(H, F, Cls, [{"mt", want}, {"mf", unwant}], Hd);
-style(H, {coil, F, T}, Cls, Hd) ->
-    case lists:member("on", Cls) of
-	true  -> colours(H, T, fill(fired, Hd), ink(fired, Hd));
-	false -> colours(H, T, ?BG, {153, 153, 153})
-    end,
-    frame(H, F, Cls, [{"nx", next}], Hd);
-style(H, {row, P, Ln}, Cls, _Hd) ->
-    Off = lists:member("off", Cls),
-    colours(H, P, case Off of true -> {10, 10, 10}; false -> ?BG end, {187, 187, 187}),
-    colours(H, Ln, case Off of true -> {10, 10, 10}; false -> ?BG end,
-	    case Off of true -> {51, 51, 51}; false -> {85, 85, 85} end);
-style(H, {hd, T}, Cls, Hd) ->
-    candid_wx:fg(H, T, case lists:member("t", Cls) of
-					true  -> c(block, Hd);
-					false -> {102, 136, 170}
-				    end),
-    wxWindow:refresh(T);
 style(H, {frame, F}, Cls, Hd) ->
     frame(H, F, Cls, [{"sgt", want}, {"sgf", unwant}], Hd);
 style(H, {cell, G, R, C}, Cls, Hd) ->
@@ -307,7 +298,7 @@ style(H, {cell, G, R, C}, Cls, Hd) ->
 		   _            -> {{24, 24, 24}, {187, 187, 187}}
 	       end,
     wxGrid:setCellBackgroundColour(G, R, C, candid_wx:tc(H, Bg)),
-    wxGrid:setCellTextColour(G, R, C, candid_wx:tc(H, Fg)),
+    wxGrid:setCellTextColour(G, R, C, candid_wx:tc(H, Fg, fg)),
     wxGrid:forceRefresh(G);
 style(_H, {grid, G}, Cls, _Hd) ->
     wxWindow:show(G, [{show, not lists:member("hid", Cls)}]),
@@ -323,11 +314,6 @@ frame(H, F, Cls, Marks, Hd) ->
 	  end,
     candid_wx:bg(H, F, Col),
     wxWindow:refresh(F).
-
-colours(H, W, Bg, Fg) ->
-    candid_wx:bg(H, W, Bg),
-    candid_wx:fg(H, W, Fg),
-    wxWindow:refresh(W).
 
 c(K, #{colours := C}) -> candid_wx:colour(maps:get(K, C)).
 fill(K, Hd) -> candid_wx:mix(c(K, Hd), 25, {17, 17, 17}).
@@ -360,21 +346,26 @@ answer(H, Hd = #{res := T, extra := Extra}, Cls, Text, Trace) ->
     wxStaticText:wrap(T, 900),
     candid_wx:forget(H, answer),
     wxWindow:destroyChildren(Extra),
+    candid_wx:in_scope(H, answer, fun() -> trace_bar(H, Extra, Trace) end),
+    candid_wx:relayout_up(Extra).
+
+trace_bar(H, Extra, Trace) ->
     ES = wxWindow:getSizer(Extra),
     case Trace of
 	none -> ok;
 	{Rows, M, Names} ->
 	    Bar = wxBoxSizer:new(?wxHORIZONTAL),
+	    Pid = self(),
 	    [begin
-		 B = wxButton:new(Extra, ?wxID_ANY,
-				  [{label, case Tag of
-					       "rstep" -> "step";
-					       "up"    -> "\x{25B2}";
-					       "down"  -> "\x{25BC}";
-					       _       -> Tag
-					   end}]),
-		 wxButton:connect(B, command_button_clicked, [{userData, {code, Tag}}]),
-		 wxSizer:add(Bar, B, [{flag, ?wxRIGHT}, {border, 4}])
+		 B = candid_wx:btn(H, Extra,
+				   case Tag of
+				       "rstep" -> "step";
+				       "up"    -> "\x{25B2}";
+				       "down"  -> "\x{25BC}";
+				       _       -> Tag
+				   end,
+				   #{click => fun() -> Pid ! {candid_wx, {code, Tag}} end}),
+		 wxSizer:add(Bar, B, [])
 	     end || Tag <- ["up", "down", "live", "table", "replay", "rstep"]],
 	    Ev = candid_wx:text(H, Extra, "", {170, 170, 170}),
 	    candid_wx:register(H, "tr_ev", {text, Ev}, answer),
@@ -383,8 +374,7 @@ answer(H, Hd = #{res := T, extra := Extra}, Cls, Text, Trace) ->
 	    wxSizer:add(ES, Bar, [{flag, ?wxTOP}, {border, 4}]),
 	    G = table(H, Extra, Rows, M, Names),
 	    wxSizer:add(ES, G, [{flag, ?wxTOP}, {border, 4}])
-    end,
-    candid_wx:relayout_up(Extra).
+    end.
 
 table(H, Parent, Rows, M = #{states := Sts}, Names) ->
     Cols = csp_code:cols(Rows),

@@ -9,10 +9,18 @@
 %%% block is not in force), hd t, mt / mf (marked), sgt / sgf, cur, bad, any.
 %%% A renderer builds the pieces under those ids and shows the classes in its
 %%% own way; css/1 is this one's.
+%%%
+%%% The rungs are the exception: csp_ladder lays them out and colours them by
+%%% their classes, and this only draws its ops on a <canvas>. A click on it
+%%% comes back as `xy=X,Y'.
 
 -module(csp_code_wse).
 
--export([new/4, shown/3, rungs/5, paint/4, goal/3, answer/5]).
+-define(FONT, "13px monospace").
+-define(LINE_H, 16).                      % px, a line of ?FONT
+
+-export([new/4, metrics/2, shown/3, rungs/6, draw/3, paint/4, goal/3,
+	 answer/5]).
 
 
 css(C) ->
@@ -36,6 +44,7 @@ css(C) ->
        ".md{font:13px monospace;color:#bbb}"
        ".md button,.md select{font:12px monospace;padding:2px 8px;"
        "  margin-left:4px;border:1px solid #555;background:#333;color:#ccc}"
+       ".md button+button{margin-left:-1px}"
        ".md .goal{display:inline-block;min-width:320px;padding:3px 10px;"
        "  border:2px solid ", Col(want), ";border-radius:3px;color:#eee;"
        "  background:", Fill(want), "}"
@@ -57,39 +66,7 @@ css(C) ->
        ".sgt{outline:2px solid ", Col(want), ";outline-offset:1px}"
        ".sgf{outline:2px dashed ", Col(unwant), ";outline-offset:1px}"
        ".cv .bind{color:#8ab;margin-bottom:8px}"
-       ".cv .rw{display:flex;align-items:center;margin:3px 0;flex-wrap:nowrap}"
-       ".cv .ln{color:#555;width:3.2em;text-align:right;margin-right:10px;"
-       "  flex:none}"
-       ".cv .and{display:flex;align-items:center}"
-       ".cv .or{display:flex;flex-direction:column;border-left:2px solid #666;"
-       "  border-right:2px solid #666;padding:1px 0}"
-       ".cv .br{display:flex;align-items:center;justify-content:space-between}"
-       ".cv .br>.w:last-child{flex:1}"
-       ".cv .w{display:inline-block;height:2px;min-width:10px;background:#666}"
-       ".cv .ct{border:1px solid #555;padding:1px 6px;border-radius:3px;"
-       "  background:#1e1e1e;color:#999;white-space:nowrap;cursor:pointer}"
-       ".cv .ct.t{background:", Fill(true), ";border-color:", Col(true),
-       ";color:", Ink(true), ";box-shadow:0 0 6px ", Col(true), "}"
-       ".cv .ct.u{border-style:dashed;color:#666}"
-       %% A mark is the frame: the fill still says what holds now.
-       ".cv .ct.mt{outline:2px solid ", Col(want), ";outline-offset:2px}"
-       ".cv .ct.mf{outline:2px dashed ", Col(unwant), ";outline-offset:2px}"
-       ".cv .co{border:1px solid #555;border-radius:10px;padding:1px 9px;"
-       "  color:#999;white-space:nowrap}"
-       ".cv .co.nx{border-color:", Col(next), ";color:", Ink(next), "}"
-       ".cv .co.on{background:", Fill(fired), ";border-color:", Col(fired),
-       ";color:", Ink(fired), ";box-shadow:0 0 7px ", Col(fired), "}"
-       ".cv .hd{color:#68a;margin:10px 0 2px 0}"
-       ".cv .rw.off{opacity:0.35}"
-       ".cv .hd.e{color:#456;margin:2px 0 8px 0}"
-       ".cv .hd.t{color:", Col(block), ";font-weight:bold}"
-       ".cv.code .ct{border:none;padding:0 2px;background:none;box-shadow:none}"
-       ".cv.code .ct.t{color:", Col(true), ";text-shadow:0 0 5px ", Col(true), "}"
-       ".cv.code .ct.u{color:#666;text-decoration:underline dotted}"
-       ".cv.code .co{border:none;padding:0 2px}"
-       ".cv.code .co.on{background:", Fill(fired), "}"
-       ".cv.code .op{color:#777}"
-       ".cv .tx{white-space:pre}"]).
+       ".cv canvas{display:block}"]).
 
 %%% ----------------------------------------------------------------- view
 
@@ -103,7 +80,7 @@ css(C) ->
 new(Ws, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
     #{code := Parent, status := Row, top := Top} = Where,
     Style = wse:createElement(Ws, "style"),
-    wse:set(Ws, Style, "textContent", css(Colours)),
+    wse:set(Ws, Style, "textContent", candid_wse:u(css(Colours))),
     wse:appendChild(Ws, Parent, Style),
     {ok, Ev} = wse:create_event(Ws),
     Notify = fun(Tag) -> wse:newf(Ws, "", "{ Wse.notify(" ++
@@ -119,7 +96,7 @@ new(Ws, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
 	       _ ->
 		   [begin
 			B = wse:createElement(Ws, "button"),
-			wse:appendChild(Ws, B, wse:createTextNode(Ws, Name)),
+			wse:appendChild(Ws, B, wse:createTextNode(Ws, candid_wse:u(Name))),
 			wse:set(Ws, B, "onclick",
 				Notify("'tab=" ++ integer_to_list(I) ++ "'")),
 			wse:appendChild(Ws, Bar, B),
@@ -127,8 +104,10 @@ new(Ws, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
 		    end || {I, #{name := Name}} <- enum(Tabs)]
 	   end,
     Body = wse:createElement(Ws, "div"),
+    Canvas = wse:createElement(Ws, "canvas"),
     wse:appendChild(Ws, Box, Bar),
     wse:appendChild(Ws, Box, Body),
+    wse:appendChild(Ws, Box, Canvas),
     wse:appendChild(Ws, Parent, Box),
     %% The model frame: goal, clear, solve within k, and below them the answer
     %% and the values.
@@ -138,7 +117,7 @@ new(Ws, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
     wse:appendChild(Ws, Md, Goal),
     [begin
 	 B = wse:createElement(Ws, "button"),
-	 wse:appendChild(Ws, B, wse:createTextNode(Ws, Label)),
+	 wse:appendChild(Ws, B, wse:createTextNode(Ws, candid_wse:u(Label))),
 	 wse:set(Ws, B, "onclick", Notify("'" ++ Label ++ "'")),
 	 wse:appendChild(Ws, Md, B)
      end || Label <- ["clear", "solve"]],
@@ -159,7 +138,7 @@ new(Ws, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
     wse:appendChild(Ws, Top, Res),
     #{vars := MainVars} = hd(Tabs),
     Vals = wse:createElement(Ws, "div"),
-    wse:set(Ws, Vals, "innerHTML", lists:flatten(vals("m_", none, MainVars))),
+    wse:set(Ws, Vals, "innerHTML", candid_wse:u(lists:flatten(vals("m_", none, MainVars)))),
     wse:appendChild(Ws, Top, Vals),
     Paint = wse:newf(Ws, "a,b",
 		     "{ for (var i = 0; i < a.length; i += 2) {"
@@ -177,8 +156,37 @@ new(Ws, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
 		   "    if (t) Wse.notify(" ++ integer_to_list(Ev) ++
 		       ", 'sig=' + t.dataset.sig); }; }"),
     wse:cast(Ws, Sig, "call", [null]),
-    #{box => Box, body => Body, tab_buttons => Btns, event => Ev,
-      paint => Paint, goal => Goal, res => Res}.
+    %% The rungs: csp_ladder's ops, drawn as they come. A click goes back as
+    %% `xy=X,Y', and csp_code says what is there.
+    Draw = wse:newf(Ws, "c,w,h,ops",
+		    "{ var r = window.devicePixelRatio || 1;"
+		    "  if (w >= 0) { c.width = w * r; c.height = h * r;"
+		    "    c.style.width = w + 'px'; c.style.height = h + 'px';"
+		    "    c.onclick = function(e) {"
+		    "      var b = c.getBoundingClientRect();"
+		    "      Wse.notify(" ++ integer_to_list(Ev) ++ ", 'xy=' +"
+		    "        Math.round(e.clientX - b.left) + ',' +"
+		    "        Math.round(e.clientY - b.top)); }; }"
+		    "  var x = c.getContext('2d');"
+		    "  x.setTransform(r, 0, 0, r, 0, 0);"
+		    "  x.clearRect(0, 0, c.width, c.height);"
+		    "  x.font = '" ++ ?FONT ++ "'; x.textBaseline = 'top';"
+		    "  JSON.parse(ops).forEach(function(o) {"
+		    "    x.setLineDash(o[o.length - 1] ? [3, 3] : []);"
+		    "    if (o[0] == 'r') {"
+		    "      x.beginPath(); x.roundRect(o[1], o[2], o[3], o[4], o[5]);"
+		    "      if (o[6]) { x.fillStyle = o[6]; x.fill(); }"
+		    "      if (o[7]) { x.lineWidth = 1; x.strokeStyle = o[7];"
+		    "                  x.stroke(); } }"
+		    "    else if (o[0] == 'l') {"
+		    "      x.beginPath(); x.moveTo(o[1], o[2]); x.lineTo(o[3], o[4]);"
+		    "      x.lineWidth = o[6]; x.strokeStyle = o[5]; x.stroke(); }"
+		    "    else {"
+		    "      x.font = (o[5] ? 'bold ' : '') + '" ++ ?FONT ++ "';"
+		    "      x.fillStyle = o[4]; x.fillText(o[3], o[1], o[2]); } }); }"),
+    #{box => Box, body => Body, canvas => Canvas, draw => Draw,
+      tab_buttons => Btns, event => Ev, paint => Paint, goal => Goal,
+      res => Res}.
 
 enum(L) -> lists:zip(lists:seq(0, length(L) - 1), L).
 
@@ -189,20 +197,43 @@ shown(Ws, #{box := Box}, Show) ->
 			      false -> "display:none"
 			  end).
 
-%% Tab I's rungs, drawn as ladder or code. Tab is csp_code's: its rules, env,
-%% prefix, binds and vars.
-rungs(Ws, H = #{box := Box, body := Body, tab_buttons := Btns}, Mode, I, Tab) ->
-    wse:set(Ws, Box, "className", case Mode of
-				      ladder -> "cv";
-				      code   -> "cv code"
-				  end),
+%% The width of a character and the height of a line in ?FONT, which the
+%% layout is made of (csp_ladder).
+metrics(Ws, _H) ->
+    F = wse:newf(Ws, "", "{ var x = document.createElement('canvas')"
+		 ".getContext('2d'); x.font = '" ++ ?FONT ++ "';"
+		 "  return Math.round(x.measureText('MMMMMMMMMM').width * 100); }"),
+    {ok, W} = wse:call(Ws, F, "call", [null]),
+    #{cw => W / 1000, ch => ?LINE_H}.
+
+%% Tab I: its buttons, an object's bindings and values, and the canvas the
+%% rungs are drawn on, Size big. Tab is csp_code's.
+rungs(Ws, #{box := Box, body := Body, tab_buttons := Btns, canvas := C,
+	    draw := D}, _Mode, I, Tab, {W, H}) ->
+    wse:set(Ws, Box, "className", "cv"),
     [wse:set(Ws, B, "className", case J of I -> "sel"; _ -> "" end)
      || {J, B} <- enum(Btns)],
-    Html = lists:flatten([head(Tab), html(maps:get(rules, Tab), Mode,
-					   #{env => maps:get(env, Tab),
-					     prefix => maps:get(prefix, Tab),
-					     event => maps:get(event, H)})]),
-    wse:set(Ws, Body, "innerHTML", Html).
+    wse:set(Ws, Body, "innerHTML", candid_wse:u(lists:flatten(head(Tab)))),
+    wse:cast(Ws, D, "call", [null, C, W, H, "[]"]).
+
+%% csp_ladder's ops, the whole picture.
+draw(Ws, #{canvas := C, draw := D}, Ops) ->
+    wse:cast(Ws, D, "call", [null, C, -1, -1, json(Ops)]).
+
+%% As its UTF-8 bytes: what wse sends as a string (candid_wse:u/1).
+json(Ops) ->
+    binary_to_list(iolist_to_binary(json:encode([op(O) || O <- Ops]))).
+
+op({rect, X, Y, W, H, R, F, S, D}) ->
+    [<<"r">>, X, Y, W, H, R, rgb(F), rgb(S), D];
+op({line, X1, Y1, X2, Y2, C, W, D}) ->
+    [<<"l">>, X1, Y1, X2, Y2, rgb(C), W, D];
+op({text, X, Y, T, C, B}) ->
+    [<<"t">>, X, Y, unicode:characters_to_binary(T), rgb(C), B, false].
+
+rgb(none) -> false;
+rgb({R, G, B}) ->
+    iolist_to_binary(io_lib:format("rgb(~w,~w,~w)", [R, G, B])).
 
 %% The classes and texts that changed: [Id, Class ...], [Id, Text ...].
 paint(Ws, #{paint := F}, Cs, Ts) ->
@@ -229,91 +260,6 @@ vals(Pre, Obj, Vars) ->
 	   "<b id='", Pre, N, "'></b></span>"]
       end || {K, N} <- Vars],
      "</div>"].
-
-%%% ----------------------------------------------------------------- html
-%%%
-%%% Ids: a rule's coil is k<N>, its contacts k<N>_<I> in walk order, a gate
-%%% header g<I>. paint/2 sets classes by id, so the html is written once.
-
-html(Rules, Mode, V) ->
-    {Out, _} = lists:mapfoldl(fun(R, G) -> row(R, G, Mode, V) end, 0, Rules),
-    Out.
-
-row({gate, 'end', _}, G, _Mode, _V) ->
-    {"<div class='hd e'>#end</div>", G};
-row({gate, Kind, Arg}, G, _Mode, _V) ->
-    T = case Kind of
-	    in      -> ["#in ", lists:join(" ", Arg)];
-	    'when'  -> ["#when ", candyspeak_eval:text(Arg)]
-	end,
-    {["<div class='hd' id='g", integer_to_list(G), "'>", esc(T), "</div>"],
-     G + 1};
-row(R = #{no := N, line := Ln, guard := Gd, assigns := As}, G, Mode, V) ->
-    K = "k" ++ integer_to_list(N),
-    Label = case {Mode, R} of
-		{ladder, #{coil := Tgt}} -> candyspeak_eval:text(Tgt);
-		{code, #{coil := Tgt}}   -> [candyspeak_eval:text(Tgt), " ="];
-		_ -> lists:join(", ", [csp_code:assign(A) || A <- As])
-	    end,
-    Coil = ["<span class='co' id='", K, "'>", esc(Label), "</span>"],
-    Ln1 = ["<span class='ln'>", integer_to_list(Ln), "</span>"],
-    Body = case {Mode, Gd} of
-	       {ladder, undefined} ->
-		   [Ln1, "<span class='w' style='width:40px'></span>", Coil];
-	       {ladder, _} ->
-		   {L, _} = ladder(Gd, K, 0, V),
-		   [Ln1, "<span class='w'></span>", L,
-		    "<span class='w'></span>", Coil];
-	       {code, undefined} ->
-		   [Ln1, "<span class='tx'>", Coil, "</span>"];
-	       {code, _} ->
-		   {T, _} = code(Gd, K, 0, 0, V),
-		   Sep = case R of
-			     #{coil := _} -> "&nbsp;";
-			     _ -> "<span class='op'>&nbsp;?&nbsp;</span>"
-			 end,
-		   %% one inline run: as flex items the operators would
-		   %% lose the spaces around them
-		   [Ln1, "<span class='tx'>", Coil, Sep, T, "</span>"]
-	   end,
-    {["<div class='rw' id='r", integer_to_list(N), "'>", Body, "</div>"], G}.
-
-
-%% AND horizontal, OR vertical. Returns {Html, NextContact}.
-ladder(X = {'&&', _, _, _}, K, I, V) ->
-    {Hs, I1} = lists:mapfoldl(fun(C, J) -> ladder(C, K, J, V) end, I,
-			      csp_code:chain('&&', X)),
-    {["<span class='and'>", lists:join("<span class='w'></span>", Hs),
-      "</span>"], I1};
-ladder(X = {'||', _, _, _}, K, I, V) ->
-    {Hs, I1} = lists:mapfoldl(fun(C, J) -> ladder(C, K, J, V) end, I,
-			      csp_code:chain('||', X)),
-    {["<span class='or'>",
-      [["<span class='br'>", H, "<span class='w'></span></span>"] || H <- Hs],
-      "</span>"], I1};
-ladder(X, K, I, V) ->
-    {contact(X, K, I, V), I + 1}.
-
-%% The same walk as text: the contacts in order, the operators between.
-code(X = {Op, _, _, _}, K, I, P, V) when Op =:= '&&'; Op =:= '||' ->
-    Q = case Op of '||' -> 1; '&&' -> 2 end,
-    {Ts, I1} = lists:mapfoldl(fun(C, J) -> code(C, K, J, Q + 1, V) end, I,
-			      csp_code:chain(Op, X)),
-    T = lists:join(["<span class='op'> ", atom_to_list(Op), " </span>"], Ts),
-    {case Q < P of
-	 true  -> ["<span class='op'>(</span>", T, "<span class='op'>)</span>"];
-	 false -> T
-     end, I1};
-code(X, K, I, _P, V) ->
-    {contact(X, K, I, V), I + 1}.
-
-
-%% A contact. A click marks it, see control/3.
-contact(X, K, I, #{event := Ev}) ->
-    Id = [K, "_", integer_to_list(I)],
-    ["<span class='ct' id='", Id, "' onclick=\"Wse.notify(",
-     integer_to_list(Ev), ",'ct=", Id, "')\">",
-     esc(candyspeak_eval:text(X)), "</span>"].
 
 esc(T) ->
     lists:flatmap(fun($<) -> "&lt;";
@@ -343,7 +289,7 @@ answer(Ws, H = #{res := R}, Cls, Text, Trace) ->
 		     "<div id='tr_tab'>", table(Rows, M, Names), "</div>"]
 	    end,
     wse:set(Ws, R, "className", "md res " ++ Cls),
-    wse:set(Ws, R, "innerHTML", lists:flatten([esc(Text), Table])).
+    wse:set(Ws, R, "innerHTML", candid_wse:u(lists:flatten([esc(Text), Table]))).
 
 %% The trace, a column per step. The abstracted guards become `L26?', the
 %% choice of whether that rule may fire; St is shown by name.
@@ -380,4 +326,4 @@ goal(Ws, #{goal := G}, none) ->
 	    "goal: click a contact -- holds, does not, forget");
 goal(Ws, #{goal := G}, Text) ->
     wse:set(Ws, G, "className", "goal"),
-    wse:set(Ws, G, "textContent", "goal: " ++ Text).
+    wse:set(Ws, G, "textContent", candid_wse:u("goal: " ++ Text)).

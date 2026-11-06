@@ -13,16 +13,23 @@
 %%% back, without csp_fired, and the node is never sent /quit -- closing just
 %%% lets go of it. The owner also gets {csp_link, Text}, what is connected,
 %%% {csp_out, Line} for the rest of what a local csp prints,
-%%% and {csp_program, Text}: the node's program as source, listed off its image
-%%% and patch by csp_list -- what it runs, whatever file the panel had open.
+%%% and {csp_program, Text, Dumps}: the node's program as source, listed off
+%%% its image and patch by csp_list -- what it runs, whatever file the panel
+%%% had open -- and the dumps it was listed from, [{rom, Bin} | {patch |
+%%% eeprom, Bin}], which name that image (candid_file:same_image/2).
 %%%
-%%% Ticking is ours to drive: /commit runs exactly one cycle and prints nothing
-%%% but the dump. /state would also step, but adds a page of human text to parse
-%%% past, and an empty line steps nothing at all.
+%%% Ticking is ours to drive. A csp of our own is paused from the start and
+%%% never resumed: left running it takes a cycle of its own every time its
+%%% loop wakes -- every 100 ms, and on every line we send -- so a /commit a
+%%% tick made two cycles a tick, and a value set from a widget a third. Paused,
+%%% a tick is /step 1: exactly one cycle, which reads the values set since
+%%% the last one, as a board does. Not /commit first: committing while paused
+%%% makes the new value the previous one as well, and an edge (falling(K))
+%%% is never seen -- the lock took no keys.
 
 -module(csp_link).
 
--export([open/2, open/3, target/1, close/1, set/3, tick/1]).
+-export([open/2, open/3, target/1, close/1, set/3, tick/1, raw/2]).
 -export([pause/1, resume/1, step/1, step/2, reset/1, clock/2]).
 -export([init/4]).
 
@@ -146,22 +153,27 @@ conn(S) ->
 
 close(L)          -> L ! close, ok.
 set(L, Name, Val) -> L ! {set, Name, Val}, ok.
+%% A line typed by the person, sent as it is. What comes back is {csp_out,
+%% Line} as anything else csp prints; a node's console, which is otherwise
+%% only read for dumps, is passed on for a while after it.
+raw(L, Line)      -> L ! {raw, Line}, ok.
 tick(L)           -> L ! tick, ok.
 
 %% Stepping, which is not the same as ticking.
 %%
-%% `tick' is /commit: it runs a cycle in a RUNNING program, and a `> X = 1' sent
-%% just before it runs a cycle of its OWN -- so three values for the same instant
-%% become three cycles. Under /pause they do not: values are set without running
-%% anything, and /step N runs exactly N cycles and stops again. That is the
-%% sequence that behaves like hardware, where every DIN is committed at the top
-%% of one cycle, and it is what a replayed model trace needs to match its source.
+%% Our own csp: `tick' is a step, and pause / resume only stop and start the
+%% panel's ticks (the module doc). A NODE runs on its own: pause and resume
+%% are /pause and /resume there, and a tick only asks for its state.
 %%
-%% A value set while paused is PENDING: a bare /step runs its rules on the old
-%% value and only commits the new one at the end, so the rules see it a step
-%% late. /commit while paused commits without running a cycle, so step/2 sends
-%% it first and a step sees what was set before it -- what a replayed model
-%% trace needs, where step t reads the inputs of step t.
+%% Paused, values are set without running anything, and /step N runs exactly
+%% N cycles and stops again. That is the sequence that behaves like hardware,
+%% where every DIN is committed at the top of one cycle, and it is what a
+%% replayed model trace needs to match its source.
+%%
+%% A value set while paused is read by the next step's rules, the inputs of
+%% step t in step t, as a replayed model trace needs. Our own csp is sent no
+%% /commit before the step: it would make the value the previous one too,
+%% and no edge would be seen (measured on lock.csp: falling(K1) never fired).
 pause(L)          -> L ! pause, ok.
 resume(L)         -> L ! resume, ok.
 step(L)           -> step(L, 1).
@@ -199,6 +211,7 @@ init(Owner, {{local, Can}, #{patch := Patch}}, Exe, Files) ->
 			      "--can=" ++ Can, "--exit-on-eof" | Files]},
 		      exit_status, use_stdio, stderr_to_stdout,
 		      {line, 4096}]),
+    port_command(Port, "/pause\n"),
     Owner ! {csp_link, "local csp on " ++ Can ++
 		 case Patch of stored -> ", eeprom patch"; _ -> "" end},
     loop(Port, Owner, []);
@@ -226,35 +239,49 @@ init(Owner, {Target, Opts}, _Exe, _Files) ->
 	    Owner ! {csp_exit, Why}
     end.
 
+%% Run: the panel is ticking (go) rather than stepping by hand. Pending: the
+%% names set since the last cycle. While running, a name set a second time
+%% before the tick gets a cycle of its own first: a click, pressed and let go
+%% inside one tick, would otherwise be one value and no edge.
 loop(Port, Owner, Buf) ->
+    loop(Port, Owner, Buf, true, []).
+
+loop(Port, Owner, Buf, Run, Pending) ->
+    Again = fun(B, R, P) -> loop(Port, Owner, B, R, P) end,
     receive
 	{Port, {data, {eol, Line}}} ->
-	    loop(Port, Owner, feed(Owner, Buf, Line));
+	    Again(feed(Owner, Buf, Line), Run, Pending);
 	{Port, {data, {noeol, Line}}} ->
-	    loop(Port, Owner, feed(Owner, Buf, Line));
+	    Again(feed(Owner, Buf, Line), Run, Pending);
 	{Port, {exit_status, S}} ->
 	    Owner ! {csp_exit, S};
 	{set, Name, Val} ->
+	    P = case Run andalso lists:member(Name, Pending) of
+		    true -> port_command(Port, "/step 1\n"), [];
+		    false -> Pending
+		end,
 	    port_command(Port, ["> ", Name, " = ", fmt(Val), "\n"]),
-	    loop(Port, Owner, Buf);
+	    Again(Buf, Run, [Name | P]);
+	{raw, Line} ->
+	    port_command(Port, [Line, "\n"]),
+	    Again(Buf, Run, Pending);
 	tick ->
-	    port_command(Port, "/commit\n"),
-	    loop(Port, Owner, Buf);
+	    port_command(Port, "/step 1\n"),
+	    Again(Buf, Run, []);
+	%% Paused already, and stays so: run is the panel ticking.
 	pause ->
-	    port_command(Port, "/pause\n"),
-	    loop(Port, Owner, Buf);
+	    Again(Buf, false, Pending);
 	resume ->
-	    port_command(Port, "/resume\n"),
-	    loop(Port, Owner, Buf);
+	    Again(Buf, true, Pending);
 	{step, N} ->
-	    port_command(Port, ["/commit\n/step ", integer_to_list(N), "\n"]),
-	    loop(Port, Owner, Buf);
+	    port_command(Port, ["/step ", integer_to_list(N), "\n"]),
+	    Again(Buf, Run, []);
 	reset ->
 	    port_command(Port, "/reset\n"),
-	    loop(Port, Owner, Buf);
+	    Again(Buf, Run, []);
 	{clock, Ms} ->
 	    port_command(Port, ["/clock ", integer_to_list(Ms), "\n"]),
-	    loop(Port, Owner, Buf);
+	    Again(Buf, Run, Pending);
 	close ->
 	    shutdown(Port);
 	%% The panel went away: browser closed, or it crashed. Same handling --
@@ -262,7 +289,7 @@ loop(Port, Owner, Buf) ->
 	{'EXIT', Owner, _Reason} ->
 	    shutdown(Port);
 	{'EXIT', _Other, _Reason} ->
-	    loop(Port, Owner, Buf)
+	    Again(Buf, Run, Pending)
     end.
 
 %% /quit makes csp exit at once (measured: 0 ms), so wait for that rather than
@@ -341,6 +368,10 @@ hangup({can, _, _, _, _}) -> can_router:detach().
 remote(Io, Owner, St) ->
     receive
 	{tcp, _, Line}  -> remote(Io, Owner, line(Io, Owner, Line, St));
+	{raw, Line} ->
+	    send(Io, [Line, "\n"]),
+	    remote(Io, Owner,
+		   St#{echo => erlang:monotonic_time(millisecond) + 2000});
 	{uart, _, Data} -> remote(Io, Owner, bytes(Io, Owner, Data, St));
 	%% #can_frame{id, len, data, intf, ts}: bytes, not lines. Ours only,
 	%% on the interface we named.
@@ -422,7 +453,12 @@ line(Io, Owner, Line0, St = #{buf := none}) ->
     case strip(string:trim(Line0)) of
 	L = "dump " ++ _ -> St#{buf := [L]};
 	L = "ERR " ++ _  -> refused(Io, Owner, L, St);
-	_                -> St
+	L ->
+	    case erlang:monotonic_time(millisecond) < maps:get(echo, St, 0) of
+		true -> said(Owner, L);
+		false -> ok
+	    end,
+	    St
     end;
 line(Io, Owner, Line0, St = #{buf := Buf}) ->
     case strip(string:trim(Line0)) of
@@ -479,7 +515,7 @@ program(Owner, Ds, St = #{target := T}) ->
 					     [where(T), length(Decls),
 					      patched(Ds)])},
 	    case listing(Ds) of
-		{ok, Text} -> Owner ! {csp_program, Text};
+		{ok, Text} -> Owner ! {csp_program, Text, Ds};
 		Error ->
 		    Owner ! {csp_link, io_lib:format("node ~s: not listed: ~P",
 						     [where(T), Error, 8])}
@@ -534,6 +570,10 @@ said(Owner, Line) ->
 	""          -> ok;
 	"/commit"   -> ok;
 	"Committed" -> ok;
+	"/step 1"   -> ok;
+	"/pause"    -> ok;
+	"/dump state" -> ok;
+	"Paused (" ++ _ -> ok;
 	L           -> Owner ! {csp_out, L}
     end.
 
