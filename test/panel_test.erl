@@ -11,6 +11,7 @@
 -export([run/0]).
 -export([logger/1]).
 -export([answer/5]).                  % the code view's ui in a test
+-export([pane/2, show/3, say/4, clear/2, busy/3, event/2]).  % the chat's, here
 
 -define(SETTLE, 600).
 
@@ -714,10 +715,14 @@ code_view_check() ->
     expect("rules numbered as csp numbers them", Nos =:= lists:seq(1, 13), Nos),
     {ok, Add} = candyspeak:parse(tree("examples/adder3.csp")),
     Tabs = csp_code:tabs(Add),
+    %% Numbered as /list numbers them: the module's two where it is
+    %% written, then each object line's start values and State=NORMAL, then
+    %% main's own three.
     expect("a tab per object, after main, each with its module's rules",
 	   [maps:get(name, T) || T <- Tabs] =:= ["main", "a0", "a1", "a2"] andalso
-	   length(maps:get(rules, lists:nth(2, Tabs))) =:= 2 andalso
-	   length([R || R = #{} <- maps:get(rules, hd(Tabs))]) =:= 3, Tabs),
+	   [N || #{no := N} <- maps:get(rules, lists:nth(2, Tabs))] =:= [1, 2]
+	   andalso [N || #{no := N} <- maps:get(rules, hd(Tabs))]
+	   =:= lists:seq(3, 11), Tabs),
     %% A module's analog is a widget per object, named as csp dumps it.
     {ok, Cpx} = candyspeak:parse(tree("examples/cpx_m.csp")),
     Pix = [N || {pixel, N, _} <- candid:widgets(Cpx)],
@@ -803,10 +808,11 @@ code_view_check() ->
 	  end,
     Mx = csp_code:contact_of(Vm, 1, "k1_0"),
     Mg = csp_code:contact_of(Vm, 1, "k1_1"),
-    Mn = csp_code:contact_of(Vm, 0, "k1_0"),
+    %% main's rule is 4: the module's is 1, m0's line two (X=Go and its State)
+    Mn = csp_code:contact_of(Vm, 0, "k4_0"),
     Goal = csp_code:goal_text(#{{1, "k1_0"} => {true, Mx},
 				{1, "k1_1"} => {false, Mg},
-				{0, "k1_0"} => {false, Mn}}),
+				{0, "k4_0"} => {false, Mn}}),
     expect("marks add up to one condition, objects' names made whole",
 	   Goal =:= "!(N > 2) && m0.X && !Go", Goal),
     NotNot = csp_code:goal_text(#{{0, "k1_0"} => {false, Ev2("!Go")}}),
@@ -1530,9 +1536,57 @@ chat_checks() ->
 						   {2, 4, "Led = 0 ? !B", true}]};
 	       _ -> false
 	   end, Sw),
+    %% Lines added to what runs: checked with the program, sent as typed.
+    Ex = Here#{exe => csp_exe()},
+    Add = csp_chat:panel_tool(<<"add">>, #{<<"lines">> => <<"Led = 1 ? B && B\n">>}, Ex),
+    expect("chat: add checks the program with the lines and sends them",
+	   case Add of
+	       {append, Fa, ["Led = 1 ? B && B"], {ok, _}} ->
+		   lists:last(string:split(string:trim(
+					     element(2, candid_file:text(Fa))), "\n",
+					   all)) =:= "Led = 1 ? B && B";
+	       _ -> false
+	   end, Add),
+    expect("chat: lines that do not compile are not sent",
+	   element(1, csp_chat:panel_tool(<<"add">>,
+					  #{<<"lines">> => <<"Led = ? B\n">>},
+					  Ex)) =:= error, nomatch),
+    %% One dialog per panel: switching files puts one away and brings the
+    %% other back, said again.
+    application:set_env(candid, chat, []),        % on, for this one
+    Chat = csp_chat:start({?MODULE, self()}, #{root => tree(""), exe => csp_exe(),
+					       demo_dir => "demo"}),
+    application:set_env(candid, chat, off),
+    csp_chat:attach(Chat, #{file => "a.csp"}),
+    Chat ! {stub_send, "//hej"},
+    csp_chat:attach(Chat, #{file => "b.csp"}),
+    csp_chat:attach(Chat, #{file => "a.csp"}),
+    timer:sleep(200),
+    unlink(Chat), exit(Chat, kill),
+    Seen = stub_seen([]),
+    expect("chat: a dialog per panel, back again when its panel is",
+	   Seen =:= [{user, "//hej"}, cleared, {note, "the chat about b.csp"},
+		     cleared, {user, "//hej"}], Seen),
     expect("chat: a rule that is not there is not sent",
 	   element(1, csp_chat:panel_tool(<<"enable">>, #{<<"rules">> => [1, 9]},
 					  Here)) =:= error, nomatch).
+
+%% The chat's pane, as the test sees it: what is said, and when it is cleared.
+pane(Pid, _Title) -> Pid.
+show(_Pid, _P, _On) -> ok.
+say(Pid, _P, Who, Text) ->
+    Pid ! {stub, {Who, lists:flatten(io_lib:format("~ts", [Text]))}}, ok.
+clear(Pid, _P) -> Pid ! {stub, cleared}, ok.
+busy(_Pid, _P, _On) -> ok.
+event(_P, {stub_send, T}) -> {send, T};
+event(_P, _Msg) -> none.
+
+stub_seen(Acc) ->
+    receive
+	{stub, X} -> stub_seen([X | Acc]);
+	{chat_direct, _, _} -> stub_seen(Acc)
+    after 0 -> lists:reverse(Acc)
+    end.
 
 relay(LS) -> relay_torn(LS, false).
 
@@ -1851,6 +1905,12 @@ file_check() ->
 					       {patch, <<1, 2, 3>>}]) andalso
 	       not candid_file:same_image(D, Dumps),
 	   nomatch),
+    Lst = candid_file:from_node("n", "#digital B in 2  // F\n"
+				"Led = 1 ? B  // 1 F\nLed = 0 ? !B  // 2 E!\n", []),
+    expect("file: a rule the node has off, listed `!', is off here too",
+	   candid_file:rules(Lst) =:= {ok, [{1, 2, "Led = 1 ? B  // 1 F", false},
+					    {2, 3, "Led = 0 ? !B  // 2 E!", true}]},
+	   candid_file:rules(Lst)),
     Ieee = <<"JAM\n", 0, 0, 0, 1, 0:(46 * 8), 16#abcd:16, "rest">>,
     expect("file: a node's floats read as its image's flags say",
 	   {maps:get(float, maps:get(image, L)),
@@ -2064,8 +2124,8 @@ ladder_check() ->
 			    || {box, Id, _, X, Y, W, H, _, _, _}
 				   <- tuple_to_list(maps:get(pieces, L))]),
     Want = ["k1", "k1_0", "k1_1", "k1_2", "k2", "k2_0", "k3", "k3_0", "k3_1",
-	    "k3_2"],
-    expect("ladder: a box for every contact and coil",
+	    "k3_2", "x1", "x2", "x3"],
+    expect("ladder: a box for every contact and coil, and every rule's switch",
 	   lists:sort(maps:keys(Boxes)) =:= Want, maps:keys(Boxes)),
     Mid = fun(Id) -> {X, Y, W, H} = maps:get(Id, Boxes),
 		     {X + W div 2, Y + H div 2} end,
@@ -2093,6 +2153,17 @@ ladder_check() ->
 	   hd(Texts(L2)) =/= hd(Texts(L)) andalso
 	       lists:last(Texts(L2)) =:= lists:last(Texts(L)),
 	   {Texts(L), Texts(L2)}),
+    {Xx, Xy} = Mid("x2"),
+    expect("ladder: a click on a rule's box switches it",
+	   csp_ladder:hit(L, Xx, Xy) =:= "dis=2", csp_ladder:hit(L, Xx, Xy)),
+    {L3, _, _} = csp_ladder:set(L, ["r1", "rw dis", "x1", "xoff"]),
+    {L4, _, _} = csp_ladder:set(L, ["x1", "xon"]),
+    Box1 = fun(Ls) -> [R || R = {rect, _, _, W, H, _, _, _, _} <- csp_ladder:ops(Ls, Col),
+			    W =:= H, W < 16] end,
+    expect("ladder: a rule switched off is dimmed, its box empty, not dimmed",
+	   hd(Texts(L3)) =/= hd(Texts(L)) andalso
+	       length(Box1(L4)) =:= length(Box1(L3)) + 1,
+	   {Box1(L3), Box1(L4)}),
     C = csp_ladder:layout(Rules, code, M),
     Ys = lists:usort([Y || {box, Id, _, _, Y, _, _, _, _, _}
 			       <- tuple_to_list(maps:get(pieces, C)),

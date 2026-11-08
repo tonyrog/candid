@@ -78,13 +78,23 @@ row({R = #{no := N, line := Ln, guard := Gd, assigns := As}, _}, Mode, M,
 		  _ -> lists:join(", ", [csp_code:assign(A) || A <- As])
 	      end),
     {Rw, Rh, Rail, Rps} = rung(Mode, M, K, Label, Gd, R),
+    %% The box that switches the rule on and off, then its number as csp
+    %% numbers it -- what /list shows and #disable takes, not its line (Ln,
+    %% where the rule is written, which the fired rules are matched by).
+    _ = Ln,
+    Ch = maps:get(ch, M),
+    Cs = Ch - 4,
+    Cb = {box, "x" ++ integer_to_list(N), none, 0, Rail - Cs div 2, Cs, Cs,
+	  "", check, 0},
+    Cbw = Cs + 6,
     Lnw = round(4 * maps:get(cw, M)) + 10,
-    LnT = integer_to_list(Ln),
-    Lp = txt(none, none, Lnw - 10 - tw(M, LnT), Rail - maps:get(ch, M) div 2,
+    LnT = integer_to_list(N),
+    Lp = txt(none, none, Cbw + Lnw - 10 - tw(M, LnT), Rail - Ch div 2,
 	     LnT, {85, 85, 85}),
     RowId = "r" ++ integer_to_list(N),
-    Placed = [setelement(3, P, RowId) || P <- [Lp | shift(Rps, Lnw, 0)]],
-    {lists:reverse(shift(Placed, 0, Y)) ++ Ps, Y + Rh + ?GAP, max(W, Lnw + Rw)}.
+    Placed = [setelement(3, P, RowId) || P <- [Cb, Lp | shift(Rps, Cbw + Lnw, 0)]],
+    {lists:reverse(shift(Placed, 0, Y)) ++ Ps, Y + Rh + ?GAP,
+     max(W, Cbw + Lnw + Rw)}.
 
 %% {W, H, Rail, Pieces} of the rung right of its line number.
 rung(ladder, M, K, Label, undefined, _R) ->
@@ -224,12 +234,22 @@ ids(Ps) ->
 				     Id =/= none]
 		      || P <- tuple_to_list(Ps)])).
 
-%% What a click at X, Y means: a contact is marked by it.
+%% What a click at X, Y means: a contact is marked by it, a rule's box
+%% switches it off or on. The box gets a few pixels round it: it is small.
 hit(#{pieces := Ps}, X, Y) ->
-    case [Id || {box, Id, _, Bx, By, W, H, _, contact, _} <- tuple_to_list(Ps),
-		X >= Bx, X < Bx + W, Y >= By, Y < By + H] of
-	[Id | _] -> "ct=" ++ Id;
-	[]       -> none
+    In = fun(Bx, By, W, H, D) ->
+		 X >= Bx - D andalso X < Bx + W + D andalso
+		     Y >= By - D andalso Y < By + H + D
+	 end,
+    case [Id || {box, Id, _, Bx, By, W, H, _, check, _} <- tuple_to_list(Ps),
+		In(Bx, By, W, H, 3)] of
+	["x" ++ No | _] -> "dis=" ++ No;
+	[] ->
+	    case [Id || {box, Id, _, Bx, By, W, H, _, contact, _}
+			    <- tuple_to_list(Ps), In(Bx, By, W, H, 0)] of
+		[Id | _] -> "ct=" ++ Id;
+		[]       -> none
+	    end
     end.
 
 %% The whole picture, Colours being csp_code's (the css colours by name).
@@ -241,12 +261,14 @@ ops(L = #{cls := Cls}, P, Colours) ->
 	      none -> [];
 	      R    -> maps:get(R, Cls, [])
 	  end,
-    Off = lists:member("off", Row),
+    %% not in force, or switched off (#disable)
+    Off = lists:member("off", Row) orelse lists:member("dis", Row),
     Own = case element(2, P) of
 	      none -> [];
 	      Id   -> maps:get(Id, Cls, [])
 	  end,
-    [dim(Op, Off) || Op <- piece(P, Own, maps:get(mode, L), Colours)].
+    Dim = Off andalso not is_check(P),
+    [dim(Op, Dim) || Op <- piece(P, Own, maps:get(mode, L), Colours)].
 
 piece({wire, _, _, X1, Y1, X2, Y2, Lw}, _Cls, _Mode, _C) ->
     [{line, X1, Y1, X2, Y2, ?WIRE, Lw, false}];
@@ -283,6 +305,15 @@ piece({box, _, _, X, Y, W, H, T, contact, Px}, Cls, Mode, C) ->
     [{rect, X, Y, W, H, 3, Fill, Stroke, Dash},
      {text, X + Px + 1, Y + (H - ch_of(H, Mode)) div 2, T, Ink, false}]
 	++ Under ++ Mark;
+%% A rule's switch: filled while the rule is on. Drawn undimmed, so the box
+%% of a rule that is off still reads as a box to click.
+piece({box, _, _, X, Y, W, H, _, check, _}, Cls, _Mode, _C) ->
+    [{rect, X, Y, W, H, 2, none, {136, 136, 136}, false}] ++
+	case lists:member("xon", Cls) of
+	    true  -> [{rect, X + 3, Y + 3, W - 6, H - 6, 1, {170, 170, 170},
+		       none, false}];
+	    false -> []
+	end;
 piece({box, _, _, X, Y, W, H, T, coil, Px}, Cls, Mode, C) ->
     {Fill, Stroke, Ink} =
 	case {Mode, lists:member("on", Cls), lists:member("nx", Cls)} of
@@ -296,6 +327,9 @@ piece({box, _, _, X, Y, W, H, T, coil, Px}, Cls, Mode, C) ->
     R = case Mode of ladder -> H div 2; code -> 2 end,
     [{rect, X, Y, W, H, R, Fill, Stroke, false},
      {text, X + Px + 1, Y + (H - ch_of(H, Mode)) div 2, T, Ink, false}].
+
+is_check({box, _, _, _, _, _, _, _, check, _}) -> true;
+is_check(_) -> false.
 
 mark(X, Y, W, H, Col, Dash) ->
     {rect, X - ?MARK, Y - ?MARK, W + 2 * ?MARK, H + 2 * ?MARK, 4, none, Col, Dash}.

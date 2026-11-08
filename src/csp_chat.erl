@@ -8,6 +8,11 @@
 %%% The model works on SOURCE TEXT, numbered: that is what it reads best, and
 %%% `check' answers with the compiler's own file:line. No AST.
 %%%
+%%% One dialog per panel -- per file the panel shows: switching to another
+%%% file puts the dialog away and brings that file's back, what was said in it
+%%% shown again. A switch while the model is at work (its own `load' is one)
+%%% takes the dialog along: the conversation is about what comes next.
+%%%
 %%% What it may do. Read: the program, the values, the manual, the tree's
 %%% .csp files. Write: only new files of its own, in the chat directory, and
 %%% only a file it made this session may be written again. Drive: set, pause,
@@ -86,7 +91,30 @@ toggle(Chat) -> Chat ! toggle, ok.
 init(C, Panel, Info) ->
     Pane = cui(C, pane, ["chat  " ++ model_name()]),
     loop(#{ui => C, panel => Panel, pane => Pane, shown => false,
-	   info => Info, msgs => [], worker => none, made => []}).
+	   info => Info, msgs => [], worker => none, made => [],
+	   key => none, said => [], dialogs => #{}}).
+
+%% Said in the pane, and kept with the dialog it was said in.
+say(S = #{said := Said}, Who, Text) ->
+    pui(S, say, [Who, Text]),
+    S#{said := [{Who, Text} | Said]}.
+
+%% The panel shows File now: its dialog in the pane. The first file the panel
+%% shows, or a switch while the model works, keeps the dialog going.
+switch(S = #{key := File}, File) -> S;
+switch(S = #{key := none}, File) -> S#{key := File};
+switch(S = #{worker := W}, File) when W =/= none -> S#{key := File};
+switch(S = #{key := Old, msgs := Msgs, said := Said, dialogs := Ds}, File) ->
+    Ds1 = Ds#{Old => {Msgs, Said}},
+    {Msgs1, Said1} = maps:get(File, Ds1, {[], []}),
+    pui(S, clear, []),
+    S1 = S#{key := File, msgs := Msgs1, said := [],
+	    dialogs := maps:remove(File, Ds1)},
+    case Said1 of
+	[] -> say(S1, note, ["the chat about ", filename:basename(File)]);
+	_ -> lists:foldl(fun({Who, T}, Si) -> say(Si, Who, T) end, S1,
+			 lists:reverse(Said1))
+    end.
 
 %% The renderer's function F on its handle and the pane.
 cui({M, H}, F, A) -> apply(M, F, [H | A]).
@@ -96,26 +124,29 @@ pui(#{ui := C, pane := P}, F, A) -> cui(C, F, [P | A]).
 loop(S = #{ui := {M, _}, pane := Pane}) ->
     receive
 	{attach, Panel, Info} ->
-	    loop(S#{panel := Panel, info := maps:merge(maps:get(info, S), Info)});
+	    S1 = S#{panel := Panel, info := maps:merge(maps:get(info, S), Info)},
+	    loop(case Info of
+		     #{file := File} -> switch(S1, File);
+		     _ -> S1
+		 end);
 	toggle ->
 	    loop(show(S, not maps:get(shown, S)));
 	{chat_note, Text} ->
-	    pui(S, say, [note, Text]),
-	    loop(S);
+	    loop(say(S, note, Text));
 	{chat_out, Text} ->
-	    pui(S, say, [console, Text]),
-	    loop(S);
+	    loop(say(S, console, Text));
 	{chat_made, File} ->
 	    loop(S#{made := [File | maps:get(made, S)]});
 	{chat_done, Msgs, New} ->
-	    [pui(S, say, [assistant, C])
-	     || #{role := assistant, content := C} <- New, C =/= <<>>],
+	    S1 = lists:foldl(fun(C, Si) -> say(Si, assistant, C) end, S,
+			     [C || #{role := assistant, content := C} <- New,
+				   C =/= <<>>]),
 	    pui(S, busy, [false]),
-	    loop(S#{msgs := Msgs, worker := none});
+	    loop(S1#{msgs := Msgs, worker := none});
 	{chat_error, Why} ->
-	    pui(S, say, [error, io_lib:format("~p", [Why])]),
+	    S1 = say(S, error, io_lib:format("~p", [Why])),
 	    pui(S, busy, [false]),
-	    loop(S#{worker := none});
+	    loop(S1#{worker := none});
 	Msg ->
 	    case M:event(Pane, Msg) of
 		close -> loop(show(S, false));
@@ -128,15 +159,12 @@ send(S, "") -> S;
 %% `//' is to the program itself, not to the model: a line for csp's
 %% prompt or the node's console, what it says back shown here.
 send(S = #{panel := Panel}, "//" ++ Line) when Panel =/= undefined ->
-    pui(S, say, [user, "//" ++ Line]),
     Panel ! {chat_direct, self(), string:trim(Line)},
-    S;
+    say(S, user, "//" ++ Line);
 send(S = #{worker := none}, Text) ->
-    pui(S, say, [user, Text]),
-    ask(S, Text);
+    ask(say(S, user, Text), Text);
 send(S, _Text) ->
-    pui(S, say, [note, "busy -- wait for the answer"]),
-    S.
+    say(S, note, "busy -- wait for the answer").
 
 show(S, On) ->
     pui(S, show, [On]),
@@ -242,6 +270,16 @@ tools() ->
 	      #{name => str(<<"name, e.g. Btn or a.N">>),
 		value => #{type => <<"integer">>}},
 	      [<<"name">>, <<"value">>]),
+     tool_def(<<"add">>,
+	      <<"Add lines at the end of the running program, as if typed at "
+		"its prompt: new rules, or declarations they need. The program "
+		"with them is checked first; nothing is sent if it does not "
+		"compile. On a node they become lines of the patch on its "
+		"image (kept over a restart only after the user's /save). To "
+		"replace a rule that is wrong: disable it, then add the right "
+		"one.">>,
+	      #{lines => str(<<"the lines to add, one rule or declaration "
+			       "per line">>)}, [<<"lines">>]),
      tool_def(<<"disable">>,
 	      <<"Switch rules off in the running program, by the numbers the "
 		"program tool lists them under -- as `#disable 3 4' typed at "
@@ -620,6 +658,22 @@ panel_tool(Name, Args, I) ->
 drive(<<"set">>, #{<<"name">> := N, <<"value">> := V}, #{link := Link}) ->
     csp_link:set(Link, unicode:characters_to_list(N), V),
     {ok, "set"};
+drive(<<"add">>, #{<<"lines">> := L}, I = #{file := F}) when is_map(F) ->
+    Text = unicode:characters_to_list(L),
+    Lines = [string:trim(T, trailing) || T <- string:split(Text, "\n", all),
+				       string:trim(T) =/= ""],
+    {ok, F1, _} = candid_file:add(F, lists:flatten([[T, $\n] || T <- Lines])),
+    case candid_file:text(F1) of
+	{ok, Src} ->
+	    case Lines =/= [] andalso check(I, Src) of
+		false -> {error, "no lines given"};
+		ok -> {append, F1, Lines,
+		       {ok, ["sent:\n", lists:join("\n", Lines)]}};
+		{error, Why} -> {error, ["not sent, the program with them does "
+					 "not compile:\n", Why]}
+	    end;
+	_ -> {error, "the program does not parse"}
+    end;
 drive(Switch, #{<<"rules">> := Nos}, #{file := F})
   when Switch =:= <<"disable">>; Switch =:= <<"enable">> ->
     switch(Switch, Nos, F);

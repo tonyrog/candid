@@ -124,11 +124,44 @@ side(S) -> maps:with([chat, log, ws], S).
 
 %% How the shown program's floats read: as the image it was listed off says,
 %% for a node's; Q16.16 as the host csp runs it, for the rest.
-float_format(Ws) ->
+float_format(#{image := #{float := F}}) -> F;
+float_format(_) -> fixpoint.
+
+%% The rules the shown file has switched off, by csp's numbers.
+offs(F = #{lines := _}) ->
+    case candid_file:rules(F) of
+	{ok, Rs} -> [No || {No, _, _, true} <- Rs];
+	_ -> []
+    end;
+offs(_) -> [].
+
+%% Rules Nos switched off (Off) or on in the shown file, and in what runs:
+%% the line typed at csp's prompt would do it, so that line is sent -- on a
+%% node one more line of the patch on its image. The code view is told.
+switch_rules(Link, S = #{ws := Ws}, Off, Nos) ->
+    Fun = case Off of
+	      true  -> fun candid_file:disable/2;
+	      false -> fun candid_file:enable/2
+	  end,
     case candid_file:active(Ws) of
-	#{image := #{float := F}} -> F;
-	_ -> fixpoint
+	F = #{lines := _} ->
+	    F1 = lists:foldl(fun(No, Fi) ->
+				     case Fun(Fi, No) of
+					 {ok, Fj, _} -> Fj;
+					 _ -> Fi
+				     end
+			     end, F, Nos),
+	    csp_link:raw(Link, lists:flatten(
+				 [case Off of true -> "#disable"; false -> "#enable" end,
+				  [[" ", integer_to_list(N)] || N <- Nos]])),
+	    shown_switched(S, F1);
+	_ -> S
     end.
+
+%% F1, a file the rules were switched in, kept and shown.
+shown_switched(S = #{ws := Ws, code := Code}, F1) ->
+    S#{ws := candid_file:update(Ws, F1),
+       code := csp_code:disabled(Code, offs(F1))}.
 
 %% The workspace with File the active one: the tab that already holds it --
 %% a node's listing is opened as the node's when it comes (csp_program) --
@@ -1042,8 +1075,9 @@ build(U, Where, Root, File, Widgets0, Ast, Side = #{chat := Chat, log := Log}) -
 			      traces => [maps:get(N, Looks)
 					 || {_, N, _} <- Ordered]}]),
     {ok, Src} = candyspeak:parse(File, [sources]),
+    Shown = candid_file:active(maps:get(ws, Side)),
     Code = csp_code:new(code_ui(U), maps:get(code, P), {Src, File}, colours(),
-			float_format(maps:get(ws, Side))),
+			#{float => float_format(Shown), off => offs(Shown)}),
     {ok, Link} = csp_link:open(target(), csp_exe(), [File]),
     erlang:send_after(period(), self(), tick),
     TraceBox = maps:get(trace_box, P),
@@ -1558,14 +1592,21 @@ loop(U, Link, S) ->
 	{chat_tool, From, Ref, Name, Args} ->
 	    Info = #{last => maps:get(last, S), clock => maps:get(clock, S),
 		     mode => maps:get(mode, S, run), local => is_local(),
-		     link => Link, file => candid_file:active(maps:get(ws, S))},
+		     link => Link, file => candid_file:active(maps:get(ws, S)),
+		     exe => csp_exe()},
 	    case csp_chat:panel_tool(Name, Args, Info) of
+		{append, F1, Lines, Reply} ->
+		    %% typed at the prompt, a line at a time: on a node, more
+		    %% lines of the patch on its image
+		    [csp_link:raw(Link, L) || L <- Lines],
+		    From ! {Ref, Reply},
+		    loop(U, Link, shown_switched(S, F1));
 		{switch, F1, Line, Reply} ->
 		    %% as the line typed at the prompt: on a node, one more
 		    %% line of the patch running on its image
 		    csp_link:raw(Link, Line),
 		    From ! {Ref, Reply},
-		    loop(U, Link, S#{ws := candid_file:update(maps:get(ws, S), F1)});
+		    loop(U, Link, shown_switched(S, F1));
 		{load, File, Reply} ->
 		    From ! {Ref, Reply},
 		    csp_link:close(Link),
@@ -1759,7 +1800,8 @@ act(_U, Link, S, reset)                 -> csp_link:reset(Link), S;
 act(_U, Link, S, {clock, Ms})           -> csp_link:clock(Link, Ms), S;
 act(_U, _Link, S, {frame, Id, Bytes})   -> send_frame(Id, Bytes), S;
 act(_U, Link, S, {set, N, V})           -> csp_link:set(Link, N, V), S;
-act(_U, Link, S, step)                  -> csp_link:step(Link), S.
+act(_U, Link, S, step)                  -> csp_link:step(Link), S;
+act(_U, Link, S, {switch, Off, N})      -> switch_rules(Link, S, Off, [N]).
 
 %% A replayed frame, on the bus csp listens to (--can=vcan0 in csp_link),
 %% through the can application `make run' starts. Synchronous, so it is in

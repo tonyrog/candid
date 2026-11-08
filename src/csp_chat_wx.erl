@@ -6,7 +6,7 @@
 
 -include_lib("wx/include/wx.hrl").
 
--export([pane/2, show/3, say/4, busy/3, event/2]).
+-export([pane/2, show/3, say/4, clear/2, busy/3, event/2]).
 
 %% Hidden until show/3. Enter sends, shift+Enter is a new line.
 pane(H = #{env := Env}, Title) ->
@@ -66,6 +66,10 @@ colour(true, assistant)  -> {20, 20, 20};
 colour(true, note)       -> {90, 90, 90};
 colour(true, error)      -> {190, 30, 30};
 colour(true, console)    -> {20, 100, 30}.
+
+%% Another panel's dialog comes: what was said goes.
+clear(_H, #{log := Log}) ->
+    wxTextCtrl:clear(Log).
 
 busy(_H, #{busy := B}, On) ->
     candid_wx:label(B, case On of true -> "..."; false -> "  " end).

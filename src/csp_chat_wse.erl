@@ -3,7 +3,7 @@
 
 -module(csp_chat_wse).
 
--export([pane/2, show/3, say/4, busy/3, event/2]).
+-export([pane/2, show/3, say/4, clear/2, busy/3, event/2]).
 
 %% Hidden until show/3. Its events go to the process that makes it.
 pane(Ws, Title) ->
@@ -54,6 +54,10 @@ say(Ws, #{log := Log, scroll := Scroll}, Who, Text) ->
     wse:appendChild(Ws, D, wse:createTextNode(
 			     Ws, Prefix ++ unicode:characters_to_list(Text))),
     wse:cast(Ws, Scroll, "call", [null, Log]).
+
+%% Another panel's dialog comes: what was said goes.
+clear(Ws, #{log := Log}) ->
+    wse:set(Ws, Log, "textContent", "").
 
 busy(Ws, #{busy := B}, On) ->
     wse:set(Ws, B, "textContent", candid_wse:u(case On of true -> "..."; false -> "" end)).

@@ -58,7 +58,7 @@
 
 -module(csp_code).
 
--export([new/4, new/5, refresh/2, fired/2, infer/5, tick/1, control/2, model/2, actions/1]).
+-export([new/4, new/5, disabled/2, refresh/2, fired/2, infer/5, tick/1, control/2, model/2, actions/1]).
 -export([look/1]).
 -export([assign/1, bind/1, chain/2, cols/1, tr_id/2, col_name/1,
 	 signed/3]).                                     % for the renderers
@@ -93,19 +93,37 @@ colours(Cfg) -> maps:merge(?COLOURS, maps:with(maps:keys(?COLOURS), Cfg)).
 %% file starts and ends, and Top is the file the walk starts in.
 rules(Ast) -> rules(Ast, "").
 
-rules(Ast, Top) ->
-    number(walk(Ast, #{cs => consts(Ast), gs => [],
+rules(Ast, Top) -> [I || {_, I} <- tagged(Ast, Top)].
+
+%% The whole program walked in csp's order and numbered as csp numbers it --
+%% what /list shows and #disable takes: a module's body where the module is
+%% written, an object line's own rules where the object is. Each item comes
+%% with the module it is in, `none' outside one.
+tagged(Ast, Top) ->
+    number(walk(Ast, #{cs => consts(Ast), gs => [], mod => none, depth => 0,
+		       ins => local_ins(Ast),
 		       file => filename:basename(Top)}), 1).
+
+%% Each module's `#local ... in' names: bound on an object line, they are
+%% formulas and not rules.
+local_ins(Ast) ->
+    {_, Mods} = split(Ast),
+    maps:map(fun(_, Body) ->
+		     [N || {local, _, {'WORD', _, N}, _, Opts, _} <- Body,
+			   proplists:get_value(dir, Opts) =:= in]
+	     end, Mods).
 
 %% One tab per object, after `main'. #{name, rules, env, prefix, vars, binds}.
 tabs(Ast) -> tabs(Ast, "").
 
 tabs(Ast, Top) ->
     {Main, Mods} = split(Ast),
+    All = tagged(Ast, Top),
     GEnv = candyspeak_eval:env(Main),
-    [#{name => "main", rules => rules(Main, Top), env => GEnv, prefix => none,
-       vars => vars(Main), binds => none}] ++
-	[#{name => O, rules => rules(Body, Top), prefix => O, vars => vars(Body),
+    [#{name => "main", rules => [I || {none, I} <- All], env => GEnv,
+       prefix => none, vars => vars(Main), binds => none}] ++
+	[#{name => O, rules => [I || {Mi, I} <- All, Mi =:= M], prefix => O,
+	   vars => vars(Body),
 	   env => merge_env(GEnv, candyspeak_eval:env(Body)),
 	   own => own(candyspeak_eval:env(Body)), binds => {M, Bs}}
 	 || {object, _, {'WORD', _, M}, {'WORD', _, O}, Bs} <- Main,
@@ -154,29 +172,69 @@ vars(Ast) ->
 
 walk([{source, _, F} | T], C) ->
     walk(T, C#{file := filename:basename(F)});
-walk([{in, _, Names} | T], C = #{gs := Gs}) ->
+walk([{module, _, {'WORD', _, M}} | T], C) ->
+    walk(T, C#{mod := M, depth := 0});
+walk([{module, _, {'WORD', _, M}, _} | T], C) ->
+    walk(T, C#{mod := M, depth := 0});
+walk([{in, _, Names} | T], C = #{gs := Gs, mod := M, depth := D}) ->
     G = {in, [N || {'WORD', _, N} <- Names]},
-    [{gate, in, element(2, G)} | walk(T, C#{gs := [G | Gs]})];
-walk([{'when', _, X} | T], C = #{gs := Gs}) ->
-    [{gate, 'when', X} | walk(T, C#{gs := [{'when', X} | Gs]})];
-walk([{'end', _} | T], C = #{gs := Gs}) ->
-    [{gate, 'end', none} | walk(T, C#{gs := tl_or_nil(Gs)})];
-walk([{rule, _, _, _} = R | T], C = #{gs := Gs, file := F}) ->
-    [M#{file => F,
-	gates => case Gs of
-		     [] -> [{in, ["INIT", "NORMAL"]}];
-		     _  -> Gs
-		 end} || M <- rule(R)] ++ walk(T, C);
-walk([{timer, Ln, {'WORD', _, N}, P, _} | T], C = #{cs := Cs, file := F}) ->
+    [{M, {gate, in, element(2, G)}} | walk(T, C#{gs := [G | Gs], depth := D + 1})];
+walk([{'when', _, X} | T], C = #{gs := Gs, mod := M, depth := D}) ->
+    [{M, {gate, 'when', X}} | walk(T, C#{gs := [{'when', X} | Gs],
+					   depth := D + 1})];
+%% the #end of a module, not of a block in it
+walk([{'end', _} | T], C = #{mod := M, depth := 0}) when M =/= none ->
+    walk(T, C#{mod := none});
+walk([{'end', _} | T], C = #{gs := Gs, mod := M, depth := D}) ->
+    [{M, {gate, 'end', none}} | walk(T, C#{gs := tl_or_nil(Gs),
+					    depth := max(0, D - 1)})];
+walk([{rule, _, _, _} = R | T], C = #{gs := Gs, file := F, mod := Mo}) ->
+    [{Mo, M#{file => F,
+	     gates => case Gs of
+			  [] -> [{in, ["INIT", "NORMAL"]}];
+			  _  -> Gs
+		      end}} || M <- rule(R)] ++ walk(T, C);
+walk([{timer, Ln, {'WORD', _, N}, P, _} | T],
+     C = #{cs := Cs, file := F, mod := Mo}) ->
     case period_rule(P, Cs) of
 	true ->
 	    Tgt = {field, Ln, {part, Ln, {'WORD', Ln, N}, {'WORD', Ln, "period"}}},
-	    [#{line => Ln, file => F, guard => undefined, gates => [],
-	       assigns => [{'=', Ln, Tgt, P}]} | walk(T, C)];
+	    [{Mo, #{line => Ln, file => F, guard => undefined, gates => [],
+		    assigns => [{'=', Ln, Tgt, P}]}} | walk(T, C)];
 	false -> walk(T, C)
     end;
+walk([{object, Ln, {'WORD', _, M}, {'WORD', _, O}, Bs} | T],
+     C = #{file := F, mod := Mo, ins := Ins}) ->
+    [{Mo, R} || R <- object(Ln, F, O, maps:get(M, Ins, []), Bs)] ++ walk(T, C);
 walk([_ | T], C) -> walk(T, C);
 walk([], _C) -> [].
+
+%% An object line's rules, as csp_parse_object emits them: a `<-' to a member
+%% that is not a `#local ... in' is a rule of its own; the values it starts
+%% with are one rule and `State = NORMAL' another, both run in its INIT. A
+%% binding of a `#local ... in' is a formula: no rule, no number.
+object(Ln, F, O, Ins, Bs) ->
+    In = fun({field, _, {'WORD', _, N}}) -> lists:member(N, Ins);
+	    (_) -> false
+	 end,
+    R = fun(As) -> #{line => Ln, file => F, guard => undefined, gates => [],
+		     assigns => As}
+	end,
+    Statics = [{'=', L, member(O, Tg), X} || {'=', L, Tg, X} <- Bs, not In(Tg)],
+    [R([{'<-', L, member(O, Tg), X}]) || {'<-', L, Tg, X} <- Bs, not In(Tg)] ++
+	case Statics of
+	    [] -> [];
+	    _ -> [R(Statics),
+		  R([{'=', Ln, {field, Ln, {'WORD', Ln, O ++ ".State"}},
+		      {'WORD', Ln, "NORMAL"}}])]
+	end.
+
+%% `N' on O's line is O's own: `O.N'.
+member(O, {field, L, {'WORD', L2, N}}) ->
+    {field, L, {'WORD', L2, O ++ "." ++ N}};
+member(O, {field, L, {part, L2, {'WORD', L3, N}, P}}) ->
+    {field, L, {part, L2, {'WORD', L3, O ++ "." ++ N}, P}};
+member(_O, X) -> X.
 
 tl_or_nil([_ | T]) -> T;
 tl_or_nil([])      -> [].
@@ -209,9 +267,9 @@ consts(Ast) ->
     [N || {constant, _, {'WORD', _, N}, _, _, _, _} <- Ast] ++
 	[N || {define, _, {'WORD', _, N}, _} <- Ast].
 
-number([R = #{} | T], N) -> [R#{no => N} | number(T, N + 1)];
-number([G | T], N)       -> [G | number(T, N)];
-number([], _N)           -> [].
+number([{M, R = #{}} | T], N) -> [{M, R#{no => N}} | number(T, N + 1)];
+number([G | T], N)            -> [G | number(T, N)];
+number([], _N)                -> [].
 
 %%% ----------------------------------------------------------------- view
 
@@ -223,11 +281,13 @@ number([], _N)           -> [].
 %% frame's row of boxes (the goal and solve go there), top => the top frame
 %% below it (the answer and the program's values)} -- the renderer's own,
 %% handed on.
-new(C, Where, Src, Cfg) -> new(C, Where, Src, Cfg, fixpoint).
+new(C, Where, Src, Cfg) -> new(C, Where, Src, Cfg, #{}).
 
-%% Float: how the program's floats read where it runs -- fixpoint (Q16.16,
-%% the host csp and most boards) or ieee (an ESP32 node's image says so).
-new(C, Where, {Ast, File}, Cfg, Float) ->
+%% Opts: float -- how the program's floats read where it runs, fixpoint
+%% (Q16.16, the host csp and most boards, the default) or ieee (an ESP32
+%% node's image says so); off -- the rules switched off (#disable), by number.
+new(C, Where, {Ast, File}, Cfg, Opts) ->
+    Float = maps:get(float, Opts, fixpoint),
     Tabs = tabs(Ast, File),
     Cols = colours(Cfg),
     H = cui(C, new, [Where, Tabs, #{colours => Cols, ks => ?KS, k => ?K}]),
@@ -237,6 +297,7 @@ new(C, Where, {Ast, File}, Cfg, Float) ->
 	  tabs => Tabs, tab => 0, file => File,
 	  prog => candyspeak_eval:prog(Ast, File, [{float, Float}]),
 	  mode => hide, shown => #{}, fired => [], glow => #{}, last => #{},
+	  off => maps:get(off, Opts, []),
 	  marks => #{}, sigs_seen => [], k => ?K,
 	  states => state_names(hd(Tabs)), trace => none, at => none,
 	  bad => #{}, acts => [], look => none, tshow => false},
@@ -264,6 +325,16 @@ control(V = #{mode := Mode}, "tab=" ++ I) ->
 	hide -> V1;
 	_    -> render(V1)
     end;
+%% A rule's box: switched off or on again. The panel sends the #disable or
+%% #enable and says what is off then (disabled/2); the box changes now.
+control(V = #{off := Off, acts := As}, "dis=" ++ No) ->
+    N = list_to_integer(No),
+    Dis = not lists:member(N, Off),
+    Off1 = case Dis of
+	       true  -> lists:usort([N | Off]);
+	       false -> Off -- [N]
+	   end,
+    paint(V#{off := Off1, acts := As ++ [{switch, Dis, N}]});
 %% A click on a contact: holds, does not hold, forgotten. Marks survive a
 %% change of tab.
 control(V = #{marks := Ms, tab := I}, "ct=" ++ Id) ->
@@ -751,6 +822,10 @@ render(V = #{mode := Mode, tab := I, tabs := Tabs, metrics := Ms}) ->
 
 %%% ----------------------------------------------------------------- updates
 
+%% The rules switched off, by number, as the panel's file has them.
+disabled(undefined, _Off) -> undefined;
+disabled(V, Off) -> paint(V#{off := lists:usort(Off)}).
+
 refresh(undefined, _Last) -> undefined;
 refresh(V, Last)           -> paint(V#{last := Last}).
 
@@ -797,7 +872,7 @@ paint(V = #{last := Last}) ->
 
 paint1(V = #{tabs := Tabs, tab := I, last := Live, fired := Now0,
 		 glow := Glow, shown := Shown, marks := Marks,
-		 mode := Mode, look := Look}) ->
+		 mode := Mode, look := Look, off := Off}) ->
     Ms = erlang:monotonic_time(millisecond),
     {Last0, Fired0} =
 	case Look of
@@ -820,7 +895,7 @@ paint1(V = #{tabs := Tabs, tab := I, last := Live, fired := Now0,
 		   hide -> {[], 0};
 		   _ -> lists:mapfoldl(
 			  fun(R, G) ->
-				  classes(R, G, {Env, Last, Mine}, Fired, State)
+				  classes(R, G, {Env, Last, Mine, Off}, Fired, State)
 			  end, 0, Rules)
 	       end,
     #{env := MEnv, vars := MVars} = hd(Tabs),
@@ -884,11 +959,11 @@ show(V)       -> integer_to_list(V).
 
 classes({gate, 'end', _}, G, _Ctx, _Fired, _State) ->
     {[], G};
-classes({gate, Kind, Arg}, G, {Env, Last, _}, _Fired, State) ->
+classes({gate, Kind, Arg}, G, {Env, Last, _, _}, _Fired, State) ->
     On = gate_on({Kind, Arg}, Env, Last, State),
     {[{"g" ++ integer_to_list(G), hd_class(On)}], G + 1};
 classes(R = #{no := N, guard := Gd, gates := Gs, line := Ln, file := F},
-	G, {Env, Last, Marks}, Fired, State) ->
+	G, {Env, Last, Marks, Off}, Fired, State) ->
     K = "k" ++ integer_to_list(N),
     Active = lists:all(fun(Gt) -> gate_on(Gt, Env, Last, State) end, Gs),
     Holds = Active andalso
@@ -904,10 +979,11 @@ classes(R = #{no := N, guard := Gd, gates := Gs, line := Ln, file := F},
 	     undefined -> [];
 	     _ -> leaves(Gd, K, Env, Last, Marks)
 	 end,
-    {[{K, Coil}, {"r" ++ integer_to_list(N), case Active of
-						   true  -> "rw";
-						   false -> "rw off"
-					       end} | Cs], G}.
+    Dis = lists:member(N, Off),
+    Row = string:join(["rw"] ++ ["off" || not Active] ++ ["dis" || Dis], " "),
+    Box = case Dis of true -> "xoff"; false -> "xon" end,
+    {[{K, Coil}, {"r" ++ integer_to_list(N), Row},
+      {"x" ++ integer_to_list(N), Box} | Cs], G}.
 
 gate_on({in, Names}, Env, Last, State) ->
     lists:any(fun(N) ->
