@@ -1,0 +1,5 @@
+// Start an empty csp server 
+#buffer Net:160 inout tcp 15555
+#buffer Rp:160 inout repl
+#route Net Rp
+#route Rp Net

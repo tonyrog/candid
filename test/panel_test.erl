@@ -1395,7 +1395,49 @@ node_checks() ->
 	   C2 =:= C1 + 3 andalso
 	   maps:get("b.N", P2) =:= (maps:get("b.N", P1) + 6) band 255,
 	   {C1, C2, P1, P2}),
+    %% What fired on a node is worked out: one step from P2, by the program
+    %% listed off it, gives P3 where it can be known -- K too, the dump says
+    %% whether T fired, and the objects' a.N and b.N.
+    csp_link:step(L, 1),
+    {C3, P3} = node_cycle(),
+    {ok, La} = candyspeak:parse_text(Listed, "/tmp/candid_node_listing.csp", [sources]),
+    Pg = candyspeak_eval:prog(La, "/tmp/candid_node_listing.csp"),
+    #{values := Vs, fired := Fd} =
+	candyspeak_eval:cycle(Pg, P2, candyspeak_eval:sampled(Pg, P3)),
+    Same = ["Neg", "Big", "K", "Arr[1]", "Arr[2]", "a.N", "b.N"],
+    Lines = lists:zip(lists:seq(1, length(string:split(Listed, "\n", all))),
+		      string:split(Listed, "\n", all)),
+    [Nr] = [I || {I, Ln} <- Lines, string:find(Ln, "Step") =/= nomatch,
+		 string:find(Ln, "N=N") =/= nomatch],
+    expect("node: a step is worked out from the dump before it",
+	   C3 =:= C2 + 1 andalso
+	   lists:member({"b", "/tmp/candid_node_listing.csp", Nr}, Fd) andalso
+	   [maps:get(N, Vs) || N <- Same] =:= [maps:get(N, P3) || N <- Same],
+	   {C3, Fd, Vs, P3}),
+    %% and the timer's rules with it: stepped until T has fired, K's rule and
+    %% the restart are among those worked out -- T restarted in the cycle it
+    %% fired still dumps as fired.
+    {P4, P5} = until_fired(L, P3, 40),
+    #{fired := Fd5, values := V5} =
+	candyspeak_eval:cycle(Pg, P4, candyspeak_eval:sampled(Pg, P5)),
+    Tr = [{"", "/tmp/candid_node_listing.csp", I}
+	  || {I, Ln} <- lists:zip(lists:seq(1, length(string:split(Listed, "\n", all))),
+				  string:split(Listed, "\n", all)),
+	     string:find(Ln, "timeout(T)") =/= nomatch],
+    expect("node: a step where the timer fired lights its rules",
+	   maps:get("T.fired", P5, 0) =:= 1 andalso length(Tr) =:= 2 andalso
+	   Tr -- Fd5 =:= [] andalso
+	   maps:get("K", V5) =:= maps:get("K", P5), {Fd5, Tr, P4, P5}),
     csp_link:close(L),
+    %% A line of the image torn on the way is asked for again, and the
+    %% program still comes.
+    spawn(fun() -> relay_torn(LS, true) end),
+    {ok, Lt} = csp_link:open(T, csp_exe(), []), track(Lt),
+    Again = receive {csp_program, Tx, _} -> Tx after 5000 -> "" end,
+    csp_link:close(Lt),
+    drain_link(),
+    expect("node: a torn line of the image is read again",
+	   Again =:= Listed, Again),
     %% From an empty tab -- nothing runs, so nothing to retarget -- a node
     %% typed in the target field is connected to and gets its tab.
     spawn(fun() -> relay(LS) end),
@@ -1463,13 +1505,45 @@ chat_checks() ->
     expect("chat: stepping a running program asks to pause first",
 	   element(1, csp_chat:panel_tool(<<"step">>, #{},
 					  Node#{local := true})) =:= error,
-	   nomatch).
+	   nomatch),
+    %% The rules by csp's numbers, which are not line numbers: a #timer whose
+    %% period is a #param sets it in a rule (csp lists it in an #in INIT
+    %% block), rule 1, so the program's first rule of its own is 2.
+    Tmp = filename:join(os:getenv("TMPDIR", "/tmp"), "candid_rules.csp"),
+    ok = file:write_file(Tmp, "#param Per = 50\n#timer T Per = 1\n"
+			 "#analog P[4]:16 out 9:0..3\n#variable I = 0\n"
+			 "P[I % 4] = 0 ? timeout(T)\n"
+			 "P[(I + 1) % 4] = 7 ? timeout(T)\n"
+			 "T = 1, I = I + 1 ? timeout(T)\n"),
+    Rl = lists:flatten(io_lib:format("~ts", [csp_chat:rule_list(Tmp)])),
+    expect("chat: the program's rules come with the numbers #disable takes",
+	   string:find(Rl, "rule 2  line 5  P[I % 4] = 0 ? timeout(T)") =/= nomatch
+	   andalso string:find(Rl, "rule 4  line 7") =/= nomatch, Rl),
+    Prog = "#digital B in 2\n#digital Led out 13\nLed = 1 ? B\nLed = 0 ? !B\n",
+    F = candid_file:from_node("node", Prog, []),
+    Here = Node#{local := true, file => F},
+    Sw = csp_chat:panel_tool(<<"disable">>, #{<<"rules">> => [2]}, Here),
+    expect("chat: disable sends #disable as typed and marks the rule off",
+	   case Sw of
+	       {switch, F1, "#disable 2", {ok, _}} ->
+		   candid_file:rules(F1) =:= {ok, [{1, 3, "Led = 1 ? B", false},
+						   {2, 4, "Led = 0 ? !B", true}]};
+	       _ -> false
+	   end, Sw),
+    expect("chat: a rule that is not there is not sent",
+	   element(1, csp_chat:panel_tool(<<"enable">>, #{<<"rules">> => [1, 9]},
+					  Here)) =:= error, nomatch).
 
-relay(LS) ->
+relay(LS) -> relay_torn(LS, false).
+
+%% Torn: the first line at offset 32 the node sends goes out with a byte
+%% changed, as a noisy line would.
+relay_torn(LS, Torn) ->
+    put(torn, Torn),
     {ok, S} = gen_tcp:accept(LS),
     inet:setopts(S, [{active, true}]),
     P = open_port({spawn_executable, csp_exe()},
-		  [{args, ["-i", "--no-eeprom", "-e", "/tmp/candid_none.db",
+		  [{args, ["-i", "--no-eeprom", "--exit-on-eof", "-e", "/tmp/candid_none.db",
 			   tree("tests/dump/node.csp")]},
 		   use_stdio, stderr_to_stdout, {line, 4096}, exit_status]),
     relay(S, P).
@@ -1477,7 +1551,14 @@ relay(LS) ->
 relay(S, P) ->
     receive
 	{tcp, S, Line} -> port_command(P, Line), relay(S, P);
-	{P, {data, {_, Line}}} -> gen_tcp:send(S, [Line, "\n"]), relay(S, P);
+	{P, {data, {_, Line}}} ->
+	    L = case {get(torn), Line} of
+		    {true, "32 " ++ [C | Rest]} ->
+			put(torn, false),
+			"32 " ++ [case C of $0 -> $1; _ -> $0 end | Rest];
+		    _ -> Line
+		end,
+	    gen_tcp:send(S, [L, "\n"]), relay(S, P);
 	{tcp_closed, S} -> port_command(P, "/quit\n");
 	{P, {exit_status, _}} -> gen_tcp:close(S)
     end.
@@ -1495,7 +1576,7 @@ uart_checks() ->
 uart_checks1() ->
     flush(),
     Node = open_port({spawn_executable, csp_exe()},
-		     [{args, ["-i", "--no-eeprom", "-e", "/tmp/candid_none.db",
+		     [{args, ["-i", "--no-eeprom", "--exit-on-eof", "-e", "/tmp/candid_none.db",
 			      "--uart=pty", tree("tests/dump/node.csp"),
 			      tree("examples/uart_serv.csp")]},
 		      use_stdio, stderr_to_stdout, {line, 256}, exit_status]),
@@ -1539,6 +1620,27 @@ node_state() ->
     end.
 
 %% The last state, once they stop coming: a step is asked about until done.
+%% What a closed link said and nobody read: left, a later link_said/1 would
+%% take it for its own.
+drain_link() ->
+    receive
+	{csp_link, _} -> drain_link();
+	{csp_program, _, _} -> drain_link();
+	{csp_out, _} -> drain_link()
+    after 300 -> flush()
+    end.
+
+%% Step one cycle at a time until a dump says T fired: {before, that one}.
+until_fired(_L, P, 0) -> {P, P};
+until_fired(L, P, N) ->
+    timer:sleep(20),
+    csp_link:step(L, 1),
+    {_, Q} = node_cycle(),
+    case maps:get("T.fired", Q, 0) of
+	1 -> {P, Q};
+	_ -> until_fired(L, Q, N - 1)
+    end.
+
 node_cycle() ->
     receive
 	{csp_state, C, Vals} -> node_cycle({C, maps:from_list(Vals)})
@@ -1749,6 +1851,13 @@ file_check() ->
 					       {patch, <<1, 2, 3>>}]) andalso
 	       not candid_file:same_image(D, Dumps),
 	   nomatch),
+    Ieee = <<"JAM\n", 0, 0, 0, 1, 0:(46 * 8), 16#abcd:16, "rest">>,
+    expect("file: a node's floats read as its image's flags say",
+	   {maps:get(float, maps:get(image, L)),
+	    maps:get(float, maps:get(image, candid_file:from_node(
+					     "esp", Prog, [{rom, Ieee}])))}
+	   =:= {fixpoint, ieee},
+	   maps:get(image, L)),
     Tmp = filename:join(os:getenv("TMPDIR", "/tmp"), "candid_file_test.csp"),
     {ok, S} = candid_file:save(L3, Tmp),
     {ok, Back} = candid_file:load({disk, Tmp}),

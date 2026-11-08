@@ -454,9 +454,12 @@ line(Io, Owner, Line0, St = #{buf := none}) ->
 	L = "dump " ++ _ -> St#{buf := [L]};
 	L = "ERR " ++ _  -> refused(Io, Owner, L, St);
 	L ->
-	    case erlang:monotonic_time(millisecond) < maps:get(echo, St, 0) of
-		true -> said(Owner, L);
-		false -> ok
+	    %% monotonic time is often below 0: no `echo' is not a 0
+	    case maps:get(echo, St, none) of
+		Until when is_integer(Until) ->
+		    erlang:monotonic_time(millisecond) < Until
+			andalso said(Owner, L);
+		none -> ok
 	    end,
 	    St
     end;
@@ -469,6 +472,22 @@ line(Io, Owner, Line0, St = #{buf := Buf}) ->
 	L -> St#{buf := [L | Buf]}
     end.
 
+%% A line that came wrong, or never came: asked for again by its offset, one
+%% window at a time, until the whole is there. A few tries, then said.
+reply(Io, Owner, [{part, K, P}], St = #{want := W})
+  when K =:= W; W =:= patch, K =:= eeprom ->
+    Tries = maps:get(tries, St, 0),
+    case csp_node:merge(maps:get(piece, St, P#{have := []}), {part, K, P}) of
+	{K, Bin} ->
+	    reply(Io, Owner, [{K, Bin}], maps:without([piece, tries], St));
+	{part, K, P1 = #{want := [{O, L} | _]}} when Tries < 5 ->
+	    send(Io, [dump_cmd(K, St), " ", integer_to_list(O), " ",
+		      integer_to_list(L), "\n"]),
+	    St#{piece => P1, tries => Tries + 1};
+	_ ->
+	    Owner ! {csp_link, io_lib:format("~s did not come whole", [K])},
+	    maps:without([piece, tries], St)
+    end;
 reply(Io, Owner, [{rom, Bin}], St = #{want := rom, opts := #{patch := P}}) ->
     case P of
 	none   -> program(Owner, [{rom, Bin}], St#{rom := Bin});
@@ -496,6 +515,11 @@ reply(_Io, Owner, [D = {state, Cycle, Ms, _, _}], St = #{decls := Ds})
     St#{asked := none, cycle := Cycle};
 reply(_Io, _Owner, _, St) ->
     St.
+
+%% What reads K again, a window of it after.
+dump_cmd(rom, #{opts := #{image := none}}) -> "/dump rom";
+dump_cmd(rom, #{opts := #{image := I}}) -> ["/dump rom ", I];
+dump_cmd(K, _St) -> ["/dump ", atom_to_list(K)].
 
 %% Nothing stored is an image with no patch; anything else refused while
 %% reading the program leaves nothing to read the state by.

@@ -58,7 +58,7 @@
 
 -module(csp_code).
 
--export([new/4, refresh/2, fired/2, tick/1, control/2, model/2, actions/1]).
+-export([new/4, new/5, refresh/2, fired/2, infer/5, tick/1, control/2, model/2, actions/1]).
 -export([look/1]).
 -export([assign/1, bind/1, chain/2, cols/1, tr_id/2, col_name/1,
 	 signed/3]).                                     % for the renderers
@@ -142,7 +142,8 @@ own(#{sigs := S, locals := L}) -> maps:keys(S) ++ maps:keys(L).
 
 merge_env(G, M) ->
     maps:map(fun(states, V) -> maps:get(states, G) ++ V;
-		(K, V)      -> maps:merge(maps:get(K, G), V)
+		(K, V) when is_map(V) -> maps:merge(maps:get(K, G), V);
+		(_K, V) -> V                       % float: the program's own
 	     end, M).
 
 %% The values a tab lists: variables, and #locals marked as worked out.
@@ -222,7 +223,11 @@ number([], _N)           -> [].
 %% frame's row of boxes (the goal and solve go there), top => the top frame
 %% below it (the answer and the program's values)} -- the renderer's own,
 %% handed on.
-new(C, Where, {Ast, File}, Cfg) ->
+new(C, Where, Src, Cfg) -> new(C, Where, Src, Cfg, fixpoint).
+
+%% Float: how the program's floats read where it runs -- fixpoint (Q16.16,
+%% the host csp and most boards) or ieee (an ESP32 node's image says so).
+new(C, Where, {Ast, File}, Cfg, Float) ->
     Tabs = tabs(Ast, File),
     Cols = colours(Cfg),
     H = cui(C, new, [Where, Tabs, #{colours => Cols, ks => ?KS, k => ?K}]),
@@ -230,6 +235,7 @@ new(C, Where, {Ast, File}, Cfg) ->
 	  colours => Cols, metrics => cui(C, metrics, [H]), ladder => none,
 	  redraw => false,
 	  tabs => Tabs, tab => 0, file => File,
+	  prog => candyspeak_eval:prog(Ast, File, [{float, Float}]),
 	  mode => hide, shown => #{}, fired => [], glow => #{}, last => #{},
 	  marks => #{}, sigs_seen => [], k => ?K,
 	  states => state_names(hd(Tabs)), trace => none, at => none,
@@ -754,6 +760,16 @@ fired(V = #{glow := G}, Rules) ->
     G1 = maps:filter(fun(_, T) -> Now - T < ?GLOW end, G),
     paint(V#{fired := Rules,
 		 glow := maps:merge(G1, maps:from_list([{R, Now} || R <- Rules]))}).
+
+%% A node says nothing of which rules fired: work it out. From cycle Prev's
+%% values Din to cycle N's Now, when they are one cycle apart (a step; a node
+%% running free dumps every so many), the rules candyspeak_eval:cycle/3 knows
+%% fired, by object as csp says it. One it cannot know stays dark.
+infer(undefined, _Prev, _N, _Din, _Now) -> undefined;
+infer(V = #{prog := P}, Prev, N, Din, Now) when is_integer(Prev), N =:= Prev + 1 ->
+    #{fired := F} = candyspeak_eval:cycle(P, Din, candyspeak_eval:sampled(P, Now)),
+    fired(V, F);
+infer(V, _Prev, _N, _Din, _Now) -> V.
 
 %% On the panel's tick: let what has stopped firing go out.
 tick(undefined) -> undefined;

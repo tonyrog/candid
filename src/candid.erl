@@ -122,6 +122,14 @@ render(U, Where, File, Side0) ->
 
 side(S) -> maps:with([chat, log, ws], S).
 
+%% How the shown program's floats read: as the image it was listed off says,
+%% for a node's; Q16.16 as the host csp runs it, for the rest.
+float_format(Ws) ->
+    case candid_file:active(Ws) of
+	#{image := #{float := F}} -> F;
+	_ -> fixpoint
+    end.
+
 %% The workspace with File the active one: the tab that already holds it --
 %% a node's listing is opened as the node's when it comes (csp_program) --
 %% or a new one, read from disk.
@@ -1034,7 +1042,8 @@ build(U, Where, Root, File, Widgets0, Ast, Side = #{chat := Chat, log := Log}) -
 			      traces => [maps:get(N, Looks)
 					 || {_, N, _} <- Ordered]}]),
     {ok, Src} = candyspeak:parse(File, [sources]),
-    Code = csp_code:new(code_ui(U), maps:get(code, P), {Src, File}, colours()),
+    Code = csp_code:new(code_ui(U), maps:get(code, P), {Src, File}, colours(),
+			float_format(maps:get(ws, Side))),
     {ok, Link} = csp_link:open(target(), csp_exe(), [File]),
     erlang:send_after(period(), self(), tick),
     TraceBox = maps:get(trace_box, P),
@@ -1098,7 +1107,7 @@ retarget(U, Link, S, Text) ->
 	    put(candid_target, T),
 	    put(candid_target_text, Text),
 	    {ok, Link1} = csp_link:open(T, csp_exe(), [maps:get(file, S)]),
-	    {Link1, start_mode(U, Link1, S#{last := #{}})};
+	    {Link1, start_mode(U, Link1, maps:remove(seen, S#{last := #{}}))};
 	{error, Why} ->
 	    show_link(U, S, Why),
 	    {Link, S}
@@ -1467,8 +1476,8 @@ kinds(Ast) ->
 
 loop(U, Link, S) ->
     receive
-	{csp_state, _N, Vals} ->
-	    loop(U, Link, update(U, S, Vals));
+	{csp_state, N, Vals} ->
+	    loop(U, Link, infer(S, update(U, S, Vals), N));
 
 	{csp_fired, _N, Rules} ->
 	    loop(U, Link,
@@ -1549,8 +1558,14 @@ loop(U, Link, S) ->
 	{chat_tool, From, Ref, Name, Args} ->
 	    Info = #{last => maps:get(last, S), clock => maps:get(clock, S),
 		     mode => maps:get(mode, S, run), local => is_local(),
-		     link => Link},
+		     link => Link, file => candid_file:active(maps:get(ws, S))},
 	    case csp_chat:panel_tool(Name, Args, Info) of
+		{switch, F1, Line, Reply} ->
+		    %% as the line typed at the prompt: on a node, one more
+		    %% line of the patch running on its image
+		    csp_link:raw(Link, Line),
+		    From ! {Ref, Reply},
+		    loop(U, Link, S#{ws := candid_file:update(maps:get(ws, S), F1)});
 		{load, File, Reply} ->
 		    From ! {Ref, Reply},
 		    csp_link:close(Link),
@@ -1840,6 +1855,17 @@ update(U, S, Vals) ->
     Last1 = maps:merge(Last, maps:from_list(Vals)),
     S#{last := Last1,
        code := csp_code:refresh(maps:get(code, S, undefined), Last1)}.
+
+%% A local csp says what fired; for a node the code view works it out from
+%% the dump before and this one.
+infer(S0, S, N) ->
+    case is_local() of
+	true -> S;
+	false ->
+	    S#{seen => N,
+	       code := csp_code:infer(maps:get(code, S), maps:get(seen, S0, none),
+				      N, maps:get(last, S0), maps:get(last, S))}
+    end.
 
 paint(U, S, Vals) ->
     Nodes = maps:get(nodes, S),

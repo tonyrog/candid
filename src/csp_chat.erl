@@ -25,6 +25,7 @@
 
 -export([start/2, attach/2, toggle/1, available/0]).
 -export([panel_tool/3]).                                % candid's half
+-export([rule_list/1]).                                 % the program tool's rules
 -export([tools/0, manual/2, check/2, converse/3]).     % tests
 
 -define(VARP_TIMEOUT, 60).
@@ -187,7 +188,9 @@ tools() ->
     [tool_def(<<"program">>,
 	      <<"The program the panel shows, with line numbers, and where it "
 		"runs (a local csp or a node). On a node it is the node's own "
-		"program, listed off its image.">>, #{}, []),
+		"program, listed off its image. After it, its rules with the "
+		"numbers csp gives them: those are what disable and enable "
+		"take, not the line numbers.">>, #{}, []),
      tool_def(<<"state">>,
 	      <<"The values right now, by name, with the cycle and whether it "
 		"runs or is paused.">>, #{}, []),
@@ -239,10 +242,23 @@ tools() ->
 	      #{name => str(<<"name, e.g. Btn or a.N">>),
 		value => #{type => <<"integer">>}},
 	      [<<"name">>, <<"value">>]),
+     tool_def(<<"disable">>,
+	      <<"Switch rules off in the running program, by the numbers the "
+		"program tool lists them under -- as `#disable 3 4' typed at "
+		"its prompt. On a node it is added to the patch running on the "
+		"image. The program runs on with its values.">>,
+	      #{rules => rule_nos()}, [<<"rules">>]),
+     tool_def(<<"enable">>,
+	      <<"Switch rules that are off on again, as `#enable 3 4'.">>,
+	      #{rules => rule_nos()}, [<<"rules">>]),
      tool_def(<<"pause">>, <<"Stop the program, ready to step.">>, #{}, []),
      tool_def(<<"resume">>, <<"Let the program run again.">>, #{}, []),
      tool_def(<<"step">>, <<"Run N cycles while paused, then stop.">>,
 	      #{n => #{type => <<"integer">>}}, [])].
+
+rule_nos() ->
+    #{type => <<"array">>, items => #{type => <<"integer">>},
+      description => <<"rule numbers, as the program tool lists them">>}.
 
 tool_def(Name, Desc, Props, Req) ->
     #{name => Name, description => Desc,
@@ -277,7 +293,7 @@ tool1(<<"program">>, _, Ctx = #{info := Info}) ->
 	{ok, Bin} ->
 	    {ok, [io_lib:format("file: ~s~ntarget: ~s~n~n",
 				[File, target_text(Info)]),
-		  numbered(Bin)], Ctx};
+		  numbered(Bin), rule_list(File)], Ctx};
 	{error, Why} -> {error, io_lib:format("~s: ~p", [File, Why]), Ctx}
     end;
 tool1(<<"manual">>, Args, Ctx = #{info := Info}) ->
@@ -326,6 +342,25 @@ tool1(Name, Args, Ctx = #{panel := Panel}) ->
 
 target_text(#{target := T}) when T =/= "" -> T;
 target_text(_) -> "local".
+
+%% The rules under the numbers csp gives them -- what #disable takes. A line
+%% number is not one: declarations and comments come between.
+rule_list(File) ->
+    case candid_file:load({disk, File}) of
+	{ok, F} ->
+	    case candid_file:rules(F) of
+		{ok, Rs} ->
+		    ["\nrules (the numbers disable and enable take):\n",
+		     [io_lib:format("  rule ~w  line ~w~s  ~ts~n",
+				    [No, Ln, case Off of
+						 true -> " (off)";
+						 false -> ""
+					     end, string:trim(T)])
+		      || {No, Ln, T, Off} <- Rs]];
+		_ -> "\nrules: the program does not parse, so not numbered\n"
+	    end;
+	_ -> ""
+    end.
 
 numbered(Bin) ->
     Ls = string:split(unicode:characters_to_list(Bin), "\n", all),
@@ -585,6 +620,9 @@ panel_tool(Name, Args, I) ->
 drive(<<"set">>, #{<<"name">> := N, <<"value">> := V}, #{link := Link}) ->
     csp_link:set(Link, unicode:characters_to_list(N), V),
     {ok, "set"};
+drive(Switch, #{<<"rules">> := Nos}, #{file := F})
+  when Switch =:= <<"disable">>; Switch =:= <<"enable">> ->
+    switch(Switch, Nos, F);
 drive(<<"pause">>, _, _) -> {control, "mode=step", {ok, "paused"}};
 drive(<<"resume">>, _, _) -> {control, "mode=run", {ok, "running"}};
 drive(<<"step">>, _, #{mode := run}) ->
@@ -598,3 +636,34 @@ drive(<<"step">>, Args, #{link := Link}) ->
     {ok, io_lib:format("stepped ~w", [N])};
 drive(Name, _, _) ->
     {error, ["no such tool: ", Name]}.
+
+%% Rules Nos off or on: marked in the panel's file (F, the one it shows) and
+%% sent as the one line typed at csp's prompt would be. {switch, F1, Line,
+%% Reply} -- the panel keeps F1 and sends Line.
+switch(_, [], _) -> {error, "no rules given"};
+switch(Switch, Nos, F) when is_map(F) ->
+    Fun = case Switch of
+	      <<"disable">> -> fun candid_file:disable/2;
+	      <<"enable">> -> fun candid_file:enable/2
+	  end,
+    case lists:foldl(fun(No, {ok, Fi}) when is_integer(No) ->
+			     case Fun(Fi, No) of
+				 {ok, Fj, _} -> {ok, Fj};
+				 {error, {no_such_rule, _}} ->
+				     {error, io_lib:format("there is no rule ~w",
+							   [No])};
+				 {error, _} ->
+				     {error, "the program does not parse"}
+			     end;
+			(No, {ok, _}) ->
+			     {error, io_lib:format("not a rule number: ~p", [No])};
+			(_, Error) -> Error
+		     end, {ok, F}, Nos) of
+	{ok, F1} ->
+	    Line = lists:flatten(["#", binary_to_list(Switch), " ",
+				  lists:join(" ", [integer_to_list(N)
+						   || N <- Nos])]),
+	    {switch, F1, Line, {ok, ["sent: ", Line]}};
+	{error, Why} -> {error, Why}
+    end;
+switch(_, _, _) -> {error, "the panel shows no file"}.

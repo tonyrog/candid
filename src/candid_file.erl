@@ -24,6 +24,8 @@
 %%%            CRC, which names the image (a stored patch carries it as
 %%%            rom_fp), and the CRC of the patch on it. Loading again from the
 %%%            same node can then tell whether it already has that program.
+%%%            And how its floats read (float: fixpoint | ieee, the header's
+%%%            flags), for candyspeak_eval to work the node's cycle out by.
 %%%
 %%% What changes a file returns what to send to the node it is live on, csp
 %%% lines, empty when it is not live: {ok, F, Send}.
@@ -231,7 +233,7 @@ same_image(#{image := I}, Dumps) -> image_of(Dumps) =:= I.
 image_of(Dumps) ->
     case [B || {rom, B} <- Dumps] of
 	[Rom | _] ->
-	    #{rom => image_id(Rom),
+	    #{rom => image_id(Rom), float => float_format(Rom),
 	      patch => case [B || {K, B} <- Dumps, K =:= patch orelse
 				      K =:= eeprom] of
 			   [P | _] -> erlang:crc32(P);
@@ -239,6 +241,12 @@ image_of(Dumps) ->
 		       end};
 	[] -> none
     end.
+
+%% The header's flags byte, at the same offset in either byte order
+%% (csp_disasm's ctx/1): bit 0 is CSP_IMG_F_FLOAT, IEEE binary32; clear,
+%% Q16.16.
+float_format(<<_:7/binary, Flags, _/binary>>) when Flags band 1 =:= 1 -> ieee;
+float_format(_) -> fixpoint.
 
 %% An image's name: the CRC of its header, as it is stored, so either byte
 %% order compares to itself.
