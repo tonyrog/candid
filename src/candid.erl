@@ -25,7 +25,7 @@
 -export([start/0, start/2]).
 -export([run/2, run/3, run_ui/2, run_ui/3]).
 -export([frac/2, drivable/2, shorten/1, priv_dir/0]).  % for the renderers
--export([widgets/1, rgb565/1, hue/1, label_of/1]).   % tests, introspection
+-export([widgets/1, rgb565/1, hue/1]).   % tests, introspection
 -export([plots/1, eng/2, period/0, keep/2, rows/1, rows/3]). % tests
 -export([looks/1, colour/3, warn_annotations/1]).    % tests, introspection
 -export([tab_event/2, tabs/1, target_text/0, node_file/1]).  % tests
@@ -616,7 +616,7 @@ numeric(_K)                     -> false.
 
 ann_label(Name, Kv) ->
     case maps:get("label", Kv, true) of
-	true -> label_of(Name);
+	true -> Name;
 	L    -> utf8(to_text(L))
     end.
 
@@ -1331,27 +1331,11 @@ keep(P, Ms) ->
 %% harder to read than one that looks like a traffic light, and the name is the
 %% only thing that knows -- the declaration says `out 5`, nothing about colour.
 %% A plain `Led` stays red, which is what a bare indicator LED usually is.
-%%
-%% A `__Colour` SUFFIX says it outright, for the cases no word in the name
-%% implies: `Heater__Orange`, `BathFan__Blue`. The suffix is stripped from the
-%% label, so the panel shows `Heater` -- see label_of/1.
-%%
-%% This is a stopgap for demos and development, not a design. It puts
-%% presentation into the identifier, which then has to be spelled out in every
-%% rule that touches it. `#annotate panel X color=...' is the right answer and
-%% wins over both guesses -- see colour/3.
-hue(Name) ->
-    case suffix_colour(Name) of
-	{ok, Hue} -> Hue;
-	none      -> hue_from_words(Name)
-    end.
+%% Only a guess, and the name stays the name: `#annotate panel X color=...'
+%% says it outright and wins -- see colour/3.
+hue(Name) -> hue_from_words(Name).
 
-%% Everything after the last "__", matched against the palette.
-suffix_colour(Name) ->
-    case string:split(Name, "__", trailing) of
-	[_, Tail] when Tail =/= [] -> palette(string:lowercase(Tail));
-	_                          -> none
-    end.
+%% The colours `color=' takes by name.
 
 palette("red")     -> {ok, {"#f44", "#251515"}};
 palette("orange")  -> {ok, {"#f92", "#251a10"}};
@@ -1384,18 +1368,6 @@ hue_from_words(Name) ->
 			    end
 		    end
 	    end
-    end.
-
-%% What the panel shows. The csp name keeps its suffix -- that is what the
-%% dump and every rule call it -- but nobody wants to read it.
-label_of(Name) ->
-    case string:split(Name, "__", trailing) of
-	[Head, Tail] when Head =/= [], Tail =/= [] ->
-	    case palette(string:lowercase(Tail)) of
-		{ok, _} -> Head;         % a colour: hide it
-		none    -> Name          % something else: leave it alone
-	    end;
-	_ -> Name
     end.
 
 %% Nothing to drive, so there is no csp and no tick -- just the bar, and
@@ -1801,7 +1773,9 @@ act(_U, Link, S, {clock, Ms})           -> csp_link:clock(Link, Ms), S;
 act(_U, _Link, S, {frame, Id, Bytes})   -> send_frame(Id, Bytes), S;
 act(_U, Link, S, {set, N, V})           -> csp_link:set(Link, N, V), S;
 act(_U, Link, S, step)                  -> csp_link:step(Link), S;
-act(_U, Link, S, {switch, Off, N})      -> switch_rules(Link, S, Off, [N]).
+act(_U, Link, S, {switch, Off, N})      -> switch_rules(Link, S, Off, [N]);
+act(_U, _Link, S, {log, Text})          ->
+    candid_log:add(maps:get(log, S, undefined), note, Text), S.
 
 %% A replayed frame, on the bus csp listens to (--can=vcan0 in csp_link),
 %% through the can application `make run' starts. Synchronous, so it is in
@@ -1836,7 +1810,12 @@ control(U, Link, S, "mode=run") ->
     csp_link:resume(Link),
     S1 = S#{mode := run},
     light_mode(U, S1),
-    S1;
+    %% Go is the program running again, so its own values are what shows:
+    %% the code view leaves a trace it was walking.
+    case maps:get(code, S1, undefined) of
+	undefined -> S1;
+	Code -> code_do(U, Link, S1, csp_code:control(Code, "live"))
+    end;
 control(U, Link, S, "mode=step") ->
     csp_link:pause(Link),
     S1 = S#{mode := step},

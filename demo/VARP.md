@@ -9,7 +9,7 @@ system as a varp model, and it proves it.
     bmc: proved by 1-induction
     % TRUE
 
-And with one rule deleted from the program -- `Heater__Orange = 0 ? LivingWindow`
+And with one rule deleted from the program -- `Heater = 0 ? LivingWindow`
 -- the proof becomes a trace:
 
     ./priv/varp.sh bmc ~/work/candyspeak/tools/panel/demo/home_bug.varp
@@ -116,9 +116,9 @@ one. `#variable Home` next to `#states Home` produces `next(St) == 3` and no
 Each chain is preceded by the source rules it came from, so the model can be read
 against the program without holding both files open:
 
-    // ---- Heater__Orange:1 ---------------------------
-    //   88: Heater__Orange = 1 ? (IndoorTemp) < ((SetPoint) - (Hysteresis))
-    //   89: Heater__Orange = 0 ? (IndoorTemp) > ((SetPoint) + (Hysteresis))
+    // ---- Heater:1 ---------------------------
+    //   88: Heater = 1 ? (IndoorTemp) < ((SetPoint) - (Hysteresis))
+    //   89: Heater = 0 ? (IndoorTemp) > ((SetPoint) + (Hysteresis))
 
 ## State numbers, and what they are not
 

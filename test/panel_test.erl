@@ -101,14 +101,15 @@ run() ->
     %%     only in INIT and NORMAL and never in Home.
     home_checks(),
 
-    %% 6e. the __Colour suffix names a colour outright and is hidden from the
-    %%     label. An unknown suffix is left alone rather than silently eaten.
-    Sfx = [{candid:label_of(N), element(1, candid:hue(N))}
-	   || N <- ["Heater__Orange", "BathFan__Blue", "Siren__Red",
-		    "Motor__Bogus"]],
-    expect("__Colour suffix sets the colour and hides itself",
-	   Sfx =:= [{"Heater","#f92"}, {"BathFan","#5af"},
-		    {"Siren","#f44"}, {"Motor__Bogus","#f44"}], Sfx),
+    %% 6e. a name is shown as it is -- no colour hidden in it -- and home.csp
+    %%     says its lamps' colours with color=.
+    {ok, Home} = candyspeak:parse("demo/home.csp"),
+    HL = candid:looks(Home),
+    Sfx = [{maps:get(label, maps:get(N, HL)), element(1, maps:get(colour, maps:get(N, HL)))}
+	   || N <- ["Heater", "BathFan", "Siren"]],
+    expect("the label is the name, the colour is annotated",
+	   Sfx =:= [{"Heater","#f92"}, {"BathFan","#5af"}, {"Siren","#f44"}]
+	   andalso element(1, candid:hue("Motor__Blue")) =:= "#5af", Sfx),
 
     %% 6f. the varp generator names states, so a gate reads `St == Home' rather
     %%     than `St == 3' -- unless the name is taken, in which case the number
@@ -573,8 +574,8 @@ annotate_check() ->
     expect("an un-annotated digital in stays a toggle",
 	   Kind("FrontDoor") =:= toggle, Kind("FrontDoor")),
     expect("#annotate kind=action and kind=dial",
-	   Kind("Siren__Red") =:= action andalso Kind("IndoorTemp") =:= dial,
-	   {Kind("Siren__Red"), Kind("IndoorTemp")}),
+	   Kind("Siren") =:= action andalso Kind("IndoorTemp") =:= dial,
+	   {Kind("Siren"), Kind("IndoorTemp")}),
 
     %% A kind the declaration cannot be is refused, not obeyed: a panel that
     %% renders a dial for a digital pin cannot drive the pin it is wired to.
@@ -813,6 +814,12 @@ code_view_check() ->
     Goal = csp_code:goal_text(#{{1, "k1_0"} => {true, Mx},
 				{1, "k1_1"} => {false, Mg},
 				{0, "k4_0"} => {false, Mn}}),
+    expect("goal: up and down step the number at the cursor, not a name's",
+	   {csp_code:bump("Lock == 128", 10, -1), csp_code:bump("a0.N == 3", 0, 1),
+	    csp_code:bump("A == 1 && B == 7", 15, 1), csp_code:bump("Go", 1, 1)}
+	   =:= {{"Lock == 127", 8}, {"a0.N == 4", 8}, {"A == 1 && B == 8", 15},
+		{"Go", 1}},
+	   csp_code:bump("Lock == 128", 10, -1)),
     expect("marks add up to one condition, objects' names made whole",
 	   Goal =:= "!(N > 2) && m0.X && !Go", Goal),
     NotNot = csp_code:goal_text(#{{0, "k1_0"} => {false, Ev2("!Go")}}),
@@ -999,10 +1006,15 @@ timer_check(Sh) ->
 	   {Step, Steps, Ms}),
     %% A solve with no trace after one with: the cycle walked in the old
     %% trace goes with it, or the next paint looks for it there.
-    Vn = csp_code:model(Vt#{ui => {?MODULE, ui}, h => h, at => none},
+    Vn = csp_code:model(Vt#{ui => {?MODULE, ui}, h => h, at => none, acts => []},
 			{solve, "X == 9", 4, Mt, {proved, 0}}),
     expect("no trace, no cycle to walk", maps:get(look, Vn) =:= none,
 	   maps:get(look, Vn)),
+    expect("varp's answer goes to the log, the frame gets its first line",
+	   case maps:get(acts, Vn) of
+	       [{log, "varp: never: X == 9" ++ _}] -> true;
+	       _ -> false
+	   end, maps:get(acts, Vn)),
     RE = Ask("E", 4),
     expect("timer: elapsed() is read, not guessed",
 	   element(1, RE) =:= found andalso element(2, RE) =:= 1, RE).
@@ -1222,15 +1234,15 @@ home_checks() ->
 	    %% cold, window shut: the heater runs
 	    A = settle(F, [{"IndoorTemp", 150}]),
 	    expect("home: heater runs when cold",
-		   maps:get("Heater__Orange", A, 0) =:= 1, A),
+		   maps:get("Heater", A, 0) =:= 1, A),
 	    %% cold, window open: it must not
 	    B = settle(F, [{"IndoorTemp", 150}, {"LivingWindow", 1}]),
 	    expect("home: no heating into an open window",
-		   maps:get("Heater__Orange", B, 1) =:= 0, B),
+		   maps:get("Heater", B, 1) =:= 0, B),
 	    %% a door, alarm disarmed: silence
 	    C = settle(F, [{"FrontDoor", 1}]),
 	    expect("home: siren silent while disarmed",
-		   maps:get("Siren__Red", C, 1) =:= 0, C),
+		   maps:get("Siren", C, 1) =:= 0, C),
 	    %% ArmButton is a SWITCH, so it is held on -- `!ArmButton && Armed'
 	    %% disarms on release, which is what a switch should do. Pressing and
 	    %% releasing it (as this test first did) disarms before the door is
@@ -1241,14 +1253,14 @@ home_checks() ->
 	    %% an armed house could not be poked at.
 	    D = settle(F, [{"ArmButton", 1}], [{"FrontDoor", 1}]),
 	    expect("home: siren sounds when armed and the door opens",
-		   maps:get("Siren__Red", D, 0) =:= 1, D),
+		   maps:get("Siren", D, 0) =:= 1, D),
 
 	    %% ...and turning the switch off disarms, siren included
 	    E = settle(F, [{"ArmButton", 1}, {"FrontDoor", 1}],
 		       [{"ArmButton", 0}]),
 	    expect("home: the switch off disarms and silences",
 		   maps:get("Armed", E, 1) =:= 0 andalso
-		   maps:get("Siren__Red", E, 1) =:= 0, E),
+		   maps:get("Siren", E, 1) =:= 0, E),
 
 	    %% The net must not fire in normal use, and must fire when prevention
 	    %% is missing. Compared by STATE NUMBER against each other rather
@@ -1264,7 +1276,7 @@ net_check(NormalState) ->
     {ok, Src} = file:read_file("demo/home.csp"),
     Lines = string:split(binary_to_list(Src), "\n", all),
     Broken = [L || L <- Lines,
-		   string:find(L, "Heater__Orange = 0 ? LivingWindow") =:= nomatch],
+		   string:find(L, "Heater = 0 ? LivingWindow") =:= nomatch],
     Tmp = "/tmp/home_no_guard.csp",
     ok = file:write_file(Tmp, string:join(Broken, "\n")),
     V = settle(Tmp, [{"IndoorTemp", 150}], [{"LivingWindow", 1}]),
@@ -1277,7 +1289,7 @@ net_check(NormalState) ->
     expect("home: FAILSAFE lands softly (lights on, heat off)",
 	   maps:get("HallLight", V, 0) =:= 1 andalso
 	   maps:get("OutdoorLamp", V, 0) =:= 1 andalso
-	   maps:get("Heater__Orange", V, 1) =:= 0, V).
+	   maps:get("Heater", V, 1) =:= 0, V).
 
 settle(F, Sets) -> settle(F, Sets, []).
 

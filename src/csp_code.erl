@@ -58,7 +58,7 @@
 
 -module(csp_code).
 
--export([new/4, new/5, disabled/2, refresh/2, fired/2, infer/5, tick/1, control/2, model/2, actions/1]).
+-export([new/4, new/5, disabled/2, bump/3, refresh/2, fired/2, infer/5, tick/1, control/2, model/2, actions/1]).
 -export([look/1]).
 -export([assign/1, bind/1, chain/2, cols/1, tr_id/2, col_name/1,
 	 signed/3]).                                     % for the renderers
@@ -297,7 +297,7 @@ new(C, Where, {Ast, File}, Cfg, Opts) ->
 	  tabs => Tabs, tab => 0, file => File,
 	  prog => candyspeak_eval:prog(Ast, File, [{float, Float}]),
 	  mode => hide, shown => #{}, fired => [], glow => #{}, last => #{},
-	  off => maps:get(off, Opts, []),
+	  off => maps:get(off, Opts, []), typed => none,
 	  marks => #{}, sigs_seen => [], k => ?K,
 	  states => state_names(hd(Tabs)), trace => none, at => none,
 	  bad => #{}, acts => [], look => none, tshow => false},
@@ -344,7 +344,7 @@ control(V = #{marks := Ms, tab := I}, "ct=" ++ Id) ->
 	      {ok, {true, X}}  -> Ms#{Key => {false, X}};
 	      {ok, {false, _}} -> maps:remove(Key, Ms)
 	  end,
-    V1 = V#{marks := Ms1},
+    V1 = V#{marks := Ms1, typed := none},
     goal(V1),
     paint(V1);
 %% A signal: on / off for one bit, == / != its value now for more.
@@ -355,7 +355,8 @@ control(V = #{marks := Ms, sigs_seen := Seen}, "sig=" ++ N) ->
 	      {ok, {true, X}}  -> Ms#{Key => {false, X}};
 	      {ok, {false, _}} -> maps:remove(Key, Ms)
 	  end,
-    V1 = V#{marks := Ms1, sigs_seen := lists:usort([N | Seen])},
+    V1 = V#{marks := Ms1, typed := none,
+	    sigs_seen := lists:usort([N | Seen])},
     goal(V1),
     paint(V1);
 %% From the start of the trace: csp back to its initial values, paused, and
@@ -410,17 +411,25 @@ control(V = #{trace := {Rows, M}, at := T}, "rstep")
 		 acts := Sets ++ Out ++ Dt ++ [step]});
 %% Drop the marks and look at the model itself.
 control(V, "clear") ->
-    V1 = V#{marks := #{}},
+    V1 = V#{marks := #{}, typed := none},
     goal(V1),
     ask(V1, check),
     paint(V1);
-control(V = #{marks := Ms}, "solve") ->
-    case maps:size(Ms) of
-	0 -> answer(V, "", "click a contact or a signal to say what "
-		    "should hold");
-	_ -> ask(V, {solve, goal_text(Ms), maps:get(k, V)})
+control(V = #{marks := Ms, typed := T}, "solve") ->
+    case {T, maps:size(Ms)} of
+	{none, 0} -> answer(V, "", "click a contact or a signal, or type a "
+			    "goal, to say what should hold");
+	{none, _} -> ask(V, {solve, goal_text(Ms), maps:get(k, V)});
+	_ -> ask(V, {solve, T, maps:get(k, V)})
     end,
     V;
+%% The goal as typed -- or changed with the arrows -- is the one to solve; a
+%% click on a contact or a signal makes it the marks' again.
+control(V, "goal=" ++ T0) ->
+    case string:trim(T0) of
+	"" -> V#{typed := none};
+	T -> V#{typed := T}
+    end;
 %% A click on the picture: what is at X, Y.
 control(V = #{ladder := L}, "xy=" ++ XY) when L =/= none ->
     [X, Y] = [list_to_integer(N) || N <- string:lexemes(XY, ",")],
@@ -479,41 +488,52 @@ why(Error) ->
 model(undefined, _A) -> undefined;
 model(V0, {error, Why}) ->
     V = V0#{trace := none, at := none, look := none},
-    answer(V, "bad", Why), V;
+    said(V, "bad", Why);
+%% What the model is -- runs, and what it leaves free -- is for the log: the
+%% frame above the code keeps still.
 model(V, {check, M, {found, _, _}}) ->
-    answer(V, "ok", "the model runs." ++ free_text(M)), V;
+    answer(V, "", ""),
+    logged(V, "the model runs." ++ free_text(M));
 model(V, {check, _M, {none, _}}) ->
-    answer(V, "bad", no_transitions()), V;
-model(V, {solve, Goal, _K, M, {found, At, Rows}}) ->
-    answer(V, "ok",
-	   lists:flatten([io_lib:format("reached at step ~w: ~s", [At, Goal]),
-			  frames(Rows, M)]),
-	   {Rows, M, maps:get(states, V)}),
+    said(V, "bad", no_transitions());
+model(V0, {solve, Goal, _K, M, {found, At, Rows}}) ->
+    Line = lists:flatten(io_lib:format("reached at step ~w: ~s", [At, Goal])),
+    answer(V0, "ok", Line, {Rows, M, maps:get(states, V0)}),
+    V = logged(V0, Line ++ frames(Rows, M)),
     paint(V#{trace := {Rows, M}, at := none, bad := #{}, shown := #{},
-		 look := first_cycle(Rows)});
+	     look := first_cycle(Rows)});
 %% No trace, and a proof there never is one: by the rules alone with
 %% 0-induction, by the history that leads up to it with more.
 model(V0, {solve, Goal, _K, _M, {proved, 0}}) ->
     V = V0#{trace := none, at := none, look := none},
-    answer(V, "ok", "never: " ++ Goal ++ " -- no step can lead into it, "
-	   "whatever came before (proved by 0-induction)"), V;
+    said(V, "ok", "never: " ++ Goal ++ " -- no step can lead into it, "
+	 "whatever came before (proved by 0-induction)");
 model(V0, {solve, Goal, _K, _M, {proved, N}}) ->
     V = V0#{trace := none, at := none, look := none},
-    answer(V, "ok",
-	   lists:flatten(io_lib:format("never: ~s -- no run reaches it "
-				       "(proved by ~w-induction)", [Goal, N]))), V;
+    said(V, "ok",
+	 lists:flatten(io_lib:format("never: ~s -- no run reaches it "
+				     "(proved by ~w-induction)", [Goal, N])));
 model(V0, {solve, Goal, K, _M, {none, _}}) ->
     V = V0#{trace := none, at := none, look := none},
-    answer(V, "bad",
-	   lists:flatten(io_lib:format("not reachable within ~w steps, and "
-				       "not proved for ever: ~s", [K, Goal]))), V;
+    said(V, "bad",
+	 lists:flatten(io_lib:format("not reachable within ~w steps, and "
+				     "not proved for ever: ~s", [K, Goal])));
 model(V0, {solve, _Goal, _K, _M, no_transitions}) ->
     V = V0#{trace := none, at := none, look := none},
-    answer(V, "bad", no_transitions()), V;
+    said(V, "bad", no_transitions());
 model(V, {_, _, {error, Out}}) ->
-    answer(V, "bad", "varp: " ++ Out), V;
+    said(V, "bad", "varp: " ++ Out);
 model(V, {_, _, _, _, {error, Out}}) ->
-    answer(V, "bad", "varp: " ++ Out), V.
+    said(V, "bad", "varp: " ++ Out).
+
+%% varp's answer: its first line in the frame, all of it in the log.
+said(V, Cls, Text0) ->
+    Text = lists:flatten(Text0),
+    answer(V, Cls, hd(string:split(Text, "\n") ++ [""])),
+    logged(V, Text).
+
+logged(V = #{acts := As}, Text) ->
+    V#{acts := As ++ [{log, lists:flatten(["varp: ", Text])}]}.
 
 %% The walk shows a cycle, step L to L+1: a trace reached at step 0 -- the
 %% goal holds at once, over the inputs alone -- has none.
@@ -819,6 +839,23 @@ render(V = #{mode := Mode, tab := I, tabs := Tabs, metrics := Ms}) ->
     L = csp_ladder:layout(maps:get(rules, Tab), Mode, Ms),
     vui(V, rungs, [Mode, I, Tab, csp_ladder:size(L)]),
     paint(V#{shown := #{}, ladder := L, redraw := true}).
+
+%% The number at the cursor P in a goal, stepped by D: the last whole number
+%% that starts at or before it, or the first. A name's digits (a0.N) are no
+%% number. {Text, where the number now starts}.
+bump(Text0, P, D) ->
+    Text = unicode:characters_to_list(Text0),
+    case re:run(Text, "-?\\b[0-9]+\\b", [global, {capture, first, index}]) of
+	{match, Ms} ->
+	    [{S, L} | _] = case [M || [M = {S0, _}] <- Ms, S0 =< P] of
+			       [] -> hd(Ms);
+			       Before -> [lists:last(Before)]
+			   end,
+	    N = list_to_integer(lists:sublist(Text, S + 1, L)) + D,
+	    {lists:sublist(Text, S) ++ integer_to_list(N) ++
+		 lists:nthtail(S + L, Text), S};
+	nomatch -> {Text, P}
+    end.
 
 %%% ----------------------------------------------------------------- updates
 

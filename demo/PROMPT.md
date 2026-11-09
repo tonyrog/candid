@@ -57,7 +57,7 @@ if-statements.
 
 `home.csp` does both, and the difference matters for what can be proved.
 
-**Prevention** is the rules that force the safe value -- `Heater__Orange = 0 ?
+**Prevention** is the rules that force the safe value -- `Heater = 0 ?
 LivingWindow`, last in the block. It works, and it is fragile in two ways:
 
 * Order matters -- a later rule in the same cycle wins, so an invariant written
@@ -74,8 +74,8 @@ a reset -- which is exactly right for a safety net: a flaky guard cannot bounce
 the house back out of a safe configuration. Verified: with the window shut again
 and the house warm, `State` stays 2 until `/reset`.
 
-    State = FAILSAFE ? Heater__Orange && LivingWindow && WinWas
-    State = FAILSAFE ? Siren__Red && !Armed && !ArmWas
+    State = FAILSAFE ? Heater && LivingWindow && WinWas
+    State = FAILSAFE ? Siren && !Armed && !ArmWas
 
 which turns three scattered guards into ONE property: **FAILSAFE is
 unreachable.** That is a sentence varp takes as `invariant State != FAILSAFE`,
@@ -92,8 +92,8 @@ And the landing is soft, because a failsafe that merely stops is not safe in a
 dark house:
 
     #in FAILSAFE
-	Heater__Orange = 0
-	Siren__Red     = 0
+	Heater = 0
+	Siren     = 0
 	HallLight      = 1
 	OutdoorLamp    = 1
     #end
@@ -110,17 +110,15 @@ That one-cycle subtlety is a good advertisement for the checker. It is invisible
 in review, obvious in the panel, and exactly the kind of thing a bounded model
 check finds without being told to look.
 
-## Colours, for now
+## Colours
 
-`Heater__Orange`, `BathFan__Blue`, `Siren__Red`: a `__Colour` suffix names the
-lamp colour outright, for the signals where no word in the name implies one. The
-panel hides the suffix, so the label reads `Heater`. An unrecognised suffix is
-left alone rather than silently eaten.
+`Heater`, `BathFan`, `Siren` get their lamp colour from the panel's annotations,
+not from their names:
 
-This is a stopgap for demos and development, **not a design**. It puts
-presentation into the identifier, which then has to be spelled out in every rule
-that touches the signal. A layout file naming colours per signal is the right
-answer, and it needs no change to the language.
+    #annotate panel Heater kind=action color=orange
+
+A name that contains a colour word (`Red`, `GreenLight`) is lit in that colour
+when nothing is annotated -- only a guess, and the name stays the name.
 
 ## Updating it
 

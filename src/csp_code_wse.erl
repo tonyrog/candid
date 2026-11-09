@@ -49,6 +49,9 @@ css(C) ->
        "  border:2px solid ", Col(want), ";border-radius:3px;color:#eee;"
        "  background:", Fill(want), "}"
        ".md .goal.none{border-style:dashed;color:#888;background:none}"
+       ".md input.goal{font:13px monospace;outline:none;min-width:320px;"
+       "  max-width:100%;box-sizing:border-box}"
+       ".md input.goal::placeholder{color:#888}"
        ".md .res{margin:6px 0 4px 0;white-space:pre-wrap;color:#aaa;"
        "  max-height:30vh;overflow:auto}"
        ".md .res.bad{color:", Col(unwant), "}"
@@ -113,7 +116,33 @@ new(Ws, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
     %% and the values.
     Md = wse:createElement(Ws, "span"),
     wse:set(Ws, Md, "className", "md"),
-    Goal = wse:createElement(Ws, "span"),
+    %% The goal: what the marks add up to, or typed. Up and down step the
+    %% number at the cursor (the one before it): `Lock == 128' to 127, 129.
+    Goal = wse:createElement(Ws, "input"),
+    wse:set(Ws, Goal, "className", "goal none"),
+    wse:set(Ws, Goal, "placeholder",
+	    "goal: click a contact or a signal, or type one"),
+    GoalTag = "'goal=' + this.value",
+    %% As wide as what it says, as the text it replaced was.
+    wse:set(Ws, Goal, "size", 40),
+    wse:set(Ws, Goal, "oninput",
+	    wse:newf(Ws, "e", "{ this.size = Math.max(40, this.value.length + 2); }")),
+    wse:set(Ws, Goal, "onchange", wse:newf(Ws, "e", "{ Wse.notify(" ++
+					   integer_to_list(Ev) ++ ", " ++ GoalTag ++
+					   "); }")),
+    wse:set(Ws, Goal, "onkeydown",
+	    wse:newf(Ws, "e",
+		     "{ if (e.key == 'ArrowUp' || e.key == 'ArrowDown') {"
+		     "   e.preventDefault();"
+		     "   var d = e.key == 'ArrowUp' ? 1 : -1, v = this.value,"
+		     "       p = this.selectionStart, re = /-?\\b\\d+\\b/g, m, b = null;"
+		     "   while ((m = re.exec(v))) { if (b === null || m.index <= p) b = m; }"
+		     "   if (b) { this.value = v.slice(0, b.index) + (parseInt(b[0]) + d)"
+		     "              + v.slice(b.index + b[0].length);"
+		     "            this.selectionStart = this.selectionEnd = b.index; }"
+		     "   Wse.notify(" ++ integer_to_list(Ev) ++ ", " ++ GoalTag ++ ");"
+		     " } else if (e.key == 'Enter') {"
+		     "   Wse.notify(" ++ integer_to_list(Ev) ++ ", " ++ GoalTag ++ "); } }")),
     wse:appendChild(Ws, Md, Goal),
     [begin
 	 B = wse:createElement(Ws, "button"),
@@ -319,11 +348,12 @@ cell(_C, V, _Sts, _Names, Id) when is_integer(V) ->
 cell(_C, V, _Sts, _Names, Id) ->
     ["<td", Id, ">", esc(V), "</td>"].
 
-%% The goal the marks add up to, or none.
+%% The goal the marks add up to, or none: into the field, to change.
 goal(Ws, #{goal := G}, none) ->
     wse:set(Ws, G, "className", "goal none"),
-    wse:set(Ws, G, "textContent",
-	    "goal: click a contact -- holds, does not, forget");
+    wse:set(Ws, G, "value", ""),
+    wse:set(Ws, G, "size", 40);
 goal(Ws, #{goal := G}, Text) ->
     wse:set(Ws, G, "className", "goal"),
-    wse:set(Ws, G, "textContent", candid_wse:u("goal: " ++ Text)).
+    wse:set(Ws, G, "value", candid_wse:u(Text)),
+    wse:set(Ws, G, "size", max(40, length(Text) + 2)).

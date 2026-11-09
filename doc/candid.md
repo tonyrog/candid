@@ -130,8 +130,7 @@ If you use a key on a widget whose column has no ✓, the panel says so:
 ### `label`
 
 This is the text in the row. It is also the name next to a plot channel and the
-hover text on a pixel. By default the label is the signal's name, minus any
-`__Colour` suffix. The label is display-only: csp, rules and the dump keep
+hover text on a pixel. By default the label is the signal's name. The label is display-only: csp, rules and the dump keep
 using the real name.
 
     #annotate panel Lt3 label="Kitchen"
@@ -177,9 +176,8 @@ Defaults when no `color` is given:
 
 * **digital** widgets take the colour from the name. If the name contains
   `green`/`gron`/`grn`, `yellow`/`amber`/`gul`, `blue`/`bla` or
-  `white`/`vit`, that colour is used; anything else is red. A `__Colour`
-  suffix (`Heater__Orange`) names the colour outright and is removed from the
-  label.
+  `white`/`vit`, that colour is used; anything else is red. `color=` says
+  it outright.
 * **plots** use phosphor green (`#5f9`). A beam does not guess from the name,
   so `yin` is not yellow.
 * **value** widgets use white.
@@ -620,9 +618,6 @@ and `{candid, [{chat, off}]}` takes the button away.
   palette did not contain amber. `min=-512` was a syntax error, because the
   annotation grammar had no negative numbers. All of these are fixed now and
   covered by tests (`make test` in candid).
-* **`__Colour` in names** is now redundant with `color=`. It puts presentation
-  into the identifier, which then has to be spelled out in every rule. It still
-  works, but `color=` is the better way.
 * **Display only.** `scale` cannot be used to enter values in real-world units.
   Doing that would need the panel to convert back to counts and round, and then
   the panel would send something you cannot see typed at the prompt.

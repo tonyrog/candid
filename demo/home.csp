@@ -30,9 +30,9 @@
 #digital ArmedLed     out 18
 
 // the rest of the house
-#digital BathFan__Blue   out 14
-#digital Heater__Orange  out 15
-#digital Siren__Red      out 16
+#digital BathFan  out 14
+#digital Heater   out 15
+#digital Siren    out 16
 #digital CoffeeMaker  out 17
 
 // ---- how the panel should show it -------------------------------------
@@ -47,9 +47,9 @@
 #annotate panel HallMotion   kind=toggle  // motion is a pulse, not a switch
 #annotate panel BathMotion   kind=push
 
-#annotate panel Siren__Red   kind=action   // it sounds; it does not indicate
-#annotate panel BathFan__Blue kind=action
-#annotate panel Heater__Orange kind=action
+#annotate panel Siren   kind=action color=red     // it sounds; it does not indicate
+#annotate panel BathFan kind=action color=blue
+#annotate panel Heater  kind=action color=orange
 
 #annotate panel IndoorTemp   kind=dial unit="0.1C"
 #annotate panel Daylight     kind=slider
@@ -101,18 +101,18 @@
 
     // The bathroom fan runs on after you leave -- the point of the timer.
     BathLight = 1 ? BathMotion
-    BathFan__Blue = 1 ? BathMotion
-    FanTimer  = 1 ? !BathMotion && BathFan__Blue
+    BathFan = 1 ? BathMotion
+    FanTimer  = 1 ? !BathMotion && BathFan
     BathLight = 0 ? timeout(FanTimer)
-    BathFan__Blue = 0 ? timeout(FanTimer)
+    BathFan = 0 ? timeout(FanTimer)
 
     // Outdoor lamp on darkness, with a band so dusk does not flicker it.
     OutdoorLamp = 1 ? Daylight < DarkBelow
     OutdoorLamp = 0 ? Daylight > DarkBelow + 50
 
     // Heating, likewise banded.
-    Heater__Orange = 1 ? IndoorTemp < SetPoint - Hysteresis
-    Heater__Orange = 0 ? IndoorTemp > SetPoint + Hysteresis
+    Heater = 1 ? IndoorTemp < SetPoint - Hysteresis
+    Heater = 0 ? IndoorTemp > SetPoint + Hysteresis
 
     // The alarm is a toggle on one button.
     Armed = 1, ArmedLed=1 ? ArmButton && !Armed
@@ -160,11 +160,11 @@
 
 #in Home Night Away
     // No heating into an open window.
-    Heater__Orange = 0 ? LivingWindow
+    Heater = 0 ? LivingWindow
 
     // The siren sounds only while armed, and only a door does it.
-    Siren__Red = 1 ? Armed && FrontDoor
-    Siren__Red = 0 ? !Armed
+    Siren = 1 ? Armed && FrontDoor
+    Siren = 0 ? !Armed
 #end
 
 // ------------------------------------------------------- the safety net
@@ -189,8 +189,8 @@
 // turn. WinWas/ArmWas are written last in the block, so reading them gives the
 // previous cycle's value.
 #in Home Night Away
-    State = FAILSAFE ? Heater__Orange && LivingWindow && WinWas
-    State = FAILSAFE ? Siren__Red && !Armed && !ArmWas
+    State = FAILSAFE ? Heater && LivingWindow && WinWas
+    State = FAILSAFE ? Siren && !Armed && !ArmWas
 
     WinWas = LivingWindow
     ArmWas = Armed
@@ -200,8 +200,8 @@
 // everything that helps you find your way goes on. A failsafe that simply
 // stops is not safe in a dark house.
 #in FAILSAFE
-    Heater__Orange = 0
-    Siren__Red     = 0
+    Heater = 0
+    Siren     = 0
     CoffeeMaker    = 0
     HallLight      = 1
     OutdoorLamp    = 1

@@ -47,9 +47,38 @@ new(H, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
     wxSizer:add(wxWindow:getSizer(Right), Box, [{proportion, 1}, {flag, ?wxEXPAND}]),
     wxWindow:hide(Box),
     %% The model frame.
-    {GoalF, Goal} = candid_wx:frame_box(Top, "goal"),
+    %% The goal: what the marks add up to, or typed; Enter, or leaving it,
+    %% says so. Up and down step the number at the cursor.
+    GoalF = wxPanel:new(Top),
+    GoalS = wxBoxSizer:new(?wxHORIZONTAL),
+    wxWindow:setSizer(GoalF, GoalS),
+    Goal = wxTextCtrl:new(GoalF, ?wxID_ANY, [{style, ?wxTE_PROCESS_ENTER}]),
     wxWindow:setFont(Goal, candid_wx:font(H)),
     wxWindow:setMinSize(Goal, {320, -1}),
+    wxWindow:setToolTip(Goal, "click a contact or a signal, or type a goal; "
+			"up and down step a number"),
+    wxSizer:add(GoalS, Goal, [{proportion, 1}, {flag, ?wxALL}, {border, 2}]),
+    %% As wide as what it says, as the label it replaced was.
+    wxWindow:connect(Goal, command_text_updated,
+		     [{callback, fun(_, O) -> fit_goal(Goal, GoalF), wxEvent:skip(O) end}]),
+    Said = fun() -> Pid ! {candid_wx, {code, "goal=" ++ wxTextCtrl:getValue(Goal)}} end,
+    wxWindow:connect(Goal, command_text_enter, [{callback, fun(_, _) -> Said() end}]),
+    wxWindow:connect(Goal, kill_focus,
+		     [{callback, fun(_, O) -> Said(), wxEvent:skip(O) end}]),
+    wxWindow:connect(Goal, key_down,
+		     [{callback,
+		       fun(#wx{event = #wxKey{keyCode = K}}, O)
+			     when K =:= ?WXK_UP; K =:= ?WXK_DOWN ->
+			       D = case K of ?WXK_UP -> 1; _ -> -1 end,
+			       {V, P} = csp_code:bump(wxTextCtrl:getValue(Goal),
+						      wxTextCtrl:getInsertionPoint(Goal),
+						      D),
+			       wxTextCtrl:setValue(Goal, V),
+			       wxTextCtrl:setInsertionPoint(Goal, P),
+			       Said(),
+			       _ = O;
+			  (_E, O) -> wxEvent:skip(O)
+		       end}]),
     wxSizer:add(Row, GoalF, [{flag, ?wxLEFT bor ?wxALIGN_CENTER_VERTICAL},
 			     {border, 12}]),
     [begin
@@ -321,17 +350,26 @@ ink(K, Hd)  -> candid_wx:mix(c(K, Hd), 35, {255, 255, 255}).
 
 %% The goal the marks add up to, or none.
 goal(H, Hd = #{goal := G, goal_frame := F}, none) ->
-    candid_wx:label(G, "goal: click a contact -- holds, does not, forget"),
+    wxTextCtrl:setValue(G, ""),
+    fit_goal(G, F),
     candid_wx:fg(H, G, {136, 136, 136}),
     candid_wx:bg(H, F, ?BG),
     wxWindow:refresh(F),
     _ = Hd,
     ok;
 goal(H, Hd = #{goal := G, goal_frame := F}, Text) ->
-    candid_wx:label(G, "goal: " ++ Text),
+    wxTextCtrl:setValue(G, Text),
+    fit_goal(G, F),
     candid_wx:fg(H, G, {238, 238, 238}),
     candid_wx:bg(H, F, c(want, Hd)),
     wxWindow:refresh(F),
+    wxWindow:layout(wxWindow:getParent(F)).
+
+%% The goal field as wide as its text, never under 320 pixels.
+fit_goal(G, F) ->
+    W = element(1, wxWindow:getTextExtent(G, wxTextCtrl:getValue(G) ++ "MM")),
+    wxWindow:setMinSize(G, {max(320, W + 16), -1}),
+    wxWindow:layout(F),
     wxWindow:layout(wxWindow:getParent(F)).
 
 %% varp's answer, and with a trace found its buttons, the line the walk
