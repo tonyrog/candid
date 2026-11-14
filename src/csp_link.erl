@@ -513,6 +513,14 @@ reply(_Io, Owner, [D = {state, Cycle, Ms, _, _}], St = #{decls := Ds})
 	_ -> ok
     end,
     St#{asked := none, cycle := Cycle};
+%% Not understood (a node of another make): said, and while reading the
+%% program it is given up rather than waited for.
+reply(_Io, Owner, [{unknown, Head}], St = #{want := W}) ->
+    Owner ! {csp_link, "node: a dump not understood: dump " ++ Head},
+    case W of
+	state -> St#{asked := none};
+	_     -> St#{want := none}
+    end;
 reply(_Io, _Owner, _, St) ->
     St.
 
