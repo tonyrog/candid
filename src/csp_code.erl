@@ -63,7 +63,7 @@
 -export([assign/1, bind/1, chain/2, cols/1, tr_id/2, col_name/1,
 	 signed/3]).                                     % for the renderers
 -export([goal_text/1, contact_of/3, state_name/2, sig_expr/2,
-	 look_values/1, look_text/1]).                   % tests
+	 look_values/1, look_text/1, show/1]).           % tests
 -export([split/1]).
 -export([rules/1, rules/2, tabs/1, tabs/2]).
 
@@ -992,6 +992,7 @@ values(Last, P) ->
 						     Own(K)])).
 
 show(unknown) -> "?";
+show(V) when is_float(V) -> float_to_list(V, [{decimals, 4}, compact]);
 show(V)       -> integer_to_list(V).
 
 classes({gate, 'end', _}, G, _Ctx, _Fired, _State) ->

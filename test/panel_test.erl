@@ -752,6 +752,13 @@ code_view_check() ->
 	   Ev("Odd", #{"Phase" => 2}) =:= 0, nomatch),
     expect("a signed variable reads sign-extended",
 	   Ev("S < 0", #{"S" => 16#FF}) =:= 1, Ev("S < 0", #{"S" => 16#FF})),
+    %% A float program's values are floats (pilot's Pid gains): shown, not
+    %% integer_to_list'd -- that took the whole panel down.
+    expect("a float shows as a number, an integer as one, unknown as ?",
+	   {csp_code:show(0.0), csp_code:show(0.3), csp_code:show(-1.25),
+	    csp_code:show(7), csp_code:show(unknown)} =:=
+	       {"0.0", "0.3", "-1.25", "7", "?"},
+	   {csp_code:show(0.0), csp_code:show(0.3)}),
     expect("false && unknown is false, true && unknown unknown",
 	   Ev("!Go && elapsed(T) > 5", #{"Go" => 1}) =:= 0 andalso
 	   Ev("Go && elapsed(T) > 5", #{"Go" => 1}) =:= unknown, nomatch),
@@ -2049,6 +2056,22 @@ save_check() ->
 	   element(1, K) =:= ok andalso
 	       lists:member({theme, light}, element(2, K)) andalso Alive,
 	   {K, Alive}),
+    %% The file dialogs open where the last one was left, next run too --
+    %% and not in a directory that has gone since.
+    Here = filename:join(os:getenv("TMPDIR", "/tmp"), "candid_dir_test"),
+    ok = filelib:ensure_dir(filename:join(Here, "x")),
+    os:putenv("CANDID_SETTINGS", Kept),
+    application:unset_env(candid, last_dir),
+    candid:remember_dir(filename:join(Here, "prog.csp")),
+    application:unset_env(candid, last_dir),          % as a new run would
+    Again = candid:open_dir(),
+    ok = file:write_file(Kept, "{dir, \"/nonexistent/gone\"}.\n"),
+    Gone = candid:open_dir(),
+    os:putenv("CANDID_SETTINGS", "/dev/null"),
+    application:unset_env(candid, last_dir),
+    file:delete(Kept),
+    expect("open: the dialog starts where the last file was, next run too",
+	   Again =:= Here andalso Gone =/= "/nonexistent/gone", {Again, Gone}),
     P2 ! stop,
     timer:sleep(300).
 

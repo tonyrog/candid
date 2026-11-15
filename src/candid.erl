@@ -29,6 +29,7 @@
 -export([plots/1, eng/2, period/0, keep/2, rows/1, rows/3]). % tests
 -export([looks/1, colour/3, warn_annotations/1]).    % tests, introspection
 -export([tab_event/2, tabs/1, target_text/0, node_file/1]).  % tests
+-export([open_dir/0, remember_dir/1]).                         % tests
 
 -include("candid.hrl").
 -include_lib("kernel/include/file.hrl").
@@ -1246,12 +1247,44 @@ keep_settings() ->
     P = settings_path(),
     try
 	ok = filelib:ensure_dir(P),
-	ok = file:write_file(P, [io_lib:format("{~s, ~s}.~n", [K, V])
-				 || {K, V} <- lists:sort(maps:to_list(views()))])
+	ok = file:write_file(P, [[io_lib:format("{~s, ~s}.~n", [K, V])
+				  || {K, V} <- lists:sort(maps:to_list(views()))],
+				 [io_lib:format("{dir, ~p}.~n", [D])
+				  || D <- [last_dir()], D =/= undefined]])
     catch _:Why ->
 	    io:format("panel: settings not kept in ~s: ~p~n", [P, Why])
     end,
     ok.
+
+%% Where the file dialogs open: where the last one was left, this run or the
+%% one before (settings.config's {dir, ...}), while it is still there; else
+%% the work directory.
+open_dir() ->
+    case last_dir() of
+	D when is_list(D) -> case filelib:is_dir(D) of
+				 true -> D;
+				 false -> work_dir()
+			     end;
+	_ -> work_dir()
+    end.
+
+last_dir() ->
+    case application:get_env(candid, last_dir) of
+	{ok, D} -> D;
+	undefined ->
+	    case proplists:get_value(dir, settings()) of
+		D when is_list(D) -> D;
+		_ -> undefined
+	    end
+    end.
+
+%% A file picked or saved: its directory is where the next dialog opens.
+remember_dir(File) ->
+    D = filename:dirname(filename:absname(File)),
+    case application:get_env(candid, last_dir) of
+	{ok, D} -> ok;
+	_ -> application:set_env(candid, last_dir, D), keep_settings()
+    end.
 
 %% candid.config's {candid, [...]}. The application is only loaded to make
 %% the environment reachable: -config keeps nothing for one nobody loaded.
@@ -1425,8 +1458,10 @@ wait_for_pick(U, Where, File, W) ->
 			    run => maps:get(event, maps:get(run, W))}, Msg) of
 		{pick, File1} -> Drop(), render(U, Where, pick(File1), Side);
 		{bar, "open"} ->
-		    case ui(U, open_file, [work_dir()]) of
-			{ok, File1} -> Drop(), render(U, Where, pick(File1), Side);
+		    case ui(U, open_file, [open_dir()]) of
+			{ok, File1} ->
+			    remember_dir(File1),
+			    Drop(), render(U, Where, pick(File1), Side);
 			_ -> Again(W)
 		    end;
 		{bar, "new"} -> Drop(), render(U, Where, new, Side);
@@ -1645,8 +1680,8 @@ save_ui(U, S = #{ws := Ws}, How) ->
 
 save_path(_U, _S, #{name := P}, save) when P =/= none -> P;
 save_path(U, S, F, How) when How =:= save; How =:= ask ->
-    case ui(U, save_file, [maps:get(run, S), work_dir(), save_name(F)]) of
-	{ok, P} -> P;
+    case ui(U, save_file, [maps:get(run, S), open_dir(), save_name(F)]) of
+	{ok, P} -> remember_dir(P), P;
 	_ -> cancel
     end;
 save_path(_U, _S, _F, {as, Name0}) ->
@@ -1687,8 +1722,8 @@ act_ui(U, Link, S, {pick, File}) ->
     render(U, maps:get(where, S), pick(File), side(S));
 %% open...: the renderer's own file dialog, where it has one.
 act_ui(U, Link, S, {bar, "open"}) ->
-    case ui(U, open_file, [work_dir()]) of
-	{ok, File} -> act_ui(U, Link, S, {pick, File});
+    case ui(U, open_file, [open_dir()]) of
+	{ok, File} -> remember_dir(File), act_ui(U, Link, S, {pick, File});
 	_ -> loop(U, Link, S)
     end;
 act_ui(U, Link, S, {bar, "new"}) ->
