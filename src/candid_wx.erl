@@ -85,7 +85,14 @@ start(File) ->
 		      default -> candid:run_ui({?MODULE, H}, F);
 		      _       -> candid:run_ui({?MODULE, H}, F, File)
 		  end,
-		  wx:destroy()
+		  wx:destroy(),
+		  %% The window WAS the program when there is no shell (the
+		  %% AppImage, `erl -noshell -s candid_wx'): closing it ends the
+		  %% node. With a shell the node is yours, and stays.
+		  case init:get_argument(noshell) of
+		      {ok, _} -> init:stop();
+		      error -> ok
+		  end
 	  end).
 
 %% Who draws the code view, the chat and the log here.
@@ -331,8 +338,15 @@ panel(H, Root, #{rows := Rows, pixels := Pixels, plots := Plots0,
     Right = scrolled(Root),
     wxWindow:setMinSize(Left, {420, -1}),
     wxSizer:add(Main, Left, [{flag, ?wxEXPAND}]),
-    wxSizer:add(Main, Right, [{proportion, 1}, {flag, ?wxEXPAND bor ?wxLEFT},
-			      {border, 24}]),
+    %% The code view's head -- its tabs, its zoom -- over it, not scrolled.
+    RCol = wxBoxSizer:new(?wxVERTICAL),
+    Head = wxPanel:new(Root),
+    wxWindow:setSizer(Head, wxBoxSizer:new(?wxHORIZONTAL)),
+    wxWindow:hide(Head),
+    wxSizer:add(RCol, Head, [{flag, ?wxBOTTOM}, {border, 6}]),
+    wxSizer:add(RCol, Right, [{proportion, 1}, {flag, ?wxEXPAND}]),
+    wxSizer:add(Main, RCol, [{proportion, 1}, {flag, ?wxEXPAND bor ?wxLEFT},
+			     {border, 24}]),
     wxSizer:add(RS, Main, [{proportion, 1}, {flag, ?wxEXPAND}]),
     TraceBox = wxScrolledWindow:new(Root),
     wxScrolledWindow:setScrollRate(TraceBox, 5, 5),
@@ -340,6 +354,11 @@ panel(H, Root, #{rows := Rows, pixels := Pixels, plots := Plots0,
     wxWindow:setMinSize(TraceBox, {-1, 260}),
     wxSizer:add(RS, TraceBox, [{flag, ?wxEXPAND bor ?wxTOP}, {border, 8}]),
     wxWindow:hide(TraceBox),
+    %% One width for every label down the left, the widest one's: at a fixed
+    %% 110 px `nosstall_inne1' and `nosstall_inne2' both read nosstall_inne.
+    register(H, label_w,
+	     lists:max([?LABEL_W | [text_w(Left, L, font(H)) + 10
+				    || L <- labels(Rows, Pixels, Plots0)]])),
     RowNodes = lists:append([row_nodes(H, Left, R) || R <- Rows]),
     PixNodes = strip(H, Left, Pixels),
     {Plots, PlotNodes} = plot_panels(H, Left, Plots0),
@@ -352,7 +371,7 @@ panel(H, Root, #{rows := Rows, pixels := Pixels, plots := Plots0,
     #{nodes => maps:from_list(RowNodes ++ PixNodes ++ PlotNodes),
       plots => Plots, trace => Trace, trace_box => TraceBox,
       state_box => StateBox, clock_box => Clock, link_box => LinkBox,
-      code => #{code => Right, status => {Top, Status}, top => {Top, TopS}}}.
+      code => #{code => Right, head => Head, status => {Top, Status}, top => {Top, TopS}}}.
 
 scrolled(Parent) ->
     W = wxScrolledWindow:new(Parent),
@@ -520,7 +539,7 @@ row(H, Left, {Kind, Name, _W}, Look) ->
     LS = wxWindow:getSizer(Left),
     Row = wxBoxSizer:new(?wxHORIZONTAL),
     {Frame, Label} = frame_box(Left, maps:get(label, Look)),
-    wxWindow:setMinSize(Frame, {?LABEL_W, -1}),
+    wxWindow:setMinSize(Frame, {label_w(H), -1}),
     wxWindow:setFont(Label, font(H)),
     fg(H, Label, {204, 204, 204}),
     click(Label, {code, "sig=" ++ Name}, self()),
@@ -544,6 +563,27 @@ row_nodes(H, Left, {keypad, Pad}) -> keypad(H, Left, Pad);
 row_nodes(H, Left, {group, G}) -> group(H, Left, G);
 row_nodes(H, Left, {W = {_, Name, _}, Look}) -> [{Name, row(H, Left, W, Look)}].
 
+label_w(H) ->
+    case lookup(H, label_w) of
+	{ok, W} -> W;
+	error -> ?LABEL_W
+    end.
+
+text_w(Win, Text, Font) ->
+    {W, _, _, _} = wxWindow:getTextExtent(Win, Text, [{theFont, Font}]),
+    W.
+
+%% Every label the left column will show.
+labels(Rows, Pixels, Plots) ->
+    lists:append([row_labels(R) || R <- Rows]) ++
+	["port 9" || Pixels =/= []] ++
+	[maps:get(id, G) || G <- Plots].
+
+row_labels({keypad, #{label := L}}) -> [L];
+row_labels({group, #{label := L, rows := Rs}}) ->
+    [L | [maps:get(label, Look) || {_, Look} <- Rs]];
+row_labels({_W, Look}) -> [maps:get(label, Look)].
+
 %% A group with no kind of its own: its name, and under it the members'
 %% rows as they would be anyway.
 group(H, Left, #{label := Label, rows := Rows}) ->
@@ -557,7 +597,7 @@ group(H, Left, #{label := Label, rows := Rows}) ->
 keypad(H, Left, #{label := Label, cols := Cols, keys := Keys}) ->
     Row = wxBoxSizer:new(?wxHORIZONTAL),
     L = text(H, Left, Label, {204, 204, 204}),
-    wxWindow:setMinSize(L, {?LABEL_W, -1}),
+    wxWindow:setMinSize(L, {label_w(H), -1}),
     wxSizer:add(Row, L, []),
     Grid = wxGridSizer:new(0, Cols, 4, 4),
     Nodes = [begin
@@ -702,7 +742,7 @@ strip(_H, _Left, []) -> [];
 strip(H, Left, Pixels) ->
     Row = wxBoxSizer:new(?wxHORIZONTAL),
     L = text(H, Left, "port 9", {204, 204, 204}),
-    wxWindow:setMinSize(L, {?LABEL_W, -1}),
+    wxWindow:setMinSize(L, {label_w(H), -1}),
     wxSizer:add(Row, L, [{flag, ?wxALIGN_CENTER_VERTICAL}]),
     Nodes = [begin
 		 C = wxPanel:new(Left, [{size, {?PIXEL, ?PIXEL}}]),
@@ -724,7 +764,7 @@ plot_panels(H, Left, Groups) ->
 plot_panel(H, Left, G = #{id := Id, x := X, ys := Ys}) ->
     Row = wxBoxSizer:new(?wxHORIZONTAL),
     L = text(H, Left, Id, {204, 204, 204}),
-    wxWindow:setMinSize(L, {?LABEL_W, -1}),
+    wxWindow:setMinSize(L, {label_w(H), -1}),
     wxSizer:add(Row, L, []),
     C = {P, _} = canvas(Left, ?PLOT_W, ?PLOT_W, ?PLOT_BG),
     wxSizer:add(Row, P, []),
@@ -990,18 +1030,29 @@ menu_btn(H, Parent, Labels, Ix0, Pick) ->
 		      || I <- lists:seq(1, length(Labels))]),
     btn_set(H, W, #{min_w => MinW}),
     btn_label(H, W, Mark(Ix0 + 1)),
+    %% NOT IN THE CALLBACK. popupMenu is modal: it runs a loop of its own
+    %% until a choice is made, and a callback holds the wx thread until it
+    %% returns -- so the menu's loop, and the callback for the choice, waited
+    %% on the callback that opened it. The window froze and the window manager
+    %% said it was not answering (the tick menu, 2026-11-16). A process of its
+    %% own, with the wx environment, opens it; the callback returns at once.
+    Env = maps:get(env, H),
     Show = fun(_, _) ->
-		   M = wxMenu:new(),
-		   [wxMenu:append(M, I, L)
-		    || {I, L} <- lists:zip(lists:seq(1, length(Labels)), Labels)],
-		   wxMenu:connect(M, command_menu_selected,
-				  [{callback, fun(#wx{id = I}, _) ->
-						      btn_label(H, W, Mark(I)),
-						      Pick(I)
-					      end}]),
-		   {_, Bh} = wxWindow:getSize(W),
-		   wxWindow:popupMenu(W, M, [{pos, {0, Bh}}]),
-		   wxMenu:destroy(M)
+		   spawn(fun() ->
+				 wx:set_env(Env),
+				 M = wxMenu:new(),
+				 [wxMenu:append(M, I, L)
+				  || {I, L} <- lists:zip(lists:seq(1, length(Labels)),
+							 Labels)],
+				 wxMenu:connect(M, command_menu_selected,
+						[{callback, fun(#wx{id = I}, _) ->
+								    btn_label(H, W, Mark(I)),
+								    Pick(I)
+							    end}]),
+				 {_, Bh} = wxWindow:getSize(W),
+				 wxWindow:popupMenu(W, M, [{pos, {0, Bh}}]),
+				 wxMenu:destroy(M)
+			 end)
 	   end,
     wxWindow:connect(W, left_down, [{callback, Show}]),
     W.

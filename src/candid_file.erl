@@ -74,7 +74,9 @@ from_node(Device, Text, Dumps) ->
     {Ls, Offs0} = marks(lines(Text)),
     Offs = lists:usort(Offs0 ++ listed_off(Ls)),
     F = (new())#{origin => {node, Device}, mode => patch, lines => Ls,
-		 image => image_of(Dumps)},
+		 image => image_of(Dumps),
+		 %% what /dump info said of the node (csp_node:info/1), if it did
+		 node => proplists:get_value(info, Dumps, none)},
     case mark_off(F, Offs) of
 	{ok, F1} -> F1;
 	_ -> F
@@ -245,7 +247,7 @@ same_image(#{image := I}, Dumps) -> image_of(Dumps) =:= I.
 image_of(Dumps) ->
     case [B || {rom, B} <- Dumps] of
 	[Rom | _] ->
-	    #{rom => image_id(Rom), float => float_format(Rom),
+	    #{rom => image_id(Rom), float => float_format(Dumps),
 	      patch => case [B || {K, B} <- Dumps, K =:= patch orelse
 				      K =:= eeprom] of
 			   [P | _] -> erlang:crc32(P);
@@ -257,8 +259,14 @@ image_of(Dumps) ->
 %% The header's flags byte, at the same offset in either byte order
 %% (csp_disasm's ctx/1): bit 0 is CSP_IMG_F_FLOAT, IEEE binary32; clear,
 %% Q16.16.
-float_format(<<_:7/binary, Flags, _/binary>>) when Flags band 1 =:= 1 -> ieee;
-float_format(_) -> fixpoint.
+%% How the node's floats read. An image's float constants are IEEE whatever
+%% the node (ROM format 23), so the image cannot say: the node does, in
+%% /dump info; a node from before it is taken as Q16.16.
+float_format(Dumps) ->
+    case proplists:get_value(info, Dumps) of
+	#{float := F} -> F;
+	_ -> fixpoint
+    end.
 
 %% An image's name: the CRC of its header, as it is stored, so either byte
 %% order compares to itself.

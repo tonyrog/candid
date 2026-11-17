@@ -63,7 +63,7 @@
 -export([assign/1, bind/1, chain/2, cols/1, tr_id/2, col_name/1,
 	 signed/3]).                                     % for the renderers
 -export([goal_text/1, contact_of/3, state_name/2, sig_expr/2,
-	 look_values/1, look_text/1, show/1]).           % tests
+	 look_values/1, look_text/1, show/1, watch_text/3, items/1, seen/2]).  % tests
 -export([split/1]).
 -export([rules/1, rules/2, tabs/1, tabs/2]).
 
@@ -204,8 +204,9 @@ walk([{timer, Ln, {'WORD', _, N}, P, _} | T],
 	false -> walk(T, C)
     end;
 walk([{object, Ln, {'WORD', _, M}, {'WORD', _, O}, Bs} | T],
-     C = #{file := F, mod := Mo, ins := Ins}) ->
-    [{Mo, R} || R <- object(Ln, F, O, maps:get(M, Ins, []), Bs)] ++ walk(T, C);
+     C = #{file := F, mod := Mo, ins := Ins, gs := Gs}) ->
+    [{Mo, {obj, O, M, Bs, Gs}} | [{Mo, R} || R <- object(Ln, F, O, maps:get(M, Ins, []), Bs)]]
+	++ walk(T, C);
 walk([_ | T], C) -> walk(T, C);
 walk([], _C) -> [].
 
@@ -298,7 +299,7 @@ new(C, Where, {Ast, File}, Cfg, Opts) ->
 	  prog => candyspeak_eval:prog(Ast, File, [{float, Float}]),
 	  mode => hide, shown => #{}, fired => [], glow => #{}, last => #{},
 	  off => maps:get(off, Opts, []), typed => none,
-	  marks => #{}, sigs_seen => [], k => ?K,
+	  marks => #{}, sigs_seen => [], k => ?K, watch => none, open => [],
 	  states => state_names(hd(Tabs)), trace => none, at => none,
 	  bad => #{}, acts => [], look => none, tshow => false},
     goal(V),
@@ -325,6 +326,16 @@ control(V = #{mode := Mode}, "tab=" ++ I) ->
 	hide -> V1;
 	_    -> render(V1)
     end;
+%% An object's line in the flow: its rules shown in place, or not again.
+control(V = #{open := Open}, "obj=" ++ O) ->
+    V1 = V#{open := case lists:member(O, Open) of
+			true  -> Open -- [O];
+			false -> [O | Open]
+		    end},
+    case maps:get(mode, V1) of
+	hide -> V1;
+	_    -> render(V1)
+    end;
 %% A rule's box: switched off or on again. The panel sends the #disable or
 %% #enable and says what is off then (disabled/2); the box changes now.
 control(V = #{off := Off, acts := As}, "dis=" ++ No) ->
@@ -344,7 +355,7 @@ control(V = #{marks := Ms, tab := I}, "ct=" ++ Id) ->
 	      {ok, {true, X}}  -> Ms#{Key => {false, X}};
 	      {ok, {false, _}} -> maps:remove(Key, Ms)
 	  end,
-    V1 = V#{marks := Ms1, typed := none},
+    V1 = V#{marks := Ms1, typed := none, watch := contact_of(V, I, Id)},
     goal(V1),
     paint(V1);
 %% A signal: on / off for one bit, == / != its value now for more.
@@ -356,7 +367,8 @@ control(V = #{marks := Ms, sigs_seen := Seen}, "sig=" ++ N) ->
 	      {ok, {false, _}} -> maps:remove(Key, Ms)
 	  end,
     V1 = V#{marks := Ms1, typed := none,
-	    sigs_seen := lists:usort([N | Seen])},
+	    sigs_seen := lists:usort([N | Seen]),
+	    watch := {field, 0, {'WORD', 0, N}}},
     goal(V1),
     paint(V1);
 %% From the start of the trace: csp back to its initial values, paused, and
@@ -496,7 +508,12 @@ model(V, {check, M, {found, _, _}}) ->
     logged(V, "the model runs." ++ free_text(M));
 model(V, {check, _M, {none, _}}) ->
     said(V, "bad", no_transitions());
-model(V0, {solve, Goal, _K, M, {found, At, Rows}}) ->
+%% The goal is what a cycle SEES. varp's step At is the state after cycle
+%% At, and the rules read it in cycle At + 1: `State == Home' is reached in
+%% the cycle that runs in Home, not in the one that sets it. That cycle is
+%% one step more, nothing known in it but what it reads.
+model(V0, {solve, Goal, _K, M, {found, At0, Rows0}}) ->
+    {At, Rows} = seen(At0, Rows0),
     Line = lists:flatten(io_lib:format("reached at step ~w: ~s", [At, Goal])),
     answer(V0, "ok", Line, {Rows, M, maps:get(states, V0)}),
     V = logged(V0, Line ++ frames(Rows, M)),
@@ -534,6 +551,8 @@ said(V, Cls, Text0) ->
 
 logged(V = #{acts := As}, Text) ->
     V#{acts := As ++ [{log, lists:flatten(["varp: ", Text])}]}.
+
+seen(At, Rows) -> {At + 1, Rows ++ [[{C, '-'} || {C, _} <- lists:last(Rows)]]}.
 
 %% The walk shows a cycle, step L to L+1: a trace reached at step 0 -- the
 %% goal holds at once, over the inputs alone -- has none.
@@ -766,9 +785,12 @@ col_name(C) -> C.
 %%% ------------------------------------------------------------ the marks
 
 %% The contact k<N>_<J> of tab I, with an object's own names made whole.
-contact_of(#{tabs := Tabs}, I, Id) ->
+contact_of(#{tabs := Tabs}, I, Id0) ->
+    {Tab, Id} = case string:split(Id0, "/") of
+		    [O, Own] -> {tab_of(Tabs, O), Own};
+		    [_]      -> {lists:nth(I + 1, Tabs), Id0}
+		end,
     ["k" ++ No, J] = string:split(Id, "_"),
-    Tab = lists:nth(I + 1, Tabs),
     [Gd] = [G || #{no := N, guard := G} <- maps:get(rules, Tab),
 		 integer_to_list(N) =:= No],
     qualify(lists:nth(list_to_integer(J) + 1, contacts(Gd)), Tab).
@@ -836,7 +858,7 @@ state_names(#{env := #{states := Ss}}) ->
 %% The tab's rungs laid out afresh (csp_ladder), and every class sent again.
 render(V = #{mode := Mode, tab := I, tabs := Tabs, metrics := Ms}) ->
     Tab = lists:nth(I + 1, Tabs),
-    L = csp_ladder:layout(maps:get(rules, Tab), Mode, Ms),
+    L = csp_ladder:layout(items(V), Mode, Ms),
     vui(V, rungs, [Mode, I, Tab, csp_ladder:size(L)]),
     paint(V#{shown := #{}, ladder := L, redraw := true}).
 
@@ -917,8 +939,7 @@ paint1(V = #{tabs := Tabs, tab := I, last := Live, fired := Now0,
 					  Ms - T < ?GLOW]};
 	    _    -> {look_values(V), look}
 	end,
-    #{rules := Rules, env := Env, prefix := P, vars := Vars} =
-	lists:nth(I + 1, Tabs),
+    #{env := Env, prefix := P, vars := Vars} = lists:nth(I + 1, Tabs),
     Last = values(Last0, P),
     Obj = case P of none -> ""; _ -> P end,
     Fired = case Fired0 of
@@ -928,18 +949,40 @@ paint1(V = #{tabs := Tabs, tab := I, last := Live, fired := Now0,
     State = maps:get("State", Last, 0),
     Mine = maps:from_list([{Id, W} || {{J, Id}, {W, _}} <- maps:to_list(Marks),
 				      J =:= I]),
+    %% An object shown in the flow is judged over its own values, its own
+    %% marks and what fired for it.
+    Ctx = fun(none) -> {{Env, Last, Mine, Off}, Fired, State};
+	     (O) ->
+		  #{env := OEnv} = tab_of(Tabs, O),
+		  OLast = values(Last0, O),
+		  Pre = O ++ "/",
+		  OMine = maps:from_list([{lists:nthtail(length(Pre), Id), W}
+					  || {Id, W} <- maps:to_list(Mine),
+					     lists:prefix(Pre, Id)]),
+		  OFired = case Fired0 of
+			       look -> look;
+			       _ -> [{filename:basename(Fl), L}
+				     || {O1, Fl, L} <- Fired0, O1 =:= O]
+			   end,
+		  {{OEnv, OLast, OMine, Off}, OFired, maps:get("State", OLast, 0)}
+	  end,
     {Cls, _} = case Mode of
 		   hide -> {[], 0};
-		   _ -> lists:mapfoldl(
-			  fun(R, G) ->
-				  classes(R, G, {Env, Last, Mine, Off}, Fired, State)
-			  end, 0, Rules)
+		   _ -> lists:mapfoldl(fun(R, G) -> item_classes(R, G, Ctx) end,
+				       0, items(V))
 	       end,
     #{env := MEnv, vars := MVars} = hd(Tabs),
     Val = fun(N, E, Vs) ->
 		  show(candyspeak_eval:eval({field, 0, {'WORD', 0, N}}, Vs, E))
 	  end,
-    Txt = [{"csp_st", "State " ++ state_name(V, maps:get("State", Last0, 0))}] ++
+    %% What was clicked last -- a name, or a contact's condition -- and what
+    %% it is now: names as the main tab has them, `us.x' for an object's.
+    Watch = case maps:get(watch, V, none) of
+		none -> [];
+		X -> [{"watch", watch_text(X, Last0, MEnv)}]
+	    end,
+    Txt = Watch ++
+	[{"csp_st", "State " ++ state_name(V, maps:get("State", Last0, 0))}] ++
 	[{"m_" ++ N, Val(N, MEnv, Last0)} || {_, N} <- MVars] ++
 	[{"v_" ++ N, Val(N, Env, Last)} || P =/= none, Mode =/= hide,
 					   {_, N} <- Vars],
@@ -991,9 +1034,71 @@ values(Last, P) ->
     maps:merge(Last, maps:from_list([{Cut(K), V} || {K, V} <- maps:to_list(Last),
 						     Own(K)])).
 
+%% `Name = 7', `A > 3 = 1': what was clicked, and what it is in these values.
+watch_text(X, Vals, Env) ->
+    candyspeak_eval:text(X) ++ " = " ++
+	try show(candyspeak_eval:eval(X, Vals, Env))
+	catch _:_ -> "?"
+	end.
+
 show(unknown) -> "?";
 show(V) when is_float(V) -> float_to_list(V, [{decimals, 4}, compact]);
 show(V)       -> integer_to_list(V).
+
+%% Tab I's rules, an object's line among them as {obj, O, M, Bs, Open, Gs}
+%% (Open: none when O has no tab of its own; Gs the blocks the line is in),
+%% and an open one's rules after it as {in, O, Depth, Item, Outer}: Outer the
+%% blocks round each object line it is in, [{Whose, Gs}], none the tab's
+%% own. An object in itself is not opened again.
+items(#{tabs := Tabs, tab := I, open := Open}) ->
+    items(maps:get(rules, lists:nth(I + 1, Tabs)), Tabs, Open, [], 1, none, []).
+
+items(Rules, Tabs, Open, Seen, D, Whose, Outer) ->
+    lists:append([item(R, Tabs, Open, Seen, D, Whose, Outer) || R <- Rules]).
+
+item({obj, O, M, Bs, Gs}, Tabs, Open, Seen, D, Whose, Outer) ->
+    case [T || T = #{prefix := P} <- Tabs, P =:= O] of
+	[#{rules := Rs}] ->
+	    case lists:member(O, Open) andalso not lists:member(O, Seen) of
+		true ->
+		    Outer1 = Outer ++ [{Whose, Gs}],
+		    [{obj, O, M, Bs, true, Gs} |
+		     [case X of
+			  {in, _, _, _, _} -> X;
+			  _ -> {in, O, D, X, Outer1}
+		      end || X <- items(Rs, Tabs, Open, [O | Seen], D + 1, O, Outer1)]];
+		false -> [{obj, O, M, Bs, false, Gs}]
+	    end;
+	_ -> [{obj, O, M, Bs, none, Gs}]
+    end;
+item(R, _Tabs, _Open, _Seen, _D, _Whose, _Outer) -> [R].
+
+tab_of(Tabs, O) ->
+    hd([T || T = #{prefix := P} <- Tabs, P =:= O]).
+
+%% The classes of an item, those of an opened object's named `O/Id'. What
+%% is in an object whose line is in a block not in force is not either.
+item_classes({obj, O, _, _, _, Gs}, G, Ctx) ->
+    {[{"ob_" ++ O, row_class(blocks_on(Gs, Ctx(none)))}], G};
+item_classes({in, O, _D, X, Outer}, G, Ctx) ->
+    On = lists:all(fun({W, Gs}) -> blocks_on(Gs, Ctx(W)) end, Outer),
+    {Cs, G1} = item_classes(X, G, fun(_) -> Ctx(O) end),
+    {[{O ++ "/" ++ Id, outer(Id, C, On)} || {Id, C} <- Cs], G1};
+item_classes(R, G, Ctx) ->
+    {C, Fired, State} = Ctx(none),
+    classes(R, G, C, Fired, State).
+
+blocks_on(Gs, {{Env, Last, _, _}, _, State}) ->
+    lists:all(fun(Gt) -> gate_on(Gt, Env, Last, State) end, Gs).
+
+row_class(true)  -> "rw";
+row_class(false) -> "rw off".
+
+outer(_Id, C, true) -> C;
+outer("r" ++ _, C, false) -> C ++ " off";
+outer("ob_" ++ _, C, false) -> C ++ " off";
+outer("g" ++ _, _C, false) -> "hd";
+outer(_Id, C, false) -> C.
 
 classes({gate, 'end', _}, G, _Ctx, _Fired, _State) ->
     {[], G};

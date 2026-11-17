@@ -677,6 +677,15 @@ varp_prop_check() ->
     expect("assume and reach are their own items",
 	   Has(T, "assume    (Go) != 0;") andalso
 	   Has(T, "reach     ((Green) != 0) and ((Phase) == (0));"), T),
+    %% A goal on the program's State: its variable is St, its names defined.
+    Sf = "/tmp/csp_varp_state.csp",
+    ok = file:write_file(Sf, "#states RUN STOP\n#digital Go in 1\n"
+			 "#in NORMAL\nState = RUN ? Go\n#end\n"),
+    {ok, #{text := St0}} = candyspeak_varp:model(Sf, [{reach, "State == RUN"},
+						     {params, fixed}]),
+    St = lists:flatten(St0),
+    expect("a goal on State reads St",
+	   Has(St, "reach     (St) == (RUN);") andalso Has(St, "define RUN 3;"), St),
     case os:find_executable("varp") of
 	false -> io:format("skip  varp run (no varp on PATH)~n");
 	Varp ->
@@ -759,6 +768,15 @@ code_view_check() ->
 	    csp_code:show(7), csp_code:show(unknown)} =:=
 	       {"0.0", "0.3", "-1.25", "7", "?"},
 	   {csp_code:show(0.0), csp_code:show(0.3)}),
+    {ok, [{define, _, _, Cond}]} =
+	candyspeak_parse:parse(element(2, candyspeak_scan:string(
+					    "#define P_ Phase == 2\n"))),
+    Watched = {csp_code:watch_text({field, 0, {'WORD', 0, "Phase"}},
+				   #{"Phase" => 2}, E),
+	       csp_code:watch_text(Cond, #{"Phase" => 2}, E),
+	       csp_code:watch_text({field, 0, {'WORD', 0, "Nope"}}, #{}, E)},
+    expect("a click shows what it is now: a name, a contact's condition",
+	   Watched =:= {"Phase = 2", "Phase == 2 = 1", "Nope = ?"}, Watched),
     expect("false && unknown is false, true && unknown unknown",
 	   Ev("!Go && elapsed(T) > 5", #{"Go" => 1}) =:= 0 andalso
 	   Ev("Go && elapsed(T) > 5", #{"Go" => 1}) =:= unknown, nomatch),
@@ -816,6 +834,24 @@ code_view_check() ->
 	  end,
     Mx = csp_code:contact_of(Vm, 1, "k1_0"),
     Mg = csp_code:contact_of(Vm, 1, "k1_1"),
+    %% An object's line in main's flow; opened, its rules follow in place,
+    %% their ids its own, a contact named as in its tab.
+    Vo = Vm#{tab => 0, open => []},
+    Shut = csp_code:items(Vo),
+    Opened = csp_code:items(Vo#{open => ["m0"]}),
+    Lo = csp_ladder:layout(Opened, ladder, #{cw => 8, ch => 16}),
+    [{Ox, Oy}] = [{X, Y} || {txt, "ob_m0", _, X, Y, _, _}
+			      <- tuple_to_list(maps:get(pieces, Lo))],
+    [{Kx, Ky}] = [{X + W div 2, Y + H div 2}
+		  || {box, "m0/k1_0", _, X, Y, W, H, _, _, _}
+			 <- tuple_to_list(maps:get(pieces, Lo))],
+    expect("an object's line opens in place, its contacts its own",
+	   [O || {obj, O, "M", _, false, []} <- Shut] =:= ["m0"] andalso
+	       [N || {in, "m0", 1, #{no := N}, [{none, []}]} <- Opened] =:= [1]
+	       andalso csp_ladder:hit(Lo, Ox + 4, Oy + 4) =:= "obj=m0"
+	       andalso csp_ladder:hit(Lo, Kx, Ky) =:= "ct=m0/k1_0"
+	       andalso csp_code:contact_of(Vm, 0, "m0/k1_0") =:= Mx,
+	   {Shut, Opened}),
     %% main's rule is 4: the module's is 1, m0's line two (X=Go and its State)
     Mn = csp_code:contact_of(Vm, 0, "k4_0"),
     Goal = csp_code:goal_text(#{{1, "k1_0"} => {true, Mx},
@@ -1022,6 +1058,13 @@ timer_check(Sh) ->
 	       [{log, "varp: never: X == 9" ++ _}] -> true;
 	       _ -> false
 	   end, maps:get(acts, Vn)),
+    %% The goal is what a cycle sees: X == 2 is set in cycle 2 and read in
+    %% cycle 3, a step nothing is known in but what it reads.
+    {At3, Rows3} = csp_code:seen(2, element(3, R2)),
+    expect("a goal is reached in the cycle that reads it",
+	   At3 =:= 3 andalso length(Rows3) =:= 4 andalso
+	       lists:all(fun({_, X}) -> X =:= '-' end, lists:last(Rows3)),
+	   {At3, lists:last(Rows3)}),
     RE = Ask("E", 4),
     expect("timer: elapsed() is read, not guessed",
 	   element(1, RE) =:= found andalso element(2, RE) =:= 1, RE).
@@ -1398,10 +1441,18 @@ node_checks() ->
     flush(),
     {ok, T} = csp_link:target("localhost:" ++ integer_to_list(Port)),
     {ok, L} = csp_link:open(T, csp_exe(), []), track(L),
-    Said = link_said(nomatch),
+    Said = link_said(""),
     expect("a node's program is read from its dumps",
 	   string:find(Said, "declarations") =/= nomatch, Said),
-    Listed = receive {csp_program, Text, _} -> Text after 3000 -> "" end,
+    {Listed, NodeDs} = receive {csp_program, Text, Ds0} -> {Text, Ds0}
+		       after 3000 -> {"", []}
+		       end,
+    Info = proplists:get_value(info, NodeDs, none),
+    expect("the node says what it is first: its format, room and slots",
+	   is_map(Info) andalso maps:get(rom, Info) =:= 23 andalso
+	   maps:get(float, Info) =:= fixpoint andalso
+	   maps:get(total, maps:get(ram, Info)) > 0 andalso
+	   string:find(Said, "Q16.16 little-endian") =/= nomatch, {Info, Said}),
     expect("and comes back as source, listed off its image",
 	   string:find(Listed, "#Cnt a") =/= nomatch andalso
 	   string:find(Listed, "K=K+1 ? timeout(T)") =/= nomatch, Listed),
@@ -1659,7 +1710,7 @@ uart_checks1() ->
     expect("csp --uart=pty names the far end", Far =/= none, Far),
     {ok, T} = csp_link:target(Far),
     {ok, L} = csp_link:open(T, csp_exe(), []), track(L),
-    Said = link_said(nomatch),
+    Said = link_said(""),
     expect("a node on a serial line: its program is read",
 	   string:find(Said, "+ the patch running") =/= nomatch, Said),
     csp_link:pause(L),
@@ -1675,13 +1726,16 @@ uart_checks1() ->
     port_command(Node, "/quit\n"),
     receive {Node, {exit_status, _}} -> ok after 2000 -> ok end.
 
+%% What the link said, up to what it says of the program; the lines before
+%% it -- reading, what the node is -- go with it.
 link_said(Last) ->
     receive
 	{csp_link, Text} ->
 	    T = lists:flatten(Text),
-	    case string:find(T, "reading") of
-		nomatch -> T;
-		_ -> link_said(T)
+	    case string:find(T, "declarations") =/= nomatch orelse
+		string:find(T, "not") =/= nomatch of
+		true -> lists:flatten([Last, "\n", T]);
+		false -> link_said(lists:flatten([Last, "\n", T]))
 	    end
     after 3000 -> Last
     end.
@@ -1930,11 +1984,13 @@ file_check() ->
 	   candid_file:rules(Lst) =:= {ok, [{1, 2, "Led = 1 ? B  // 1 F", false},
 					    {2, 3, "Led = 0 ? !B  // 2 E!", true}]},
 	   candid_file:rules(Lst)),
-    Ieee = <<"JAM\n", 0, 0, 0, 1, 0:(46 * 8), 16#abcd:16, "rest">>,
-    expect("file: a node's floats read as its image's flags say",
+    Esp = <<"JAM\n", 0:(52 * 8), 16#abcd:16, "rest">>,
+    expect("file: a node's floats read as the node says (/dump info): an "
+	   "image's are IEEE on every node",
 	   {maps:get(float, maps:get(image, L)),
 	    maps:get(float, maps:get(image, candid_file:from_node(
-					     "esp", Prog, [{rom, Ieee}])))}
+					     "esp", Prog, [{rom, Esp},
+							   {info, #{float => ieee}}])))}
 	   =:= {fixpoint, ieee},
 	   maps:get(image, L)),
     Tmp = filename:join(os:getenv("TMPDIR", "/tmp"), "candid_file_test.csp"),
@@ -2061,14 +2117,14 @@ save_check() ->
     Here = filename:join(os:getenv("TMPDIR", "/tmp"), "candid_dir_test"),
     ok = filelib:ensure_dir(filename:join(Here, "x")),
     os:putenv("CANDID_SETTINGS", Kept),
-    application:unset_env(candid, last_dir),
+    application:unset_env(candid, {pref, dir}),
     candid:remember_dir(filename:join(Here, "prog.csp")),
-    application:unset_env(candid, last_dir),          % as a new run would
+    application:unset_env(candid, {pref, dir}),          % as a new run would
     Again = candid:open_dir(),
     ok = file:write_file(Kept, "{dir, \"/nonexistent/gone\"}.\n"),
     Gone = candid:open_dir(),
     os:putenv("CANDID_SETTINGS", "/dev/null"),
-    application:unset_env(candid, last_dir),
+    application:unset_env(candid, {pref, dir}),
     file:delete(Kept),
     expect("open: the dialog starts where the last file was, next run too",
 	   Again =:= Here andalso Gone =/= "/nonexistent/gone", {Again, Gone}),

@@ -11,38 +11,56 @@
 
 -include_lib("wx/include/wx.hrl").
 
+-export([zoom_at/5]).   % the tests
 -export([new/4, metrics/2, shown/3, rungs/6, draw/3, paint/4, goal/3,
 	 answer/5]).
 
 -define(BG, {18, 18, 18}).
+-define(ZOOMS, [2.0, 1.0, 0.75, 0.5, 0.25]).   % the zoom menu's
 
 %% The view, hidden, with its tab buttons; the model frame (goal, clear,
 %% solve, k) in the top frame's status row, the answer and the program's own
 %% values below. See csp_code_wse:new/4 for what is sent on its events.
 new(H, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
-    #{code := Right, status := {Top, Row}, top := {Top, TopS}} = Where,
+    #{code := Right, head := TabsP, status := {Top, Row}, top := {Top, TopS}} = Where,
     Box = wxPanel:new(Right),
     BoxS = wxBoxSizer:new(?wxVERTICAL),
     wxWindow:setSizer(Box, BoxS),
-    Bar = wxBoxSizer:new(?wxHORIZONTAL),
+    %% The tabs and the zoom: right over the rungs, where they stay when the
+    %% rungs are scrolled (candid_wx's code head).
+    wxWindow:destroyChildren(TabsP),
+    Bar = wxWindow:getSizer(TabsP),
     Pid = self(),
     Btns = case Tabs of
 	       [_] -> [];
 	       _ ->
 		   [begin
 			Tab = "tab=" ++ integer_to_list(I),
-			B = candid_wx:btn(H, Box, Name,
+			B = candid_wx:btn(H, TabsP, Name,
 					  #{click => fun() -> Pid ! {candid_wx, {code, Tab}}
 						     end}),
 			wxSizer:add(Bar, B, []),
 			B
 		    end || {I, #{name := Name}} <- enum(Tabs)]
 	   end,
-    wxSizer:add(BoxS, Bar, [{flag, ?wxBOTTOM}, {border, 8}]),
     Body = wxPanel:new(Box),
     wxWindow:setSizer(Body, wxBoxSizer:new(?wxVERTICAL)),
     wxSizer:add(BoxS, Body, []),
-    Canvas = canvas(H, Box),
+    Canvas = canvas(H, Box, Right),
+    candid_wx:register(H, code_canvas, {Canvas, Right}, perm),
+    %% The zoom, after the tabs: a menu, and ctrl + wheel, ctrl + up/down at
+    %% the mouse, ctrl + 0 for 100 %, stepping through the same values.
+    ZoomB = candid_wx:menu_btn(H, TabsP, [zoom_label(Z) || Z <- ?ZOOMS],
+			       index_of(1.0, ?ZOOMS),
+			       fun(I) ->
+				       zoom_at(H, Canvas, Right, lists:nth(I, ?ZOOMS),
+					       mouse(Canvas, Right))
+			       end),
+    wxWindow:setToolTip(ZoomB, "zoom; ctrl + wheel or ctrl + up/down at the "
+			"mouse, ctrl + 0 back to 100 %"),
+    candid_wx:register(H, code_zoom_btn, ZoomB, perm),
+    wxSizer:add(Bar, ZoomB, [{flag, ?wxLEFT bor ?wxALIGN_CENTER_VERTICAL},
+			     {border, 12}]),
     wxSizer:add(BoxS, Canvas, []),
     wxSizer:add(wxWindow:getSizer(Right), Box, [{proportion, 1}, {flag, ?wxEXPAND}]),
     wxWindow:hide(Box),
@@ -54,6 +72,8 @@ new(H, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
     wxWindow:setSizer(GoalF, GoalS),
     Goal = wxTextCtrl:new(GoalF, ?wxID_ANY, [{style, ?wxTE_PROCESS_ENTER}]),
     wxWindow:setFont(Goal, candid_wx:font(H)),
+    candid_wx:bg(H, Goal, ?BG),
+    candid_wx:fg(H, Goal, {136, 136, 136}),
     wxWindow:setMinSize(Goal, {320, -1}),
     wxWindow:setToolTip(Goal, "click a contact or a signal, or type a goal; "
 			"up and down step a number"),
@@ -94,6 +114,11 @@ new(H, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
 						 integer_to_list(lists:nth(I, Ks))}}
 			     end),
     wxSizer:add(Row, Sel, [{flag, ?wxLEFT bor ?wxALIGN_CENTER_VERTICAL}, {border, 4}]),
+    %% What was clicked last, a name or a contact, and its value now.
+    Watch = candid_wx:text(H, Top, "", {221, 221, 221}),
+    candid_wx:register(H, "watch", {text, Watch}, perm),
+    wxSizer:add(Row, Watch, [{flag, ?wxLEFT bor ?wxALIGN_CENTER_VERTICAL},
+			     {border, 16}]),
     %% The answer: its text, and what a found trace brings.
     Res = wxPanel:new(Top),
     ResS = wxBoxSizer:new(?wxVERTICAL),
@@ -107,22 +132,29 @@ new(H, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
     #{vars := MainVars} = hd(Tabs),
     vals(H, Top, TopS, "m_", none, MainVars, perm),
     wxWindow:layout(Top),
-    #{box => Box, body => Body, canvas => Canvas, right => Right, top => Top,
+    #{box => Box, tabs_panel => TabsP, body => Body, canvas => Canvas, right => Right, top => Top,
       tab_buttons => Btns, event => code, goal => Goal, goal_frame => GoalF,
       res => ResT, extra => Extra, colours => Colours}.
 
 enum(L) -> lists:zip(lists:seq(0, length(L) - 1), L).
 
 %% The values with no widget of their own: a cell each, its name a signal to
-%% mark by click, a #local in italics.
+%% mark by click, a #local in italics. By name; every name its whole width --
+%% measured in the font it is shown in, which frame_box's label did not have
+%% yet when it was sized, and was cut -- and as many columns as fit.
 vals(_H, _Parent, _Sizer, _Pre, _Obj, [], _Scope) -> ok;
-vals(H, Parent, Sizer, Pre, Obj, Vars, Scope) ->
-    G = wxGridSizer:new(0, 6, 2, 2),
+vals(H, Parent, Sizer, Pre, Obj, Vars0, Scope) ->
+    Vars = lists:sort(fun({_, A}, {_, B}) -> A =< B end, Vars0),
+    Font = candid_wx:font(H),
+    NameW = lists:max([text_w(Parent, N, Font) || {_, N} <- Vars]) + 8,
+    G = wxGridSizer:new(0, cols(H, Parent, NameW + 86), 2, 2),
     [begin
 	 Full = case Obj of none -> N; _ -> Obj ++ "." ++ N end,
 	 Cell = wxBoxSizer:new(?wxHORIZONTAL),
 	 {F, T} = candid_wx:frame_box(Parent, N),
-	 wxWindow:setFont(T, candid_wx:font(H)),
+	 wxWindow:setFont(T, Font),
+	 wxWindow:setMinSize(T, {text_w(Parent, N, Font), -1}),
+	 wxWindow:setMinSize(F, {NameW, -1}),
 	 candid_wx:fg(H, T, case K of local -> {136, 170, 187};
 						   var -> {136, 136, 136} end),
 	 candid_wx:click(T, {code, "sig=" ++ Full}, self()),
@@ -135,10 +167,64 @@ vals(H, Parent, Sizer, Pre, Obj, Vars, Scope) ->
 			       {border, 6}]),
 	 wxSizer:add(G, Cell, [{flag, ?wxEXPAND}])
      end || {K, N} <- Vars],
-    wxSizer:add(Sizer, G, [{flag, ?wxALL}, {border, 4}]).
+    case Pre of
+	"m_" -> foldable(H, Parent, Sizer, G, length(Vars));
+	_ -> wxSizer:add(Sizer, G, [{flag, ?wxALL}, {border, 4}])
+    end.
 
-shown(_H, #{box := Box, right := Right}, Show) ->
+text_w(Win, Text, Font) ->
+    {W, _, _, _} = wxWindow:getTextExtent(Win, Text, [{theFont, Font}]),
+    W.
+
+%% As many cells across as the panel has room for, one to eight. The panel
+%% may not be laid out yet; the window is, and the program column is beside.
+cols(H, Parent, CellW) ->
+    {PW, _} = wxWindow:getClientSize(Parent),
+    {FW, _} = wxWindow:getClientSize(maps:get(frame, H)),
+    Avail = max(PW, FW - 480),
+    max(1, min(8, Avail div CellW)).
+
+%% The main values under a heading that folds them away: a program with
+%% forty of them had no room left for its rungs. Open or not is kept with
+%% the settings (candid:pref(values)), for the next window and the next run.
+foldable(H, Parent, Sizer, G, N) ->
+    Open = candid:pref(values) =/= "closed",
+    Label = fun(true) -> "values (" ++ integer_to_list(N) ++ ") \x{25BE}";
+	       (false) -> "values (" ++ integer_to_list(N) ++ ") \x{25B8}"
+	    end,
+    Pid = self(),
+    Ids = maps:get(ids, H),
+    %% In the panel's id table, which the click's callback can reach: the
+    %% button, and whether the values are folded away.
+    Toggle = fun() ->
+		     Show = ets:member(Ids, values_shut),
+		     case Show of
+			 true -> ets:delete(Ids, values_shut);
+			 false -> ets:insert(Ids, {values_shut, x, perm})
+		     end,
+		     wxSizer:show(Sizer, G, [{show, Show}]),
+		     [{_, Btn, _}] = ets:lookup(Ids, values_btn),
+		     candid_wx:btn_label(H, Btn, Label(Show)),
+		     candid_wx:relayout_up(Parent),
+		     Pid ! {candid_wx, {code, "values=" ++ case Show of
+								true -> "open";
+								false -> "closed"
+							    end}}
+	     end,
+    B = candid_wx:btn(H, Parent, Label(Open), #{click => Toggle}),
+    ets:insert(Ids, {values_btn, B, perm}),
+    wxSizer:add(Sizer, B, [{flag, ?wxLEFT bor ?wxTOP}, {border, 4}]),
+    wxSizer:add(Sizer, G, [{flag, ?wxALL}, {border, 4}]),
+    Open orelse begin
+		    ets:insert(Ids, {values_shut, x, perm}),
+		    wxSizer:show(Sizer, G, [{show, false}])
+		end,
+    ok.
+
+shown(_H, #{box := Box, right := Right, tabs_panel := T}, Show) ->
     wxWindow:show(Box, [{show, Show}]),
+    wxWindow:show(T, [{show, Show}]),
+    candid_wx:relayout_up(T),
     wxWindow:layout(Right),
     wxScrolledWindow:fitInside(Right).
 
@@ -161,8 +247,8 @@ rungs1(H, #{body := Body, canvas := C, box := Box, right := Right,
     wxWindow:destroyChildren(Body),
     head(H, Body, wxWindow:getSizer(Body), Tab),
     candid_wx:register(H, code_ops, [], perm),
-    wxWindow:setMinSize(C, Size),
-    wxWindow:setSize(C, Size),
+    candid_wx:register(H, code_size, Size, perm),
+    size(H, C),
     wxWindow:layout(Body),
     wxWindow:layout(Box),
     wxWindow:layout(Right),
@@ -184,9 +270,16 @@ head(H, Body, BS, Tab = #{binds := {M, Bs}, vars := Vars, prefix := P}) ->
 %%% scroll or the theme draws them again as they are -- and kept in the id
 %%% table for that. A click goes to csp_code as `xy=X,Y', which says what is
 %%% there.
+%%%
+%%% ZOOM is the renderer's alone: csp_code lays out and hit-tests at 100 %,
+%%% the canvas is drawn scaled (setUserScale) and as big as that, and a
+%%% click is scaled back. Ctrl + wheel, or ctrl + up/down once the canvas
+%%% has the focus (a click gives it), zooms at the mouse: the point under it
+%%% stays there. Ctrl + 0 is 100 % again.
 
-canvas(H, Parent) ->
-    C = wxPanel:new(Parent, [{style, ?wxFULL_REPAINT_ON_RESIZE}]),
+
+canvas(H, Parent, Right) ->
+    C = wxPanel:new(Parent, [{style, ?wxFULL_REPAINT_ON_RESIZE bor ?wxWANTS_CHARS}]),
     wxWindow:setFont(C, candid_wx:font(H)),
     wxWindow:setBackgroundStyle(C, ?wxBG_STYLE_PAINT),
     Pid = self(),
@@ -198,10 +291,112 @@ canvas(H, Parent) ->
 				end}]),
     wxPanel:connect(C, left_down, [{callback,
 				    fun(#wx{event = #wxMouse{x = X, y = Y}}, O) ->
-					    Pid ! {candid_wx, {code, xy(X, Y)}},
+					    Z = zoom(H),
+					    wxWindow:setFocus(C),
+					    Pid ! {candid_wx, {code, xy(trunc(X / Z),
+									trunc(Y / Z))}},
 					    wxEvent:skip(O)
 				    end}]),
+    wxPanel:connect(C, mousewheel,
+		    [{callback,
+		      fun(#wx{event = #wxMouse{controlDown = true, x = X, y = Y,
+					       wheelRotation = R}}, _O) when R =/= 0 ->
+			      zoom_at(H, C, Right, step(zoom(H), R), {X, Y});
+			 (_E, O) -> wxEvent:skip(O)
+		      end}]),
+    wxPanel:connect(C, key_down,
+		    [{callback,
+		      fun(#wx{event = #wxKey{controlDown = true, keyCode = K}}, O) ->
+			      Z = zoom(H),
+			      case K of
+				  ?WXK_UP   -> zoom_at(H, C, Right, step(Z, 1), mouse(C, Right));
+				  ?WXK_DOWN -> zoom_at(H, C, Right, step(Z, -1), mouse(C, Right));
+				  $0        -> zoom_at(H, C, Right, 1.0, mouse(C, Right));
+				  _         -> wxEvent:skip(O)
+			      end;
+			 (_E, O) -> wxEvent:skip(O)
+		      end}]),
     C.
+
+zoom(H) ->
+    case candid_wx:lookup(H, code_zoom) of
+	{ok, Z} -> Z;
+	error   -> 1.0
+    end.
+
+%% The next of the menu's values up (R > 0) or down.
+step(Z, R) when R > 0 ->
+    case [X || X <- ?ZOOMS, X > Z] of
+	[] -> Z;
+	Up -> lists:last(Up)
+    end;
+step(Z, _) ->
+    case [X || X <- ?ZOOMS, X < Z] of
+	[] -> Z;
+	[Down | _] -> Down
+    end.
+
+zoom_label(Z) -> integer_to_list(round(Z * 100)) ++ " %".
+
+index_of(X, L) -> length(lists:takewhile(fun(Y) -> Y =/= X end, L)).
+
+%% The canvas as big as the picture at the zoom in force.
+size(H, C) ->
+    {W, Ht} = case candid_wx:lookup(H, code_size) of
+		  {ok, S} -> S;
+		  error   -> {0, 0}
+	      end,
+    Z = zoom(H),
+    S1 = {round(W * Z), round(Ht * Z)},
+    wxWindow:setMinSize(C, S1),
+    wxWindow:setSize(C, S1).
+
+%% Where the mouse is on the canvas; the middle of what is seen of it when
+%% the mouse is somewhere else.
+mouse(C, Right) ->
+    {Mx, My} = wxWindow:screenToClient(C, wx_misc:getMousePosition()),
+    {Ox, Oy} = in_right(C),
+    {Rw, Rh} = wxWindow:getClientSize(Right),
+    case Ox + Mx >= 0 andalso Ox + Mx < Rw andalso Oy + My >= 0 andalso Oy + My < Rh of
+	true  -> {Mx, My};
+	false -> {Rw div 2 - Ox, Rh div 2 - Oy}
+    end.
+
+%% The canvas's top left in Right's window, as it is scrolled now.
+in_right(C) ->
+    Box = wxWindow:getParent(C),
+    {Cx, Cy} = wxWindow:getPosition(C),
+    {Bx, By} = wxWindow:getPosition(Box),
+    {Bx + Cx, By + Cy}.
+
+%% Zoom to Z1 with the canvas point M (pixels, as it is drawn now) staying
+%% where it is in Right's window.
+zoom_at(H, C, Right, Z1, {Mx, My}) ->
+    Z0 = zoom(H),
+    {Ox, Oy} = in_right(C),
+    {Ux, Uy} = wxScrolledWindow:getScrollPixelsPerUnit(Right),
+    {Vx, Vy} = wxScrolledWindow:getViewStart(Right),
+    %% The canvas's origin in Right's whole (scrolled) area, kept by a zoom.
+    {Ax, Ay} = {Ox + Vx * Ux, Oy + Vy * Uy},
+    {Px, Py} = {Mx / Z0, My / Z0},
+    candid_wx:register(H, code_zoom, Z1, perm),
+    case candid_wx:lookup(H, code_zoom_btn) of
+	{ok, B} -> candid_wx:btn_label(H, B, zoom_label(Z1) ++ " \x{25BE}");
+	error   -> ok
+    end,
+    wxWindow:freeze(Right),
+    try
+	size(H, C),
+	wxWindow:layout(wxWindow:getParent(C)),
+	wxWindow:layout(Right),
+	wxScrolledWindow:fitInside(Right),
+	X = Ax + round(Px * Z1) - (Ox + Mx),
+	Y = Ay + round(Py * Z1) - (Oy + My),
+	wxScrolledWindow:scroll(Right, max(0, X) div max(1, Ux),
+				max(0, Y) div max(1, Uy))
+    after wxWindow:thaw(Right)
+    end,
+    wxWindow:refresh(C, [{eraseBackground, false}]).
 
 xy(X, Y) -> "xy=" ++ integer_to_list(X) ++ "," ++ integer_to_list(Y).
 
@@ -229,6 +424,8 @@ paint_ops(H, DC, Ops) ->
     wxDC:clear(DC),
     wxBrush:destroy(Bg),
     _ = {W, Ht},
+    Z = zoom(H),
+    wxDC:setUserScale(DC, Z, Z),
     Font = candid_wx:font(H),
     Bold = wxFont:new(wxFont:getPointSize(Font), ?wxFONTFAMILY_TELETYPE,
 		      ?wxFONTSTYLE_NORMAL, ?wxFONTWEIGHT_BOLD),
@@ -353,6 +550,7 @@ goal(H, Hd = #{goal := G, goal_frame := F}, none) ->
     wxTextCtrl:setValue(G, ""),
     fit_goal(G, F),
     candid_wx:fg(H, G, {136, 136, 136}),
+    candid_wx:bg(H, G, ?BG),
     candid_wx:bg(H, F, ?BG),
     wxWindow:refresh(F),
     _ = Hd,
@@ -361,6 +559,7 @@ goal(H, Hd = #{goal := G, goal_frame := F}, Text) ->
     wxTextCtrl:setValue(G, Text),
     fit_goal(G, F),
     candid_wx:fg(H, G, {238, 238, 238}),
+    candid_wx:bg(H, G, fill(want, Hd)),
     candid_wx:bg(H, F, c(want, Hd)),
     wxWindow:refresh(F),
     wxWindow:layout(wxWindow:getParent(F)).

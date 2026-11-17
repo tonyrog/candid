@@ -18,6 +18,10 @@
 %%%   {line, X1, Y1, X2, Y2, C, Width, Dash}
 %%%   {text, X, Y, Text, C, Bold}                      Y is the top
 %%%
+%%% An object's line is a row of its own, `▸ #Module name bindings', which a
+%%% click opens: its rules follow in place, indented, a line down their left,
+%%% their ids `name/Id' (csp_code:items/1). A click on the row again closes it.
+%%%
 %%% Ladder: an AND runs across, an OR stacks its branches between two rails,
 %%% the coil at the end of the rung. Code: the rule as a line of text, the
 %%% contacts in it.
@@ -36,6 +40,8 @@
 -define(RAIL,  2).                  % an OR's rails
 -define(GAP,   6).                  % between two rows
 -define(MARK,  3).                  % a mark's frame outside the box
+-define(INDENT, 3).                 % characters an opened object is in by
+-define(OBJ,   {136, 170, 187}).
 
 %%% ------------------------------------------------------------ the layout
 
@@ -45,18 +51,42 @@ layout(Rules, Mode, M = #{cw := _, ch := _}) ->
 			     {[], ?GAP, 0}, gates(Rules)),
     Pieces = list_to_tuple(lists:reverse(Ps)),
     #{mode => Mode, pieces => Pieces, ids => ids(Pieces), w => W + ?GAP,
-      h => Y + ?GAP, cls => #{}}.
+      h => Y + ?GAP, cls => #{}, m => M}.
 
 size(#{w := W, h := H}) -> {W, H}.
 
 %% The gate headers numbered as csp_code numbers them: g0, g1 ... in order.
 gates(Rules) ->
-    {Rs, _} = lists:mapfoldl(fun({gate, 'end', _} = G, I) -> {{G, none}, I};
-				({gate, _, _} = G, I) -> {{G, I}, I + 1};
-				(R, I) -> {{R, none}, I}
+    {Rs, _} = lists:mapfoldl(fun(R, I) ->
+				     case inner(R) of
+					 {gate, 'end', _} -> {{R, none}, I};
+					 {gate, _, _}     -> {{R, I}, I + 1};
+					 _                -> {{R, none}, I}
+				     end
 			     end, 0, Rules),
     Rs.
 
+inner({in, _, _, X, _}) -> X;
+inner(X)             -> X.
+
+%% An opened object's row: drawn as any, its ids made `O/Id', moved in by
+%% its depth, with a line down the left of it.
+row({{in, O, D, X, _}, G}, Mode, M = #{cw := Cw}, {Ps, Y, W}) ->
+    {Ps1, Y1, W1} = row({X, G}, Mode, M, {[], Y, 0}),
+    Dx = round(D * ?INDENT * Cw),
+    Lx = Dx - round(1.5 * Cw),
+    Line = {wire, none, none, Lx, Y, Lx, Y1, 1},
+    {[Line | [own(O, P) || P <- shift(Ps1, Dx, 0)]] ++ Ps, Y1, max(W, W1 + Dx)};
+row({{obj, O, Mod, Bs, Open, _}, _}, _Mode, M = #{ch := Ch}, {Ps, Y0, W}) ->
+    Arrow = case Open of
+		true  -> "\x{25BE} ";
+		false -> "\x{25B8} ";
+		none  -> "  "
+	    end,
+    T = lists:flatten([Arrow, "#", Mod, " ", O,
+		       [["  ", csp_code:bind(B)] || B <- Bs]]),
+    Y = Y0 + 4,
+    {[txt("ob_" ++ O, "ob_" ++ O, 0, Y, T, ?OBJ) | Ps], Y + Ch + ?GAP, max(W, tw(M, T))};
 row({{gate, 'end', _}, _}, _Mode, M = #{ch := Ch}, {Ps, Y, W}) ->
     T = "#end",
     {[txt(none, none, 0, Y, T, {68, 85, 102}) | Ps], Y + Ch + 8, max(W, tw(M, T))};
@@ -90,7 +120,7 @@ row({R = #{no := N, line := Ln, guard := Gd, assigns := As}, _}, Mode, M,
     Lnw = round(4 * maps:get(cw, M)) + 10,
     LnT = integer_to_list(N),
     Lp = txt(none, none, Cbw + Lnw - 10 - tw(M, LnT), Rail - Ch div 2,
-	     LnT, {85, 85, 85}),
+	     LnT, {112, 112, 112}),     % over 0.4 lightness: dark in the light theme
     RowId = "r" ++ integer_to_list(N),
     Placed = [setelement(3, P, RowId) || P <- [Cb, Lp | shift(Rps, Cbw + Lnw, 0)]],
     {lists:reverse(shift(Placed, 0, Y)) ++ Ps, Y + Rh + ?GAP,
@@ -198,6 +228,13 @@ across0(Es) ->
 
 txt(Id, Row, X, Y, T, Style) -> {txt, Id, Row, X, Y, T, Style}.
 
+%% A piece of object O's: its ids are `O/Id'.
+own(O, P) ->
+    Pre = fun(none) -> none;
+	     (Id)   -> O ++ "/" ++ Id
+	  end,
+    setelement(3, setelement(2, P, Pre(element(2, P))), Pre(element(3, P))).
+
 tw(#{cw := Cw}, T) -> round(Cw * length(T)).
 
 shift(Ps, Dx, Dy) -> [shift1(P, Dx, Dy) || P <- Ps].
@@ -236,21 +273,29 @@ ids(Ps) ->
 
 %% What a click at X, Y means: a contact is marked by it, a rule's box
 %% switches it off or on. The box gets a few pixels round it: it is small.
-hit(#{pieces := Ps}, X, Y) ->
+%% An object's line opens or closes it. An opened object's contact is
+%% `ct=O/Id'; its rule's box is the rule's, whose ever it is.
+hit(#{pieces := Ps0, m := M}, X, Y) ->
+    Ps = tuple_to_list(Ps0),
     In = fun(Bx, By, W, H, D) ->
 		 X >= Bx - D andalso X < Bx + W + D andalso
 		     Y >= By - D andalso Y < By + H + D
 	 end,
-    case [Id || {box, Id, _, Bx, By, W, H, _, check, _} <- tuple_to_list(Ps),
-		In(Bx, By, W, H, 3)] of
-	["x" ++ No | _] -> "dis=" ++ No;
-	[] ->
-	    case [Id || {box, Id, _, Bx, By, W, H, _, contact, _}
-			    <- tuple_to_list(Ps), In(Bx, By, W, H, 0)] of
-		[Id | _] -> "ct=" ++ Id;
-		[]       -> none
-	    end
+    Checks = [last(Id) || {box, Id, _, Bx, By, W, H, _, check, _} <- Ps,
+			  In(Bx, By, W, H, 3)],
+    Cts = [Id || {box, Id, _, Bx, By, W, H, _, contact, _} <- Ps,
+		 In(Bx, By, W, H, 0)],
+    Objs = [O || {txt, Id, _, Tx, Ty, T, _} <- Ps, Id =/= none,
+		 "ob_" ++ O <- [last(Id)],
+		 In(Tx, Ty, tw(M, T), maps:get(ch, M), 0)],
+    case {Checks, Cts, Objs} of
+	{["x" ++ No | _], _, _} -> "dis=" ++ No;
+	{_, [Id | _], _}        -> "ct=" ++ Id;
+	{_, _, [O | _]}         -> "obj=" ++ O;
+	_                       -> none
     end.
+
+last(Id) -> lists:last(string:split(Id, "/", all)).
 
 %% The whole picture, Colours being csp_code's (the css colours by name).
 ops(L = #{pieces := Ps}, Colours) ->

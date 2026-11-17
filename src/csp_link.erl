@@ -226,11 +226,10 @@ init(Owner, {Target, Opts}, _Exe, _Files) ->
 		     _ -> Io0
 		 end,
 	    Owner ! {csp_link, "reading the program from " ++ where(Target)},
-	    send(Io, case Opts of
-			 #{image := none} -> "/dump rom\n";
-			 #{image := I}    -> ["/dump rom ", I, "\n"]
-		     end),
-	    remote(Io, Owner, #{target => Target, opts => Opts, want => rom,
+	    %% what the node is, first: a node from before /dump info refuses
+	    %% it, and the program is read all the same
+	    send(Io, "/dump info\n"),
+	    remote(Io, Owner, #{target => Target, opts => Opts, want => info,
 				buf => none, rom => none, decls => none,
 				asked => none, cycle => 0, until => 0,
 				part => <<>>});
@@ -488,6 +487,16 @@ reply(Io, Owner, [{part, K, P}], St = #{want := W})
 	    Owner ! {csp_link, io_lib:format("~s did not come whole", [K])},
 	    maps:without([piece, tries], St)
     end;
+reply(Io, Owner, [{info, Bin}], St = #{want := info, target := T}) ->
+    try csp_node:info(Bin) of
+	Info ->
+	    Owner ! {csp_link, "node " ++ where(T) ++ ": " ++ info_text(Info)},
+	    read_rom(Io, St#{info => Info})
+    catch
+	_:Why ->
+	    Owner ! {csp_link, io_lib:format("node info not read: ~P", [Why, 6])},
+	    read_rom(Io, St)
+    end;
 reply(Io, Owner, [{rom, Bin}], St = #{want := rom, opts := #{patch := P}}) ->
     case P of
 	none   -> program(Owner, [{rom, Bin}], St#{rom := Bin});
@@ -515,6 +524,9 @@ reply(_Io, Owner, [D = {state, Cycle, Ms, _, _}], St = #{decls := Ds})
     St#{asked := none, cycle := Cycle};
 %% Not understood (a node of another make): said, and while reading the
 %% program it is given up rather than waited for.
+reply(Io, Owner, [{unknown, Head}], St = #{want := info}) ->
+    Owner ! {csp_link, "node: a dump not understood: dump " ++ Head},
+    read_rom(Io, St);
 reply(_Io, Owner, [{unknown, Head}], St = #{want := W}) ->
     Owner ! {csp_link, "node: a dump not understood: dump " ++ Head},
     case W of
@@ -524,6 +536,34 @@ reply(_Io, Owner, [{unknown, Head}], St = #{want := W}) ->
 reply(_Io, _Owner, _, St) ->
     St.
 
+read_rom(Io, St = #{opts := Opts}) ->
+    send(Io, case Opts of
+		 #{image := none} -> "/dump rom\n";
+		 #{image := I}    -> ["/dump rom ", I, "\n"]
+	     end),
+    St#{want := rom}.
+
+%% The node in a line: its part, firmware, number format, room, slots.
+info_text(I) ->
+    Float = case maps:get(float, I, fixpoint) of
+		fixpoint -> "Q16.16";
+		ieee -> "IEEE float"
+	    end,
+    Ram = case I of
+	      #{ram := #{total := T, free := F}} ->
+		  io_lib:format(", RAM ~w free of ~w", [F, T]);
+	      _ -> ""
+	  end,
+    Slots = [[", ", N, ": ", slot_text(R)]
+	     || R = #{kind := app, name := N} <- maps:get(regions, I, [])],
+    lists:flatten([maps:get(device, I, "?"), " fw ", maps:get(fw, I, "?"),
+		   ", ", Float, " ", atom_to_list(maps:get(endian, I, little)),
+		   "-endian", Ram, Slots]).
+
+slot_text(#{slot := image, image := #{role := R, gen := G, size := Sz}}) ->
+    io_lib:format("~s gen ~w (~w B)", [R, G, Sz]);
+slot_text(#{slot := S}) -> atom_to_list(S).
+
 %% What reads K again, a window of it after.
 dump_cmd(rom, #{opts := #{image := none}}) -> "/dump rom";
 dump_cmd(rom, #{opts := #{image := I}}) -> ["/dump rom ", I];
@@ -531,6 +571,8 @@ dump_cmd(K, _St) -> ["/dump ", atom_to_list(K)].
 
 %% Nothing stored is an image with no patch; anything else refused while
 %% reading the program leaves nothing to read the state by.
+refused(Io, _Owner, _L, St = #{want := info}) ->
+    read_rom(Io, St);
 refused(_Io, Owner, _L, St = #{want := patch, rom := Rom}) ->
     program(Owner, [{rom, Rom}], St);
 refused(_Io, Owner, L, St = #{want := rom}) ->
@@ -546,8 +588,10 @@ program(Owner, Ds, St = #{target := T}) ->
 	    Owner ! {csp_link, io_lib:format("node ~s, ~w declarations~s",
 					     [where(T), length(Decls),
 					      patched(Ds)])},
+	    %% what the node said of itself goes with its program
+	    Info = [{info, I} || I <- [maps:get(info, St, none)], I =/= none],
 	    case listing(Ds) of
-		{ok, Text} -> Owner ! {csp_program, Text, Ds};
+		{ok, Text} -> Owner ! {csp_program, Text, Ds ++ Info};
 		Error ->
 		    Owner ! {csp_link, io_lib:format("node ~s: not listed: ~P",
 						     [where(T), Error, 8])}

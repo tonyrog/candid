@@ -30,10 +30,12 @@
 -export([looks/1, colour/3, warn_annotations/1]).    % tests, introspection
 -export([tab_event/2, tabs/1, target_text/0, node_file/1]).  % tests
 -export([open_dir/0, remember_dir/1]).                         % tests
+-export([pref/1]).                                % the renderers
 
 -include("candid.hrl").
 -include_lib("kernel/include/file.hrl").
 
+-define(PREFS, [dir, values]).   % kept besides the views, see pref/1
 -define(PERIOD,    100).   % ms between cycles -- the DEFAULT, see period/0
 %% What the tick rate may be set to, from the bar. 100 ms was chosen for lamps;
 %% a plot wants a good deal more than ten samples a second, and a program with
@@ -1249,8 +1251,8 @@ keep_settings() ->
 	ok = filelib:ensure_dir(P),
 	ok = file:write_file(P, [[io_lib:format("{~s, ~s}.~n", [K, V])
 				  || {K, V} <- lists:sort(maps:to_list(views()))],
-				 [io_lib:format("{dir, ~p}.~n", [D])
-				  || D <- [last_dir()], D =/= undefined]])
+				 [io_lib:format("{~s, ~p}.~n", [K, V])
+				  || K <- ?PREFS, V <- [pref(K)], V =/= undefined]])
     catch _:Why ->
 	    io:format("panel: settings not kept in ~s: ~p~n", [P, Why])
     end,
@@ -1268,22 +1270,29 @@ open_dir() ->
 	_ -> work_dir()
     end.
 
-last_dir() ->
-    case application:get_env(candid, last_dir) of
-	{ok, D} -> D;
+last_dir() -> pref(dir).
+
+%% A file picked or saved: its directory is where the next dialog opens.
+remember_dir(File) ->
+    set_pref(dir, filename:dirname(filename:absname(File))).
+
+%% What is kept for the next run besides the views, as text: where the file
+%% dialogs were (dir), the code view's values folded away or not (values).
+%% This run's word first, else what the last one left in settings.config.
+pref(K) ->
+    case application:get_env(candid, {pref, K}) of
+	{ok, V} -> V;
 	undefined ->
-	    case proplists:get_value(dir, settings()) of
-		D when is_list(D) -> D;
+	    case proplists:get_value(K, settings()) of
+		V when is_list(V) -> V;
 		_ -> undefined
 	    end
     end.
 
-%% A file picked or saved: its directory is where the next dialog opens.
-remember_dir(File) ->
-    D = filename:dirname(filename:absname(File)),
-    case application:get_env(candid, last_dir) of
-	{ok, D} -> ok;
-	_ -> application:set_env(candid, last_dir, D), keep_settings()
+set_pref(K, V) ->
+    case application:get_env(candid, {pref, K}) of
+	{ok, V} -> ok;
+	_ -> application:set_env(candid, {pref, K}, V), keep_settings()
     end.
 
 %% candid.config's {candid, [...]}. The application is only loaded to make
@@ -1743,6 +1752,10 @@ act_ui(U, Link, S, {bar, "target=" ++ Text}) ->
     loop(U, Link1, S1);
 act_ui(U, Link, S, {bar, "log=toggle"}) ->
     candid_log:toggle(maps:get(log, S)),
+    loop(U, Link, S);
+%% The code view's values folded or not: the renderer did it; kept here.
+act_ui(U, Link, S, {code, "values=" ++ How}) ->
+    set_pref(values, How),
     loop(U, Link, S);
 act_ui(U, Link, S, {bar, "chat=toggle"}) ->
     csp_chat:toggle(maps:get(chat, S)),
