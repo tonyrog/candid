@@ -96,7 +96,10 @@ run_ui(U, Where, File) ->
     Log = candid_log:start(log_ui(U)),
     Chat = csp_chat:start(chat_ui(U), #{root => root(), exe => csp_exe(),
 				       demo_dir => work_dir()}),
-    render(U, Where, File, #{chat => Chat, log => Log,
+    %% The solver too: its lines outlive a rebuild, the program they are
+    %% about is told it on each (build/7).
+    Solve = csp_solve:start(solve_ui(U), self()),
+    render(U, Where, File, #{chat => Chat, log => Log, solve => Solve,
 			     ws => candid_file:workspace()}).
 
 %% Also the restart path: picking another file in the chooser comes back here,
@@ -123,7 +126,7 @@ render(U, Where, File, Side0) ->
 	    idle(U, Where, File, Side#{sel => SelId, run => Run})
     end.
 
-side(S) -> maps:with([chat, log, ws], S).
+side(S) -> maps:with([chat, log, solve, ws], S).
 
 %% How the shown program's floats read: as the image it was listed off says,
 %% for a node's; Q16.16 as the host csp runs it, for the rest.
@@ -213,11 +216,25 @@ ui({M, H}, F, A) -> apply(M, F, [H | A]).
 code_ui({M, H}) -> {M:code_view(), H}.
 chat_ui({M, H}) -> {M:chat_view(), H}.
 log_ui({M, H}) -> {M:log_view(), H}.
+solve_ui({M, H}) -> {M:solve_view(), H}.
+
+%% Which panes are shown, kept by the process that builds the bar: the
+%% panes say it on every show and hide, a rebuilt bar lights them again.
+panes() ->
+    case get(candid_panes) of
+	undefined -> #{};
+	Ps -> Ps
+    end.
+
+pane_button(U, Bar, P, On) ->
+    put(candid_panes, maps:put(P, On, panes())),
+    ui(U, pane_button, [Bar, P, On]).
 
 %% What the bar is built from.
 bar(File, Side = #{chat := Chat}) ->
     #{file => File, files => available(File), target => target_text(),
       period => period(), periods => ?PERIODS, views => ?VIEWS,
+      panes => panes(),
       chat => Chat =/= undefined, tabs => tabs(Side), dir => work_dir()}.
 
 %%% ------------------------------------------------------------------- tabs
@@ -265,7 +282,7 @@ tab_go(Side = #{ws := Ws}) ->
     end.
 
 set_target(Text) ->
-    case csp_link:target(Text) of
+    case csp_cmd:target(Text) of
 	{ok, T} -> put(candid_target, T),
 		   put(candid_target_text, Text),
 		   ok;
@@ -1033,18 +1050,16 @@ group(Id, Gs, Rest, Looks, Ann) ->
 
 build(U, Where, Root, File, [], Ast, Side) ->
     %% Parsed fine, but nothing in it is a widget yet. Say which declarations
-    %% it does have -- an empty panel otherwise looks like a failure.
+    %% it does have -- an empty panel otherwise looks like a failure. An
+    %% empty program is just empty.
     {SelId, Run} = ui(U, chooser, [Root, bar(File, Side)]),
-    ui(U, message, [Root, case Ast of
-			      [] -> "an empty program: open one, or ask the "
-				    "chat for one";
-			      _ -> io_lib:format(
-				     "nothing to show in ~s.~n~n"
-				     "it declares: ~s~n~n"
-				     "widgets come from #digital, #analog and "
-				     "#field; variables and rules are not "
-				     "shown yet.", [shorten(File), kinds(Ast)])
-			  end]),
+    Ast =:= [] orelse
+	ui(U, message, [Root, io_lib:format(
+				"nothing to show in ~s.~n~n"
+				"it declares: ~s~n~n"
+				"widgets come from #digital, #analog and "
+				"#field; variables and rules are not "
+				"shown yet.", [shorten(File), kinds(Ast)])]),
     csp_chat:attach(maps:get(chat, Side), chat_info(File)),
     idle(U, Where, File, Side#{sel => SelId, run => Run});
 build(U, Where, Root, File, Widgets0, Ast, Side = #{chat := Chat, log := Log}) ->
@@ -1081,6 +1096,7 @@ build(U, Where, Root, File, Widgets0, Ast, Side = #{chat := Chat, log := Log}) -
     Shown = candid_file:active(maps:get(ws, Side)),
     Code = csp_code:new(code_ui(U), maps:get(code, P), {Src, File}, colours(),
 			#{float => float_format(Shown), off => offs(Shown)}),
+    csp_solve:file(maps:get(solve, Side, undefined), File),
     {ok, Link} = csp_link:open(target(), csp_exe(), [File]),
     erlang:send_after(period(), self(), tick),
     TraceBox = maps:get(trace_box, P),
@@ -1106,6 +1122,7 @@ build(U, Where, Root, File, Widgets0, Ast, Side = #{chat := Chat, log := Log}) -
 	   file   => File,
 	   chat   => Chat,
 	   log    => Log,
+	   solve  => maps:get(solve, Side),
 	   ws     => maps:get(ws, Side),
 	   where  => Where},
     csp_chat:attach(Chat, chat_info(File)),
@@ -1119,11 +1136,11 @@ start_mode(U, Link, S) ->
 	_ -> light_mode(U, S#{mode := run}), S#{mode := run}
     end.
 
-%% What the panel is connected to, csp_link:target/1's reading of the field.
+%% What the panel is connected to, csp_cmd:target/1's reading of the field.
 %% Kept across a change of file, which rebuilds everything else.
 target() ->
     case get(candid_target) of
-	undefined -> {ok, T} = csp_link:target(""), T;
+	undefined -> {ok, T} = csp_cmd:target(""), T;
 	T -> T
     end.
 
@@ -1137,7 +1154,7 @@ target_text() ->
 %% widgets and the code view as they are. A field that does not read stays
 %% connected where it was, and says why.
 retarget(U, Link, S, Text) ->
-    case csp_link:target(Text) of
+    case csp_cmd:target(Text) of
 	{ok, T} ->
 	    csp_link:close(Link),
 	    flush(),
@@ -1462,6 +1479,9 @@ wait_for_pick(U, Where, File, W) ->
 	{chat_direct, Chat, _Line} ->
 	    Chat ! {chat_out, "nothing runs to send it to"},
 	    Again(W);
+	{candid_pane, P, On} ->
+	    pane_button(U, maps:get(run, W), P, On),
+	    Again(W);
 	Msg ->
 	    case event(U, #{sel => maps:get(sel, W),
 			    run => maps:get(event, maps:get(run, W))}, Msg) of
@@ -1501,6 +1521,9 @@ wait_for_pick(U, Where, File, W) ->
 				       Again(W);
 		{bar, "chat=toggle"} -> csp_chat:toggle(maps:get(chat, Side)),
 					Again(W);
+		{bar, "solver=toggle"} ->
+		    csp_solve:toggle(maps:get(solve, Side, undefined)),
+		    Again(W);
 		%% the theme now, the others kept for when there is a panel
 		{bar, "theme=" ++ V} -> Again(view(U, W, "theme", V));
 		{bar, "trace=" ++ V} -> Again(view_done(U, W, "trace", V));
@@ -1536,10 +1559,20 @@ loop(U, Link, S) ->
 	{csp_clock, N, Ms} ->
 	    loop(U, Link, S#{clock := {N, Ms}});
 
-	%% varp's answer to the code view's clear or solve.
-	{csp_model, A} ->
+	{candid_pane, P, On} ->
+	    pane_button(U, maps:get(run, S), P, On),
+	    loop(U, Link, S);
+
+	%% A trace the solver found, picked to be shown: the code view walks
+	%% it and can replay it on csp.
+	{csp_solve, trace, Label, T} ->
 	    loop(U, Link, code_do(U, Link, S,
-				  csp_code:model(maps:get(code, S), A)));
+				  csp_code:trace(maps:get(code, S), {Label, T})));
+	%% The solver closed: its trace goes, and csp is put back as it was
+	%% before a replay took it.
+	{csp_solve, closed} ->
+	    S1 = code_do(U, Link, S, csp_code:trace(maps:get(code, S), none)),
+	    loop(U, Link, unreplay(U, Link, S1));
 
 	%% Draw on the TICK, not on the dump. csp only dumps what changed, so a
 	%% trace driven by dumps stops moving as soon as the program settles --
@@ -1760,6 +1793,9 @@ act_ui(U, Link, S, {code, "values=" ++ How}) ->
 act_ui(U, Link, S, {bar, "chat=toggle"}) ->
     csp_chat:toggle(maps:get(chat, S)),
     loop(U, Link, S);
+act_ui(U, Link, S, {bar, "solver=toggle"}) ->
+    csp_solve:toggle(maps:get(solve, S, undefined)),
+    loop(U, Link, S);
 act_ui(U, Link, S, {bar, Tag}) ->
     loop(U, Link, control(U, Link, S, Tag));
 %% ladder / code, from the code view's own bar.
@@ -1797,9 +1833,14 @@ set_widget(Link, S, Data) ->
 %% While the code view walks a trace, the widgets and the clock show the
 %% cycle it is on -- the key pressed lit, the state the trace has -- and csp's
 %% own values come back when it stops.
-code_do(U, Link, S, Code0) ->
-    Was = csp_code:look(maps:get(code, S, undefined)),
+code_do(U, Link, S0, Code0) ->
+    Was = csp_code:look(maps:get(code, S0, undefined)),
     {Acts, Code} = csp_code:actions(Code0),
+    %% A replay resets csp: how it ran before is kept, to go back to.
+    S = case lists:member(reset, Acts) andalso not is_map_key(replayed, S0) of
+	    true  -> S0#{replayed => maps:get(mode, S0, run)};
+	    false -> S0
+	end,
     S1 = lists:foldl(fun(A, Si) -> act(U, Link, Si, A) end, S#{code := Code},
 		     Acts),
     case csp_code:look(Code) of
@@ -1813,6 +1854,17 @@ code_do(U, Link, S, Code0) ->
 	    show_clock(U, S1),
 	    S1
     end.
+
+%% csp as it was before a replay took it: from its start again, the clock its
+%% own (only /resume lets go of a held one; our own csp is paused again at
+%% once, a node runs), and run or paused as it was.
+unreplay(U, Link, S = #{replayed := Was}) ->
+    csp_link:reset(Link),
+    csp_link:raw(Link, "/resume"),
+    is_local() andalso csp_link:raw(Link, "/pause"),
+    control(U, Link, maps:remove(replayed, S),
+	    case Was of run -> "mode=run"; _ -> "mode=step" end);
+unreplay(_U, _Link, S) -> S.
 
 act(U, Link, S = #{mode := run}, pause) -> control(U, Link, S, "mode=step");
 act(_U, _Link, S, pause)                -> S;
@@ -1900,7 +1952,6 @@ flush() ->
 	{csp_state, _, _} -> flush();
 	{csp_fired, _, _} -> flush();
 	{csp_clock, _, _} -> flush();
-	{csp_model, _}    -> flush();
 	{csp_exit, _}     -> flush();
 	{csp_link, _}     -> flush();
 	{csp_program, _, _} -> flush();

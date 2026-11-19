@@ -29,7 +29,7 @@
 
 -module(csp_link).
 
--export([open/2, open/3, target/1, close/1, set/3, tick/1, raw/2]).
+-export([open/2, open/3, close/1, set/3, tick/1, raw/2]).
 -export([pause/1, resume/1, step/1, step/2, reset/1, clock/2]).
 -export([init/4]).
 
@@ -40,116 +40,9 @@ open(Target, Exe, Files) ->
     Owner = self(),
     {ok, spawn_link(?MODULE, init, [Owner, Target, Exe, Files])}.
 
-%% What the panel's target field says: where, then flags.
-%%   "" | "local"           a csp of our own, on vcan0
-%%   "can0"                 a csp of our own, on that bus
-%%   "/dev/ttyUSB0[@BAUD]"  a node's console on a serial line, 115200 if unsaid;
-%%                          a pattern is fine: /dev/serial/by-id/usb-*
-%%   "HOST:PORT"            a node's console on tcp
-%%   "can0 to=ID from=ID"   a node's console on CAN: we send on `to', it
-%%                          answers on `from', 1-8 bytes a frame, no ack. The
-%%                          interface is one the can application has
-%%                          (candid.config).
-%% Flags, after it:
-%%   rom | patch | eeprom   the program without a patch, with the one RUNNING
-%%                          (/dump patch: typed in, loaded, not yet saved), or
-%%                          with the one STORED. A node is read with patch,
-%%                          which is what it runs. Our own csp compiles its file
-%%                          either way, and eeprom loads the store on top too.
-%%   image=SLOT             a node: read the program from that flash slot
-%%                          rather than the image running.
-%%   gap=MS                 on CAN, between our frames (default 20): a node
-%%                          relays one frame a cycle and has no queue.
-%%   frame=N                on CAN, bytes in a frame we send, 1-8 (default 4).
-%%                          A relay written as rules (examples/relay) moves a
-%%                          buffer in one assignment, which carries 32 bits:
-%%                          an 8-byte frame arrives as its first four.
-%% -> {ok, {Conn, #{patch => none | live | stored, image => none | string()}}}
-target(S) ->
-    case string:lexemes(S, " \t") of
-	[] -> target("local", []);
-	[Where | Flags] -> target(Where, Flags)
-    end.
-
-target(Where, Flags) ->
-    case conn(Where) of
-	{ok, C} ->
-	    Base = #{patch => case C of
-				  {local, _} -> none;
-				  _ -> live
-			      end,
-		     image => none, gap => 20, frame => 4},
-	    case flags(Flags, Base) of
-		{ok, O = #{to := To, from := From}} ->
-		    case C of
-			{local, If} ->
-			    {ok, {{can, If, To, From},
-				  maps:remove(patch_set,
-					      O#{patch := maps:get(patch_set, O,
-								   live)})}};
-			_ -> {error, "to= and from= are for a CAN interface"}
-		    end;
-		{ok, #{to := _}} -> {error, "to= wants a from= too"};
-		{ok, #{from := _}} -> {error, "from= wants a to= too"};
-		{ok, #{image := I}} when I =/= none, element(1, C) =:= local ->
-		    {error, "image= is for a node; our own csp runs its file"};
-		{ok, O} -> {ok, {C, maps:remove(patch_set, O)}};
-		E -> E
-	    end;
-	E -> E
-    end.
-
-flags([], O)                 -> {ok, O};
-flags(["rom" | T], O)        -> flags(T, O#{patch := none, patch_set => none});
-flags(["patch" | T], O)      -> flags(T, O#{patch := live, patch_set => live});
-flags(["eeprom" | T], O)     -> flags(T, O#{patch := stored,
-					   patch_set => stored});
-flags(["image=" ++ I | T], O) when I =/= "" -> flags(T, O#{image := I});
-flags(["to=" ++ N | T], O)   -> number(N, to, T, O);
-flags(["from=" ++ N | T], O) -> number(N, from, T, O);
-flags(["gap=" ++ N | T], O)  -> number(N, gap, T, O);
-flags(["frame=" ++ N | T], O) ->
-    case read_int(N) of
-	{ok, V} when V >= 1, V =< 8 -> flags(T, O#{frame := V});
-	_ -> {error, "frame= is 1 to 8: " ++ N}
-    end;
-flags([F | _], _)            -> {error, "unknown flag: " ++ F}.
-
-number(N, Key, T, O) ->
-    case read_int(N) of
-	{ok, V} -> flags(T, O#{Key => V});
-	error -> {error, atom_to_list(Key) ++ "= is not a number: " ++ N}
-    end.
-
-read_int("0x" ++ H) -> read_int(H, 16);
-read_int(D)         -> read_int(D, 10).
-
-read_int(S, Base) ->
-    try {ok, list_to_integer(S, Base)} catch _:_ -> error end.
-
-conn("local") -> {ok, {local, "vcan0"}};
-conn(S = "/" ++ _) ->
-    case string:split(S, "@") of
-	[Dev] -> {ok, {uart, Dev, 115200}};
-	[Dev, B] ->
-	    case string:to_integer(B) of
-		{N, ""} when N > 0 -> {ok, {uart, Dev, N}};
-		_ -> {error, "baud is not a number: " ++ B}
-	    end
-    end;
-conn(S) ->
-    case string:split(S, ":", trailing) of
-	[H, P] ->
-	    case string:to_integer(P) of
-		{N, ""} when N > 0, N < 65536 -> {ok, {tcp, H, N}};
-		_ -> {error, "port is not a number: " ++ P}
-	    end;
-	[If] ->
-	    case re:run(If, "^[a-z][a-z0-9_]*$") of
-		{match, _} -> {ok, {local, If}};
-		nomatch -> {error, "not a target: " ++ S}
-	    end
-    end.
+%% Where to: csp_cmd:target/1 reads the panel's target field. A csp of our
+%% own ({local, If}) is run here as a port; a node's console is connected by
+%% csp_cmd, and read here a message at a time.
 
 close(L)          -> L ! close, ok.
 set(L, Name, Val) -> L ! {set, Name, Val}, ok.
@@ -214,73 +107,67 @@ init(Owner, {{local, Can}, #{patch := Patch}}, Exe, Files) ->
     port_command(Port, "/pause\n"),
     Owner ! {csp_link, "local csp on " ++ Can ++
 		 case Patch of stored -> ", eeprom patch"; _ -> "" end},
-    loop(Port, Owner, []);
-init(Owner, {Target, Opts}, _Exe, _Files) ->
+    loop(#{port => Port, owner => Owner, buf => [], run => true,
+	   pending => []});
+init(Owner, T = {Target, Opts}, _Exe, _Files) ->
     process_flag(trap_exit, true),
     link(Owner),
-    case connect(Target) of
-	{ok, Io0} ->
-	    Io = case Io0 of
-		     {can, Id, To, From} -> {can, Id, To, From,
-					     maps:with([gap, frame], Opts)};
-		     _ -> Io0
-		 end,
-	    Owner ! {csp_link, "reading the program from " ++ where(Target)},
+    case csp_cmd:open(T) of
+	{ok, C} ->
+	    Owner ! {csp_link, "reading the program from " ++ csp_cmd:where(Target)},
 	    %% what the node is, first: a node from before /dump info refuses
 	    %% it, and the program is read all the same
-	    send(Io, "/dump info\n"),
-	    remote(Io, Owner, #{target => Target, opts => Opts, want => info,
-				buf => none, rom => none, decls => none,
-				asked => none, cycle => 0, until => 0,
-				part => <<>>});
+	    csp_cmd:send(C, "/dump info"),
+	    remote(Owner, #{conn => C, target => Target, opts => Opts,
+			    want => info, buf => none, rom => none,
+			    decls => none, asked => none, cycle => 0,
+			    until => 0});
 	{error, Why} ->
-	    Owner ! {csp_link, io_lib:format("~s: ~p", [where(Target), Why])},
+	    Owner ! {csp_link, io_lib:format("~s: ~p",
+					     [csp_cmd:where(Target), Why])},
 	    Owner ! {csp_exit, Why}
     end.
 
-%% Run: the panel is ticking (go) rather than stepping by hand. Pending: the
+%% run: the panel is ticking (go) rather than stepping by hand. pending: the
 %% names set since the last cycle. While running, a name set a second time
 %% before the tick gets a cycle of its own first: a click, pressed and let go
 %% inside one tick, would otherwise be one value and no edge.
-loop(Port, Owner, Buf) ->
-    loop(Port, Owner, Buf, true, []).
-
-loop(Port, Owner, Buf, Run, Pending) ->
-    Again = fun(B, R, P) -> loop(Port, Owner, B, R, P) end,
+loop(S = #{port := Port, owner := Owner, buf := Buf, run := Run,
+	   pending := Pending}) ->
     receive
 	{Port, {data, {eol, Line}}} ->
-	    Again(feed(Owner, Buf, Line), Run, Pending);
+	    loop(S#{buf := feed(Owner, Buf, Line)});
 	{Port, {data, {noeol, Line}}} ->
-	    Again(feed(Owner, Buf, Line), Run, Pending);
-	{Port, {exit_status, S}} ->
-	    Owner ! {csp_exit, S};
+	    loop(S#{buf := feed(Owner, Buf, Line)});
+	{Port, {exit_status, St}} ->
+	    Owner ! {csp_exit, St};
 	{set, Name, Val} ->
 	    P = case Run andalso lists:member(Name, Pending) of
 		    true -> port_command(Port, "/step 1\n"), [];
 		    false -> Pending
 		end,
 	    port_command(Port, ["> ", Name, " = ", fmt(Val), "\n"]),
-	    Again(Buf, Run, [Name | P]);
+	    loop(S#{pending := [Name | P]});
 	{raw, Line} ->
 	    port_command(Port, [Line, "\n"]),
-	    Again(Buf, Run, Pending);
+	    loop(S);
 	tick ->
 	    port_command(Port, "/step 1\n"),
-	    Again(Buf, Run, []);
+	    loop(S#{pending := []});
 	%% Paused already, and stays so: run is the panel ticking.
 	pause ->
-	    Again(Buf, false, Pending);
+	    loop(S#{run := false});
 	resume ->
-	    Again(Buf, true, Pending);
+	    loop(S#{run := true});
 	{step, N} ->
 	    port_command(Port, ["/step ", integer_to_list(N), "\n"]),
-	    Again(Buf, Run, []);
+	    loop(S#{pending := []});
 	reset ->
 	    port_command(Port, "/reset\n"),
-	    Again(Buf, Run, []);
+	    loop(S#{pending := []});
 	{clock, Ms} ->
 	    port_command(Port, ["/clock ", integer_to_list(Ms), "\n"]),
-	    Again(Buf, Run, Pending);
+	    loop(S);
 	close ->
 	    shutdown(Port);
 	%% The panel went away: browser closed, or it crashed. Same handling --
@@ -288,7 +175,7 @@ loop(Port, Owner, Buf, Run, Pending) ->
 	{'EXIT', Owner, _Reason} ->
 	    shutdown(Port);
 	{'EXIT', _Other, _Reason} ->
-	    Again(Buf, Run, Pending)
+	    loop(S)
     end.
 
 %% /quit makes csp exit at once (measured: 0 ms), so wait for that rather than
@@ -311,123 +198,54 @@ shutdown(Port) ->
 
 %%% ------------------------------------------------------------------ a node
 
-connect({tcp, H, P}) ->
-    case gen_tcp:connect(H, P, [list, {packet, line}, {active, true}], 3000) of
-	{ok, S} -> {ok, {tcp, S}};
-	E -> E
-    end;
-connect({can, If, To, From}) ->
-    %% The panel runs the can application already (candid.config).
-    try
-	%% #can_if{}: the router's id is element 4, its parameters element 7.
-	case [element(4, I) || I <- can_router:interfaces(),
-			       maps:get(device, element(7, I), none) =:= If] of
-	    [Id | _] ->
-		ok = can_router:attach(),
-		{ok, {can, Id, To, From}};
-	    [] -> {error, "the can application has no " ++ If}
-	end
-    catch
-	error:undef -> {error, "no can application on the code path"}
-    end;
-%% Raw bytes, split into lines here as CAN's are: in {packet, line} the
-%% driver hands over one line per read and leaves the rest of a burst in its
-%% buffer until more bytes arrive, so a dump stalled half way.
-connect({uart, Dev, Baud}) ->
-    try uart:open1(Dev, [{baud, Baud}, {mode, binary}, {packet, 0},
-			 {active, true}]) of
-	{ok, U} -> {ok, {uart, U}};
-	E -> E
-    catch
-	error:undef -> {error, "no uart application on the code path"}
-    end.
+send(#{conn := C}, Line) -> csp_cmd:send(C, Line).
 
-where({tcp, H, P})    -> H ++ ":" ++ integer_to_list(P);
-where({can, If, To, From}) ->
-    lists:flatten(io_lib:format("~s ~.16#/~.16#", [If, To, From]));
-where({uart, Dev, B}) -> Dev ++ "@" ++ integer_to_list(B).
-
-send({tcp, S}, Data)  -> gen_tcp:send(S, Data);
-send({uart, U}, Data) -> uart:send(U, Data);
-send({can, Id, To, _From, #{gap := Gap, frame := N}}, Data) ->
-    lists:foreach(fun(B) ->
-			  can:sync_send(can:create(To, Id, B)),
-			  timer:sleep(Gap)
-		  end, chunks(iolist_to_binary(Data), N)).
-
-chunks(Bin, N) when byte_size(Bin) > N ->
-    <<B:N/binary, T/binary>> = Bin,
-    [B | chunks(T, N)];
-chunks(B, _) -> [B].
-
-hangup({tcp, S})  -> gen_tcp:close(S);
-hangup({uart, U}) -> uart:close(U);
-hangup({can, _, _, _, _}) -> can_router:detach().
-
-remote(Io, Owner, St) ->
+remote(Owner, St = #{conn := C}) ->
     receive
-	{tcp, _, Line}  -> remote(Io, Owner, line(Io, Owner, Line, St));
 	{raw, Line} ->
-	    send(Io, [Line, "\n"]),
-	    remote(Io, Owner,
-		   St#{echo => erlang:monotonic_time(millisecond) + 2000});
-	{uart, _, Data} -> remote(Io, Owner, bytes(Io, Owner, Data, St));
-	%% #can_frame{id, len, data, intf, ts}: bytes, not lines. Ours only,
-	%% on the interface we named.
-	{can_frame, From, _, Data, Id, _} when element(1, Io) =:= can,
-					       element(2, Io) =:= Id,
-					       element(4, Io) =:= From ->
-	    remote(Io, Owner, bytes(Io, Owner, Data, St));
-	{tcp_closed, _} -> gone(Owner, closed);
-	{uart_closed, _} -> gone(Owner, closed);
-	{tcp_error, _, Why} -> gone(Owner, Why);
-	{uart_error, _, Why} -> gone(Owner, Why);
+	    send(St, Line),
+	    remote(Owner, St#{echo => erlang:monotonic_time(millisecond) + 2000});
 	{set, Name, Val} ->
-	    send(Io, ["> ", Name, " = ", fmt(Val), "\n"]),
-	    remote(Io, Owner, St);
+	    send(St, ["> ", Name, " = ", fmt(Val)]),
+	    remote(Owner, St);
 	tick ->
-	    remote(Io, Owner, ask(Io, St));
+	    remote(Owner, ask(St));
 	pause ->
-	    send(Io, "/pause\n"),
-	    remote(Io, Owner, St);
+	    send(St, "/pause"),
+	    remote(Owner, St);
 	resume ->
-	    send(Io, "/resume\n"),
-	    remote(Io, Owner, St);
+	    send(St, "/resume"),
+	    remote(Owner, St);
 	%% A node steps in its own loop, after the command line is read, so a
 	%% /dump state right behind /step can land between steps. Ask until the
 	%% cycle has got there.
 	{step, N} ->
-	    send(Io, ["/commit\n/step ", integer_to_list(N), "\n"]),
-	    #{cycle := C} = St,
-	    remote(Io, Owner, ask(Io, St#{asked := none, until := C + N}));
+	    send(St, "/commit"),
+	    send(St, "/step " ++ integer_to_list(N)),
+	    #{cycle := Cy} = St,
+	    remote(Owner, ask(St#{asked := none, until := Cy + N}));
 	again ->
-	    remote(Io, Owner, ask(Io, St));
+	    remote(Owner, ask(St));
 	reset ->
-	    send(Io, "/reset\n"),
-	    remote(Io, Owner, ask(Io, St#{asked := none, until := 0}));
+	    send(St, "/reset"),
+	    remote(Owner, ask(St#{asked := none, until := 0}));
 	{clock, Ms} ->
-	    send(Io, ["/clock ", integer_to_list(Ms), "\n"]),
-	    remote(Io, Owner, St);
+	    send(St, "/clock " ++ integer_to_list(Ms)),
+	    remote(Owner, St);
 	close ->
-	    hangup(Io);
+	    csp_cmd:close(C);
 	{'EXIT', Owner, _} ->
-	    hangup(Io);
+	    csp_cmd:close(C);
 	{'EXIT', _, _} ->
-	    remote(Io, Owner, St)
-    end.
-
-%% XOFF/XON are flow control, never text: a node holds the line around every
-%% command it parses (serial_hold), on USB too, and "\^Sdump rom 1300" is not a
-%% dump head.
-bytes(Io, Owner, Data0, St = #{part := P}) ->
-    Data = binary:replace(Data0, [<<16#13>>, <<16#11>>], <<>>, [global]),
-    case binary:split(<<P/binary, Data/binary>>, <<"\n">>, [global]) of
-	[Rest] -> St#{part := Rest};
-	Ls ->
-	    {Lines, [Rest]} = lists:split(length(Ls) - 1, Ls),
-	    lists:foldl(fun(L, Si) ->
-				line(Io, Owner, binary_to_list(L), Si)
-			end, St#{part := Rest}, Lines)
+	    remote(Owner, St);
+	Msg ->
+	    case csp_cmd:msg(C, Msg) of
+		{lines, Ls, C1} ->
+		    remote(Owner, lists:foldl(fun(L, Si) -> line(Owner, L, Si) end,
+					      St#{conn := C1}, Ls));
+		{closed, Why} -> gone(Owner, Why);
+		no -> remote(Owner, St)
+	    end
     end.
 
 gone(Owner, Why) ->
@@ -437,21 +255,21 @@ gone(Owner, Why) ->
 %% One /dump state in flight at a time: a tick faster than the line is slower
 %% than the reply would otherwise queue up requests without end. One that got
 %% lost is given up after a second.
-ask(Io, St = #{decls := Ds, asked := T}) when Ds =/= none ->
+ask(St = #{decls := Ds, asked := T}) when Ds =/= none ->
     Now = erlang:monotonic_time(millisecond),
     case T =:= none orelse Now - T > 1000 of
-	true  -> send(Io, "/dump state\n"), St#{asked := Now};
+	true  -> send(St, "/dump state"), St#{asked := Now};
 	false -> St
     end;
-ask(_Io, St) ->
+ask(St) ->
     St.
 
 %% The console echoes and prompts as well; only the replies are read. A dump
 %% is its head line, hex lines and a `.'.
-line(Io, Owner, Line0, St = #{buf := none}) ->
-    case strip(string:trim(Line0)) of
+line(Owner, L0, St = #{buf := none}) ->
+    case L0 of
 	L = "dump " ++ _ -> St#{buf := [L]};
-	L = "ERR " ++ _  -> refused(Io, Owner, L, St);
+	L = "ERR " ++ _  -> refused(Owner, L, St);
 	L ->
 	    %% monotonic time is often below 0: no `echo' is not a 0
 	    case maps:get(echo, St, none) of
@@ -462,52 +280,53 @@ line(Io, Owner, Line0, St = #{buf := none}) ->
 	    end,
 	    St
     end;
-line(Io, Owner, Line0, St = #{buf := Buf}) ->
-    case strip(string:trim(Line0)) of
+line(Owner, L0, St = #{buf := Buf}) ->
+    case L0 of
 	"." ->
 	    Text = lists:join("\n", lists:reverse(Buf, ["."])),
-	    reply(Io, Owner, csp_node:dumps(lists:flatten(Text)),
+	    reply(Owner, csp_node:dumps(lists:flatten(Text)),
 		  St#{buf := none});
 	L -> St#{buf := [L | Buf]}
     end.
 
 %% A line that came wrong, or never came: asked for again by its offset, one
 %% window at a time, until the whole is there. A few tries, then said.
-reply(Io, Owner, [{part, K, P}], St = #{want := W})
+reply(Owner, [{part, K, P}], St = #{want := W})
   when K =:= W; W =:= patch, K =:= eeprom ->
     Tries = maps:get(tries, St, 0),
     case csp_node:merge(maps:get(piece, St, P#{have := []}), {part, K, P}) of
 	{K, Bin} ->
-	    reply(Io, Owner, [{K, Bin}], maps:without([piece, tries], St));
+	    reply(Owner, [{K, Bin}], maps:without([piece, tries], St));
 	{part, K, P1 = #{want := [{O, L} | _]}} when Tries < 5 ->
-	    send(Io, [dump_cmd(K, St), " ", integer_to_list(O), " ",
-		      integer_to_list(L), "\n"]),
+	    send(St, [dump_cmd(K, St), " ", integer_to_list(O), " ",
+		      integer_to_list(L)]),
 	    St#{piece => P1, tries => Tries + 1};
 	_ ->
 	    Owner ! {csp_link, io_lib:format("~s did not come whole", [K])},
 	    maps:without([piece, tries], St)
     end;
-reply(Io, Owner, [{info, Bin}], St = #{want := info, target := T}) ->
+reply(Owner, [{info, Bin}], St = #{want := info, target := T}) ->
     try csp_node:info(Bin) of
 	Info ->
-	    Owner ! {csp_link, "node " ++ where(T) ++ ": " ++ info_text(Info)},
-	    read_rom(Io, St#{info => Info})
+	    Owner ! {csp_link, "node " ++ csp_cmd:where(T) ++ ": " ++
+			 csp_cmd:info_text(Info)},
+	    read_rom(St#{info => Info})
     catch
 	_:Why ->
 	    Owner ! {csp_link, io_lib:format("node info not read: ~P", [Why, 6])},
-	    read_rom(Io, St)
+	    read_rom(St)
     end;
-reply(Io, Owner, [{rom, Bin}], St = #{want := rom, opts := #{patch := P}}) ->
+reply(Owner, [{rom, Bin}], St = #{want := rom, opts := #{patch := P}}) ->
     case P of
 	none   -> program(Owner, [{rom, Bin}], St#{rom := Bin});
-	live   -> send(Io, "/dump patch\n");
-	stored -> send(Io, "/dump eeprom\n")
+	live   -> send(St, "/dump patch");
+	stored -> send(St, "/dump eeprom")
     end,
     St#{rom := Bin, want := patch};
-reply(_Io, Owner, [{K, Bin}], St = #{want := patch, rom := Rom})
+reply(Owner, [{K, Bin}], St = #{want := patch, rom := Rom})
   when K =:= patch; K =:= eeprom ->
     program(Owner, [{rom, Rom}, {K, Bin}], St);
-reply(_Io, Owner, [D = {state, Cycle, Ms, _, _}], St = #{decls := Ds})
+reply(Owner, [D = {state, Cycle, Ms, _, _}], St = #{decls := Ds})
   when Ds =/= none ->
     try csp_node:state(Ds, D) of
 	Vals ->
@@ -524,45 +343,24 @@ reply(_Io, Owner, [D = {state, Cycle, Ms, _, _}], St = #{decls := Ds})
     St#{asked := none, cycle := Cycle};
 %% Not understood (a node of another make): said, and while reading the
 %% program it is given up rather than waited for.
-reply(Io, Owner, [{unknown, Head}], St = #{want := info}) ->
+reply(Owner, [{unknown, Head}], St = #{want := info}) ->
     Owner ! {csp_link, "node: a dump not understood: dump " ++ Head},
-    read_rom(Io, St);
-reply(_Io, Owner, [{unknown, Head}], St = #{want := W}) ->
+    read_rom(St);
+reply(Owner, [{unknown, Head}], St = #{want := W}) ->
     Owner ! {csp_link, "node: a dump not understood: dump " ++ Head},
     case W of
 	state -> St#{asked := none};
 	_     -> St#{want := none}
     end;
-reply(_Io, _Owner, _, St) ->
+reply(_Owner, _, St) ->
     St.
 
-read_rom(Io, St = #{opts := Opts}) ->
-    send(Io, case Opts of
-		 #{image := none} -> "/dump rom\n";
-		 #{image := I}    -> ["/dump rom ", I, "\n"]
+read_rom(St = #{opts := Opts}) ->
+    send(St, case Opts of
+		 #{image := none} -> "/dump rom";
+		 #{image := I}    -> ["/dump rom ", I]
 	     end),
     St#{want := rom}.
-
-%% The node in a line: its part, firmware, number format, room, slots.
-info_text(I) ->
-    Float = case maps:get(float, I, fixpoint) of
-		fixpoint -> "Q16.16";
-		ieee -> "IEEE float"
-	    end,
-    Ram = case I of
-	      #{ram := #{total := T, free := F}} ->
-		  io_lib:format(", RAM ~w free of ~w", [F, T]);
-	      _ -> ""
-	  end,
-    Slots = [[", ", N, ": ", slot_text(R)]
-	     || R = #{kind := app, name := N} <- maps:get(regions, I, [])],
-    lists:flatten([maps:get(device, I, "?"), " fw ", maps:get(fw, I, "?"),
-		   ", ", Float, " ", atom_to_list(maps:get(endian, I, little)),
-		   "-endian", Ram, Slots]).
-
-slot_text(#{slot := image, image := #{role := R, gen := G, size := Sz}}) ->
-    io_lib:format("~s gen ~w (~w B)", [R, G, Sz]);
-slot_text(#{slot := S}) -> atom_to_list(S).
 
 %% What reads K again, a window of it after.
 dump_cmd(rom, #{opts := #{image := none}}) -> "/dump rom";
@@ -571,35 +369,42 @@ dump_cmd(K, _St) -> ["/dump ", atom_to_list(K)].
 
 %% Nothing stored is an image with no patch; anything else refused while
 %% reading the program leaves nothing to read the state by.
-refused(Io, _Owner, _L, St = #{want := info}) ->
-    read_rom(Io, St);
-refused(_Io, Owner, _L, St = #{want := patch, rom := Rom}) ->
+refused(_Owner, _L, St = #{want := info}) ->
+    read_rom(St);
+refused(Owner, _L, St = #{want := patch, rom := Rom}) ->
     program(Owner, [{rom, Rom}], St);
-refused(_Io, Owner, L, St = #{want := rom}) ->
+refused(Owner, L, St = #{want := rom}) ->
     Owner ! {csp_link, "node: " ++ L},
     St;
-refused(_Io, _Owner, _L, St) ->
+refused(_Owner, _L, St) ->
     St#{asked := none}.
 
 program(Owner, Ds, St = #{target := T}) ->
     case silent(fun() -> try csp_node:program(Ds) catch C:W -> {C, W} end
 		end) of
-	{ok, {_, _, Decls, _}} ->
+	{ok, P = {_, _, Decls, _}} ->
 	    Owner ! {csp_link, io_lib:format("node ~s, ~w declarations~s",
-					     [where(T), length(Decls),
+					     [csp_cmd:where(T), length(Decls),
 					      patched(Ds)])},
+	    %% a transport the program names and the node lacks: it runs,
+	    %% and that buffer never delivers
+	    [Owner ! {csp_link, "node " ++ csp_cmd:where(T) ++ ": " ++ Tx ++
+			  " (" ++ N ++ ") is the null device here -- never "
+			  "delivers, " ++ N ++ ".rx stays false"}
+	     || #{text := Tx, name := N}
+		    <- csp_list:null(csp_list:uses(P), maps:get(info, St, #{}))],
 	    %% what the node said of itself goes with its program
 	    Info = [{info, I} || I <- [maps:get(info, St, none)], I =/= none],
 	    case listing(Ds) of
 		{ok, Text} -> Owner ! {csp_program, Text, Ds ++ Info};
 		Error ->
 		    Owner ! {csp_link, io_lib:format("node ~s: not listed: ~P",
-						     [where(T), Error, 8])}
+						     [csp_cmd:where(T), Error, 8])}
 	    end,
 	    St#{decls := Decls, want := state};
 	Other ->
 	    Owner ! {csp_link, io_lib:format("node ~s: program not read: ~P",
-					     [where(T), Other, 8])},
+					     [csp_cmd:where(T), Other, 8])},
 	    St#{want := none}
     end.
 
@@ -690,7 +495,8 @@ emit(Owner, Text) ->
 %% An ARRAY element after the first arrives named with its subscript:
 %% `#analog P[10]:16` is {analog,"P",V0} and then {analog,"P[1]",V1} and on.
 %% The head cannot be told from a scalar, so it is kept under its bare name AND
-%% offered as [0]; the widget side asks for whichever it declared.
+%% offered as [0]; the widget side asks for whichever it declared. A node's
+%% state (csp_node) names the head P[0], and it is offered as P as well.
 flat(Vals) -> lists:append([head(E) || E <- lists:flatten([fv(V) || V <- Vals])]).
 
 fv({object, _Name, Inner}) -> [fv(V) || V <- Inner];
@@ -699,7 +505,11 @@ fv(_)                      -> [].
 
 head({Name, V}) ->
     case lists:member($[, Name) of
-	true  -> [{Name, V}];
+	true ->
+	    case lists:suffix("[0]", Name) of
+		true  -> [{Name, V}, {lists:sublist(Name, length(Name) - 3), V}];
+		false -> [{Name, V}]
+	    end;
 	false -> [{Name, V}, {elem(Name, 0), V}]
     end.
 

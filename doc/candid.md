@@ -382,7 +382,7 @@ running, unless `candid.config` says otherwise:
 `colors` sets the code view's highlights, as any css colour: `true` (a contact
 that holds), `fired` (a coil whose rule fired), `next` (the outline of a coil
 whose guard holds), `block` (the `#in`/`#when` header in force), `want` and
-`unwant` (marks, see below). `make run` passes `-config candid.config`.
+`unwant` (a trace's replayed step, and a value csp disagrees with). `make run` passes `-config candid.config`.
 
 The choices made on the bar are kept when you pick another program.
 Light mode is the dark panel inverted and turned back to its own hues, on a
@@ -395,9 +395,10 @@ Everything is in one window:
 
 * **The top frame**, under the bar, says where the program is. It shows
   `State` by name, the cycle, and the program's own clock (`time`, from csp,
-  which stands still while paused). Next come the goal with **clear**,
-  **solve** and the bound (see the model, below), then varp's answer, and the
-  table of the program's values that have no widget of their own.
+  which stands still while paused). Next comes what was clicked last -- a
+  contact or a signal, and what it is now -- then a trace from the solver
+  when one is shown (see below), and the table of the program's values that
+  have no widget of their own.
 * **The devices**, on the left, scroll on their own.
 * **The code view**, on the right, scrolls on its own. A long rung scrolls
   sideways inside it.
@@ -432,41 +433,69 @@ What the colours mean:
 * **Faded row:** the row sits in a block that is not active. A rule outside
   every block counts as `#in INIT NORMAL`, as in csp.
 
-### Marks and the model
+### Watch
 
-Click a contact once and it should hold (a solid frame), twice and it should
-not (a dashed frame), three times to forget it. The marks add up to one
-condition, the **goal**, shown in the top frame as candyspeak, with an object's
-names made whole (`m0.X`):
+A click on a contact, or on a signal's label among the devices or its cell
+in a value table, shows it in the top frame with what it is now
+(`m0.X = 1`, `N > 2 = 0`), names as the main tab has them.
 
-    goal: !(N > 2) && m0.X && !Go
+### The solver
 
-A **signal** is marked the same way, by clicking its label among the devices
-or its cell in a value table. One bit is marked as on (`Siren`) or off
-(`!Siren`). A wider value is marked as equal or not equal to its value at the
-moment of the click (`N == 5`, `!(N == 5)`). So "is Siren ever set" is a click
-on Siren and **solve**.
+**solver** in the bar opens a pane in the dock, beside the log and the chat.
+You write what the program should do in it, a line each, and **prove** asks
+varp about every line, in order, within the bound (`k ≤ 10` by default; 1, 2,
+5, 10, 20 or 50 cycles):
 
-Marks are kept across tabs. To flip an input, use its widget.
+    // the house at night
+    assume    !(LivingWindow && FrontDoor)
+    invariant State == Night => !KitchenLight' && !LivingLight'
+    invariant State == Night => !HallLight'
+    reach     State == Night && HallMotion && !HallLight'
+    reach     State == Away
 
-**solve** asks varp whether some run of the program, from `INIT`, reaches the
-goal within the bound (`k ≤ 10` by default; 1, 2, 5, 10, 20 or 50 steps). The
-program is translated by `candyspeak_varp` with the goal as its `reach`, and
-`varp bmc` searches (bounded model checking: try 0 steps, then 1, and so on up
-to the bound). When no run gets there, varp tries to prove that none ever
-does, by k-induction (`varp bmc --induction`): it shows that no run of k+1
-steps can end in the goal unless it already was there before. The answer is
-one of
+- `assume` is taken to hold in every cycle -- what the world does not do, say
+  two keys at once.
+- `invariant` should hold in every cycle. The answer is "holds", proved for
+  every run, or "broken in cycle N" with the trace that breaks it. One that
+  holds is assumed for the lines after it.
+- `reach` asks for a run that gets there: "reached in cycle N" with its
+  trace, or "never", proved for every run.
 
-- "never: ... no step can lead into it" -- 0-induction, the rules alone rule
-  the goal out, whatever state came before. `Yellow && Green` in a program
-  where green means all three buttons and yellow exactly one is this kind:
-  the same contradiction `varp sat` finds in the plain formula.
-- "never: ... no run reaches it (proved by N-induction)" -- states where the
-  goal holds exist, but it takes N steps of history to see no run gets there.
-- "not reachable within k steps, and not proved for ever" -- neither; a
-  longer bound may find a run, or a proof.
-- the trace: a column per step, `State` by name.
+A condition is about ONE CYCLE, and its names are what that cycle reads: a
+state or an output the value it starts with, an input the sample it takes.
+More forms say the rest of the cycle:
+
+- `X'` -- what the cycle leaves X at (`after(X)` is the same; `(A || B)'`
+  primes the whole). `HallLight'` is "this cycle turns the hall light on".
+- `rising(I)`, `falling(I)` -- between the last sample and this one; in the
+  first cycle the pin was at rest.
+- `A => B` -- if A then B, `!(A) || (B)`, the loosest of all.
+
+So `State == Night` is reached in the cycle that runs in Night, the one after
+the cycle that set it, and `Heater && LivingWindow` is reached (the heat is
+still on when the cycle sees the window open) while `Heater' && LivingWindow`
+is not (no cycle that sees it open leaves the heat on). Timers, `#local`s,
+`#param`s, buffer bytes and `.rx`, and objects' names (`b1.State == off`)
+read the same way. `//` starts a comment.
+
+An answer with a trace says `▸ show`: a click puts the trace in the top frame,
+with its step tool (below), cycle N its column N -- its inputs and what it
+leaves. Closing the pane takes the trace away again, and when a replay has
+run, csp is reset, its clock its own again, and running or paused as it was
+before.
+
+How it is answered: the program is translated by `candyspeak_varp`, the line
+as its `reach` (an invariant as its negation), and `varp bmc` searches --
+bounded model checking, 0 cycles, then 1, up to the bound. With no run found,
+varp tries to prove there never is one by k-induction (`varp bmc
+--induction`): no run of k+1 cycles can end there unless it already was. A
+line can also come back "not within k cycles, not proved": induction starts
+from ANY state, also one no run reaches, so a true answer may not close. The
+model helps it with what the rules alone say: a state every rule writes a
+constant to holds one of those or its first value (`KitchenLight == 0` when
+nothing turns it on, `State` only the states set), and with the invariants
+proved above the line. What that does not cover -- a timer that only runs
+outside INIT, say -- stays unproved.
 
 A model with no transitions at all has no trace and proves anything, so the
 model is first asked for a run of two steps; without one the answer says so
@@ -506,17 +535,12 @@ goes out a step ahead: csp takes a frame in during one cycle and the rules see
 `.rx` in the next -- which is also why no rule sees a frame in `INIT`, and the
 model says so. A buffer with no fixed id cannot be sent to, and a trace that
 receives on one says so. `make run` starts the `can` application the frames go
-through. `#param`s are taken at their declared values, in the check and in
-solve alike.
+through.
 
-**clear** drops the marks and checks the model itself, before you believe an
-answer from it:
-
-* It checks that the model **runs** at all. A model with no transitions makes
-  every goal unreachable, which would mean nothing.
-* It lists what the model **leaves free**: the inputs, any value each step;
-  variables written by rules it cannot model; `#param`s, any value but frozen;
-  the guards that are a free choice; and how many rules are not modelled.
+What the model does not pin down is worth knowing before believing it: the
+inputs, any value each cycle; variables written by rules it cannot model, so
+free; the guards that are a free choice (`L26?`); and the rules not modelled.
+`#param`s are taken at their declared values.
 
 Objects are modelled as the runtime makes them: every member once per
 instance, named as csp names it (`EnDb.Hold`), each instance with its own
@@ -599,7 +623,7 @@ wired to something that moves.
 
 It works on source text with line numbers and gets the compiler's errors back
 as `program:LINE`; a change to a long program is an `edit` (old text, new
-text) rather than the whole file. `prove` answers as solve does: a trace,
+text) rather than the whole file. `prove` answers as the solver does: a trace,
 "never" or "always hold" with the k-induction that proved it, or "not within
 k steps" when neither was found -- and names what the model left free, where
 a counterexample may be one the program cannot take.
@@ -642,7 +666,5 @@ nothing in a program or its annotations changes. What differs is the drawing:
 * **Light** is the dark panel's lightness turned over with each hue kept, as
   the browser's css filter does it. The trace and the plots stay dark: they are
   screens.
-* **A mark** is the frame round a contact or a label, in the mark's colour; wx
-  has no outline.
 * **Not there yet**: `glow` and `clip` on a plot (the beam is drawn, not
   bloomed, and a round glass does not clip its corners), and a lamp is square.

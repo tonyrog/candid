@@ -10,7 +10,8 @@
 
 -export([run/0]).
 -export([logger/1]).
--export([answer/5]).                  % the code view's ui in a test
+-export([new/4, metrics/2, paint/4, answer/5,
+	 shown/3, rungs/6, draw/3]).   % the code view's ui in a test
 -export([pane/2, show/3, say/4, clear/2, busy/3, event/2]).  % the chat's, here
 
 -define(SETTLE, 600).
@@ -676,7 +677,8 @@ varp_prop_check() ->
 	   Has(T, "// line 11: Phase != 3"), T),
     expect("assume and reach are their own items",
 	   Has(T, "assume    (Go) != 0;") andalso
-	   Has(T, "reach     ((Green) != 0) and ((Phase) == (0));"), T),
+	   Has(T, "reach     u_seen == 1 and (((u_p_Green) != 0) and "
+	       "((u_p_Phase) == (0)));"), T),
     %% A goal on the program's State: its variable is St, its names defined.
     Sf = "/tmp/csp_varp_state.csp",
     ok = file:write_file(Sf, "#states RUN STOP\n#digital Go in 1\n"
@@ -684,8 +686,10 @@ varp_prop_check() ->
     {ok, #{text := St0}} = candyspeak_varp:model(Sf, [{reach, "State == RUN"},
 						     {params, fixed}]),
     St = lists:flatten(St0),
-    expect("a goal on State reads St",
-	   Has(St, "reach     (St) == (RUN);") andalso Has(St, "define RUN 3;"), St),
+    expect("a goal on State reads St, as the cycle reads it",
+	   Has(St, "reach     u_seen == 1 and ((u_p_St) == (RUN));") andalso
+	   Has(St, "next  next(u_p_St) == St;") andalso
+	   Has(St, "define RUN 3;"), St),
     case os:find_executable("varp") of
 	false -> io:format("skip  varp run (no varp on PATH)~n");
 	Varp ->
@@ -695,8 +699,9 @@ varp_prop_check() ->
 	    expect("the invariant is proved", Has(Ind, "% TRUE"), Ind),
 	    Re = os:cmd(Varp ++ " bmc --k-max 6 --trace false --property "
 			"csp_varp_prop_reach " ++ V ++ " 2>&1 | tail -2"),
-	    expect("reach finds green with the phase wrapped",
-		   Has(Re, "counterexample at k=3"), Re)
+	    expect("reach finds green with the phase wrapped, in the cycle "
+		   "that reads it",
+		   Has(Re, "counterexample at k=4"), Re)
     end,
 
     Err = fun(Name, Ann) -> element(2, Tr(Name, "#annotate varp " ++ Ann ++ "\n")) end,
@@ -817,7 +822,7 @@ code_view_check() ->
 	   lists:member({"a1", tree("examples/adder3.csp"), 8}, Fired2) andalso
 	   lists:member({"", tree("examples/adder3.csp"), 23}, Fired2), Fired2),
 
-    %% Marks: a contact in an object's tab is named as it is outside it.
+    %% A contact in an object's tab is named as it is outside it.
     Mod = "#module M\n  #variable X:1 unsigned in\n"
 	"  #variable Y:1 unsigned out\n  Y = 1 ? X && Go\n#end\n"
 	"#digital Go in 4\n#variable N:4 = 0\n#M m0 X=Go\n"
@@ -826,14 +831,7 @@ code_view_check() ->
     ok = file:write_file(Fm, Mod),
     {ok, Am} = candyspeak:parse(Fm),
     Vm = #{tabs => csp_code:tabs(Am)},
-    Ev2 = fun(Txt) ->
-		  {ok, [{define, _, _, X}]} = candyspeak_parse:parse(
-						element(2, candyspeak_scan:string(
-							     "#define P_ " ++ Txt ++ "\n"))),
-		  X
-	  end,
     Mx = csp_code:contact_of(Vm, 1, "k1_0"),
-    Mg = csp_code:contact_of(Vm, 1, "k1_1"),
     %% An object's line in main's flow; opened, its rules follow in place,
     %% their ids its own, a contact named as in its tab.
     Vo = Vm#{tab => 0, open => []},
@@ -854,23 +852,13 @@ code_view_check() ->
 	   {Shut, Opened}),
     %% main's rule is 4: the module's is 1, m0's line two (X=Go and its State)
     Mn = csp_code:contact_of(Vm, 0, "k4_0"),
-    Goal = csp_code:goal_text(#{{1, "k1_0"} => {true, Mx},
-				{1, "k1_1"} => {false, Mg},
-				{0, "k4_0"} => {false, Mn}}),
-    expect("goal: up and down step the number at the cursor, not a name's",
-	   {csp_code:bump("Lock == 128", 10, -1), csp_code:bump("a0.N == 3", 0, 1),
-	    csp_code:bump("A == 1 && B == 7", 15, 1), csp_code:bump("Go", 1, 1)}
-	   =:= {{"Lock == 127", 8}, {"a0.N == 4", 8}, {"A == 1 && B == 8", 15},
-		{"Go", 1}},
-	   csp_code:bump("Lock == 128", 10, -1)),
-    expect("marks add up to one condition, objects' names made whole",
-	   Goal =:= "!(N > 2) && m0.X && !Go", Goal),
-    NotNot = csp_code:goal_text(#{{0, "k1_0"} => {false, Ev2("!Go")}}),
-    expect("a contact `!X' marked false is X, not !!X", NotNot =:= "Go", NotNot),
+    expect("a clicked contact is watched by its name as main has it",
+	   {candyspeak_eval:text(Mx), candyspeak_eval:text(Mn)} =:= {"m0.X", "N > 2"},
+	   {candyspeak_eval:text(Mx), candyspeak_eval:text(Mn)}),
     model_check().
 
-%% prove/5: no trace, and then whether there never is one. Yellow && Green
-%% is ruled out by the rules alone (0-induction); B is 1 only one step after
+%% prove/5: no trace, and then whether there never is one. Yellow' && Green'
+%% is ruled out by the rules alone (0-induction); B' is 1 only one step after
 %% A, which is 0 after the first step (1-induction); N and M count in step,
 %% so N == 3 && M == 5 never happens, but only a run of 16 shows it.
 prove_check(Sh) ->
@@ -888,15 +876,20 @@ prove_check(Sh) ->
 		  candyspeak_varp:prove(M, "--property " ++ maps:get(name, M) ++
 					    "_reach", 10, 30, Sh)
 	  end,
-    R0 = Ask("Yellow && Green"),
-    expect("prove: Yellow && Green never, by the rules alone",
+    %% X' is what a cycle leaves: no cycle can leave both on
+    R0 = Ask("Yellow' && Green'"),
+    expect("prove: Yellow' && Green' never, by the rules alone",
 	   R0 =:= {proved, 0}, R0),
-    R1 = Ask("B"),
-    expect("prove: B never, with one step of history", R1 =:= {proved, 1}, R1),
+    %% X is what it reads, which one cycle before left
+    R0r = Ask("Yellow && Green"),
+    expect("prove: Yellow && Green never read, one step more",
+	   R0r =:= {proved, 1}, R0r),
+    R1 = Ask("B'"),
+    expect("prove: B' never, with one step of history", R1 =:= {proved, 1}, R1),
     Ru = Ask("N == 3 && M == 5"),
     expect("prove: not within 10, not proved either", element(1, Ru) =:= none,
 	   Ru),
-    Rf = Ask("Yellow && B1"),
+    Rf = Ask("Yellow' && B1"),
     expect("prove: a goal that is reached has its trace",
 	   element(1, Rf) =:= found andalso element(2, Rf) =:= 1, Rf),
     %% One hand on the keys: with the count assumed, two at once never is.
@@ -949,7 +942,8 @@ model_check() ->
     {ok, M} = candyspeak_varp:model(F, [{reach, "LongRed && Please"}]),
     Text = lists:flatten(maps:get(text, M)),
     expect("the asked reach is in the model, with what it leaves free",
-	   string:find(Text, "reach     ((LongRed) != 0) and ((Please) != 0);   // goal:") =/= nomatch andalso
+	   string:find(Text, "reach     u_seen == 1 and (((u_p_LongRed) != 0) and "
+			 "((Please) != 0));   // goal:") =/= nomatch andalso
 	   maps:get(inputs, M) =:= ["Please"] andalso
 	   lists:keyfind("red", 1, maps:get(states, M)) =:= {"red", 4},
 	   {maps:get(inputs, M), maps:get(states, M)}),
@@ -971,6 +965,7 @@ model_check() ->
 	    shift_check(Sh),
 	    timer_check(Sh),
 	    shift_ops_check(Sh),
+	    cycle_goal_check(Sh),
 	    object_check(Sh)
     end,
 
@@ -1000,14 +995,14 @@ model_check() ->
 	   string:find(Tw, "((St == A) and ((M) != 0))") =/= nomatch andalso
 	   string:find(Tw, "((St == A) and ((N) == (0)))") =/= nomatch, Tw),
 
-    %% A signal marked from its label or cell: on for one bit, its value now
-    %% for more.
-    {ok, Ag} = candyspeak:parse(tree("examples/traffic.csp")),
-    Vg = #{tabs => csp_code:tabs(Ag), last => #{"LongRed" => 7}},
-    S1 = csp_code:goal_text(#{{sig, "Red"} => {true, csp_code:sig_expr(Vg, "Red")},
-			      {sig, "LongRed"} => {false, csp_code:sig_expr(Vg, "LongRed")}}),
-    expect("signals as marks: `Red', `!(LongRed == 7)'",
-	   S1 =:= "!(LongRed == 7) && Red", S1).
+    %% The solver's lines: a kind and a condition, // a comment, blank
+    %% nothing; a line not understood is said, by its number.
+    Ls = csp_solve:parse("// the night\n\nassume  !(A && B)  // one at a time\n"
+			 "invariant Night => !Light'\nreach Go\nreach\nfoo bar\n"),
+    expect("solver: lines read, comments and blanks left out",
+	   Ls =:= [{3, "assume", "!(A && B)"}, {4, "invariant", "Night => !Light'"},
+		   {5, "reach", "Go"}, {6, error, "reach what?"},
+		   {7, error, "not assume, invariant or reach: foo"}], Ls).
 
 %% A timer is two state variables and the time before each step: declared
 %% `= 1' it is started by the setup, before INIT, and a 500 ms one restarted
@@ -1025,8 +1020,8 @@ timer_check(Sh) ->
 				      "csp_varp_timer_reach --k-max " ++
 					  integer_to_list(K), Sh)
 	  end,
-    R1 = Ask("X == 2", 1),
-    R2 = Ask("X == 2", 4),
+    R1 = Ask("X' == 2", 1),
+    R2 = Ask("X' == 2", 4),
     expect("timer: two timeouts take two steps of 500 ms or more",
 	   element(1, R1) =:= none andalso element(1, R2) =:= found andalso
 	   element(2, R2) =:= 2 andalso
@@ -1047,27 +1042,130 @@ timer_check(Sh) ->
     expect("the panel is told the cycle walked: step, values, the time so far",
 	   {Step, Steps, maps:get("X", LVs)} =:= {2, 2, 1} andalso Ms >= 1000,
 	   {Step, Steps, Ms}),
-    %% A solve with no trace after one with: the cycle walked in the old
-    %% trace goes with it, or the next paint looks for it there.
-    Vn = csp_code:model(Vt#{ui => {?MODULE, ui}, h => h, at => none, acts => []},
-			{solve, "X == 9", 4, Mt, {proved, 0}}),
-    expect("no trace, no cycle to walk", maps:get(look, Vn) =:= none,
-	   maps:get(look, Vn)),
-    expect("varp's answer goes to the log, the frame gets its first line",
-	   case maps:get(acts, Vn) of
-	       [{log, "varp: never: X == 9" ++ _}] -> true;
-	       _ -> false
-	   end, maps:get(acts, Vn)),
-    %% The goal is what a cycle sees: X == 2 is set in cycle 2 and read in
-    %% cycle 3, a step nothing is known in but what it reads.
-    {At3, Rows3} = csp_code:seen(2, element(3, R2)),
-    expect("a goal is reached in the cycle that reads it",
-	   At3 =:= 3 andalso length(Rows3) =:= 4 andalso
-	       lists:all(fun({_, X}) -> X =:= '-' end, lists:last(Rows3)),
-	   {At3, lists:last(Rows3)}),
-    RE = Ask("E", 4),
+    %% An object's row is lit by the blocks it is in: drawn as a ladder with
+    %% the values in (wintersbone's alarms took the panel down).
+    Fo = "/tmp/csp_code_obj.csp",
+    ok = file:write_file(Fo, "#module M\n  #variable N = 0\n  N = N + 1\n#end\n"
+			 "#M a\n#variable X = 0\nX = a.N\n"),
+    {ok, Ao} = candyspeak:parse(Fo, [sources]),
+    Vo = csp_code:control(csp_code:new({?MODULE, ui}, where, {Ao, Fo}, #{}),
+			  "ladder"),
+    expect("an object's row drawn as a ladder, values in",
+	   is_map(csp_code:refresh(csp_code:control(Vo, "obj=a"),
+				   #{"X" => 1, "a.N" => 1})), nomatch),
+    %% The solver's trace shown, then let go (the pane closed): the cycle
+    %% walked in it goes with it, or the next paint looks for it there.
+    {ok, At0} = candyspeak:parse(F, [sources]),
+    V0 = csp_code:new({?MODULE, ui}, where, {At0, F}, #{}),
+    {found, At2, Rows2} = R2,
+    Vy = csp_code:trace(V0, {"reached in cycle 2: X' == 2", {At2, Rows2, Mt}}),
+    expect("a trace from the solver is the code view's, said in the log",
+	   element(1, maps:get(trace, Vy)) =:= Rows2 andalso
+	       maps:get(look, Vy) =:= 0 andalso
+	       [L || {log, "solver: reached in cycle 2" ++ _ = L}
+			 <- maps:get(acts, Vy)] =/= [],
+	   maps:get(acts, Vy)),
+    Vn = csp_code:trace(Vy, none),
+    expect("let go, no trace and no cycle to walk",
+	   {maps:get(trace, Vn), maps:get(look, Vn)} =:= {none, none},
+	   {maps:get(trace, Vn), maps:get(look, Vn)}),
+    %% The goal is a cycle: X == 2 is what it reads, set in cycle 2 and read
+    %% in cycle 3; X' == 2 what it leaves, cycle 2.
+    R3 = Ask("X == 2", 4),
+    expect("a goal is reached in the cycle that reads it, its inputs known",
+	   element(1, R3) =:= found andalso element(2, R3) =:= 3 andalso
+	       length(element(3, R3)) =:= 4 andalso
+	       [D || {"u_dt", D} <- lists:last(element(3, R3))] =/= ['-'],
+	   R3),
+    RE = Ask("E'", 4),
     expect("timer: elapsed() is read, not guessed",
 	   element(1, RE) =:= found andalso element(2, RE) =:= 1, RE).
+
+%% A goal is a cycle: a state as it reads it, an input as it samples it, X'
+%% as it leaves X, rising() between the last sample and this one. And the
+%% rules' own lemmas close an induction that started in a made-up state.
+cycle_goal_check(Sh) ->
+    F = "/tmp/csp_varp_cycle.csp",
+    ok = file:write_file(F, "#states Home Night
+"
+			 "#digital Win in 1
+#digital Btn in 2
+"
+			 "#variable Heat:1 = 0
+#variable Kitchen:1 = 0
+"
+			 "#in INIT
+State = Home
+#end
+"
+			 "#in Home Night
+Heat = 1
+Heat = 0 ? Win
+#end
+"
+			 "#in Home
+State = Night ? Btn
+#end
+"
+			 "#in Night
+Kitchen = 0
+#end
+"),
+    Ask = fun(G) ->
+		  {ok, M} = candyspeak_varp:model(F, [{reach, G}, {params, fixed}]),
+		  candyspeak_varp:prove(M, "--property " ++ maps:get(name, M) ++
+					    "_reach", 10, 30, Sh)
+	  end,
+    R1 = Ask("Heat && Win"),
+    expect("cycle: the heat read on, the window sampled open",
+	   element(1, R1) =:= found, R1),
+    R2 = Ask("Heat' && Win"),
+    expect("cycle: but no cycle that samples it open leaves the heat on",
+	   element(1, R2) =:= proved, R2),
+    R3 = Ask("State == Home && Btn && State' != Night"),
+    expect("cycle: Home and the button always goes to Night",
+	   element(1, R3) =:= proved, R3),
+    R4 = Ask("State == Night"),
+    expect("cycle: Night is read in cycle 3, the one after it is set",
+	   element(1, R4) =:= found andalso element(2, R4) =:= 3, R4),
+    R5 = Ask("rising(Btn) && State == Home"),
+    expect("cycle: a rising edge in a goal, from the pin at rest",
+	   element(1, R5) =:= found andalso element(2, R5) =:= 2, R5),
+    R6 = Ask("State == Night && Kitchen"),
+    expect("cycle: a light no rule turns on is proved off, by the lemma",
+	   element(1, R6) =:= proved, R6),
+    {ok, Mp} = candyspeak_varp:model(F, [{reach, "(Heat || Kitchen)' && Win'"},
+					 {params, fixed}]),
+    Tp = lists:flatten(maps:get(text, Mp)),
+    expect("cycle: X' and (A || B)' are after(), what the cycle leaves",
+	   string:find(Tp, "reach     u_seen == 1 and ((((Heat) != 0) or "
+		       "((Kitchen) != 0)) and ((Win) != 0));") =/= nomatch, Tp),
+    E = (catch candyspeak_varp:model(F, [{reach, "Win"}, {params, fixed}])),
+    expect("cycle: a reach asked is fine without a prime", element(1, E) =:= ok,
+	   E),
+    %% The solver: lines in order, an invariant proved taken for the rest.
+    Rs = csp_solve:run(F, csp_solve:parse(
+			    "assume    !Btn || !Win\n"
+			    "invariant Win => !Heat'\n"
+			    "invariant State == Home => Heat'\n"
+			    "reach     State == Night && Heat\n"
+			    "reach     Heat' && Win\n"), 10),
+    Got = [{I, K, C, lists:prefix(P, A), T =/= none}
+	   || {{I, K, _, C, A, T}, P} <- lists:zip(Rs, ["assumed", "holds",
+							   "broken in cycle",
+							   "reached in cycle",
+							   "never"])],
+    expect("solver: assumed, proved, broken with its trace, reached, never",
+	   Got =:= [{1, "assume", "", true, false}, {2, "invariant", "ok", true, false},
+		    {3, "invariant", "bad", true, true}, {4, "reach", "ok", true, true},
+		    {5, "reach", "bad", true, false}], Rs),
+    {ok, Ma} = candyspeak_varp:model(F, [{reach, "Heat"}, {params, fixed},
+					 {cycle_assumes, ["Win => !Heat'"]}]),
+    expect("solver: what holds in every cycle is an assume, after the first",
+	   string:find(lists:flatten(maps:get(text, Ma)),
+		       "assume    u_seen == 0 or ((not ((Win) != 0)) or "
+		       "(not ((Heat) != 0)));   // every cycle: Win => !Heat'")
+	   =/= nomatch, maps:get(text, Ma)).
 
 %% A shift by a constant of a value that cannot be negative is varp's own
 %% shift; by a variable, it is not translated.
@@ -1078,7 +1176,7 @@ shift_ops_check(Sh) ->
 			 "#variable B:1 unsigned = 0\n#variable N:8 unsigned = 0\n"
 			 "Y = (In << 3) + 1\nZ = Y >> 2\nB = (Y >> 3) & 1\n"
 			 "N = Y << In\n"),
-    {ok, M} = candyspeak_varp:model(F, [{reach, "Z == 30 && B"}]),
+    {ok, M} = candyspeak_varp:model(F, [{reach, "Z' == 30 && B'"}]),
     T = lists:flatten(maps:get(text, M)),
     R = candyspeak_varp:bmc(maps:get(text, M), "--timeout 30 bmc --property "
 			    "csp_varp_shl_reach --k-max 4", Sh),
@@ -1119,7 +1217,7 @@ object_check(Sh) ->
     expect("objects: a and b count apart",
 	   element(1, R2) =:= none andalso element(1, R6) =:= found, {R2, R6}),
     D = "demo/dl1200_deb_lib.csp",
-    {ok, Md} = candyspeak_varp:model(D, [{reach, "EnDb.Out"}, {params, fixed}]),
+    {ok, Md} = candyspeak_varp:model(D, [{reach, "EnDb.Out'"}, {params, fixed}]),
     AskD = fun(K) ->
 		   candyspeak_varp:bmc(maps:get(text, Md),
 				       "--timeout 30 bmc --property "
@@ -1139,7 +1237,7 @@ shift_check(Sh) ->
     case filelib:is_regular(F) of
 	false -> io:format("skip  dl1200_shift (no ~s)~n", [F]);
 	true ->
-	    {ok, M} = candyspeak_varp:model(F, [{reach, "EnDeb"},
+	    {ok, M} = candyspeak_varp:model(F, [{reach, "EnDeb'"},
 						 {params, fixed}]),
 	    Ask = fun(K) ->
 			  candyspeak_varp:bmc(
@@ -1432,14 +1530,14 @@ node_checks() ->
     expect("the target field reads",
 	   [element(1, T) || S <- ["", "can0", "/dev/ttyACM0@9600 rom",
 				   "h:2323 image=A", "local image=A", "h:x"],
-			     T <- [csp_link:target(S)]] =:=
+			     T <- [csp_cmd:target(S)]] =:=
 	       [ok, ok, ok, ok, error, error], nomatch),
     {ok, LS} = gen_tcp:listen(0, [list, {packet, line}, {active, false},
 				  {reuseaddr, true}]),
     {ok, Port} = inet:port(LS),
     spawn(fun() -> relay(LS) end),
     flush(),
-    {ok, T} = csp_link:target("localhost:" ++ integer_to_list(Port)),
+    {ok, T} = csp_cmd:target("localhost:" ++ integer_to_list(Port)),
     {ok, L} = csp_link:open(T, csp_exe(), []), track(L),
     Said = link_said(""),
     expect("a node's program is read from its dumps",
@@ -1453,6 +1551,11 @@ node_checks() ->
 	   maps:get(float, Info) =:= fixpoint andalso
 	   maps:get(total, maps:get(ram, Info)) > 0 andalso
 	   string:find(Said, "Q16.16 little-endian") =/= nomatch, {Info, Said}),
+    %% said after the declarations
+    Null = receive {csp_link, N} -> lists:flatten(N) after 2000 -> "" end,
+    expect("a transport the node lacks is said: its buffer, the null device",
+	   string:find(Null, "i2c 1 0x68 0x3b (Imu) is the null device")
+	   =/= nomatch, Null),
     expect("and comes back as source, listed off its image",
 	   string:find(Listed, "#Cnt a") =/= nomatch andalso
 	   string:find(Listed, "K=K+1 ? timeout(T)") =/= nomatch, Listed),
@@ -1708,7 +1811,7 @@ uart_checks1() ->
 	  after 3000 -> none
 	  end,
     expect("csp --uart=pty names the far end", Far =/= none, Far),
-    {ok, T} = csp_link:target(Far),
+    {ok, T} = csp_cmd:target(Far),
     {ok, L} = csp_link:open(T, csp_exe(), []), track(L),
     Said = link_said(""),
     expect("a node on a serial line: its program is read",
@@ -2278,7 +2381,7 @@ edge_model_check() ->
 		  {M, candyspeak_varp:prove(M, "--property " ++ N ++ "_reach",
 					    10, 30, Sh)}
 	  end,
-    {M, R} = Ask("N == 2"),
+    {M, R} = Ask("N' == 2"),
     Bs = case R of
 	     {found, _, Rows} -> [proplists:get_value("B", Row) || Row <- Rows];
 	     _ -> R
@@ -2383,4 +2486,11 @@ logger(Acc) ->
 	{calls, From}   -> From ! {calls, lists:reverse(Acc)}, logger(Acc)
     end.
 
-answer(ui, h, _Cls, _Text, _Trace) -> ok.
+%% The code view's renderer, for csp_code:new/4 in a test: nothing drawn.
+new(ui, where, _Tabs, _Spec) -> #{event => code}.
+metrics(ui, _H) -> #{cw => 8, ch => 16}.
+paint(ui, _H, _Cs, _Ts) -> ok.
+answer(ui, _H, _Cls, _Text, _Trace) -> ok.
+shown(ui, _H, _On) -> ok.
+rungs(ui, _H, _Mode, _I, _Tab, _Size) -> ok.
+draw(ui, _H, _Ops) -> ok.

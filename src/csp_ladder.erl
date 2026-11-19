@@ -39,7 +39,6 @@
 -define(WMIN,  10).                 % the shortest wire
 -define(RAIL,  2).                  % an OR's rails
 -define(GAP,   6).                  % between two rows
--define(MARK,  3).                  % a mark's frame outside the box
 -define(INDENT, 3).                 % characters an opened object is in by
 -define(OBJ,   {136, 170, 187}).
 
@@ -271,7 +270,7 @@ ids(Ps) ->
 				     Id =/= none]
 		      || P <- tuple_to_list(Ps)])).
 
-%% What a click at X, Y means: a contact is marked by it, a rule's box
+%% What a click at X, Y means: a contact is watched by it, a rule's box
 %% switches it off or on. The box gets a few pixels round it: it is small.
 %% An object's line opens or closes it. An opened object's contact is
 %% `ct=O/Id'; its rule's box is the rule's, whose ever it is.
@@ -342,14 +341,9 @@ piece({box, _, _, X, Y, W, H, T, contact, Px}, Cls, Mode, C) ->
 				  {102, 102, 102}, 1, true}];
 		_ -> []
 	    end,
-    Mark = case {Has("mt"), Has("mf")} of
-	       {true, _} -> [mark(X, Y, W, H, c(want, C), false)];
-	       {_, true} -> [mark(X, Y, W, H, c(unwant, C), true)];
-	       _ -> []
-	   end,
     [{rect, X, Y, W, H, 3, Fill, Stroke, Dash},
      {text, X + Px + 1, Y + (H - ch_of(H, Mode)) div 2, T, Ink, false}]
-	++ Under ++ Mark;
+	++ Under;
 %% A rule's switch: filled while the rule is on. Drawn undimmed, so the box
 %% of a rule that is off still reads as a box to click.
 piece({box, _, _, X, Y, W, H, _, check, _}, Cls, _Mode, _C) ->
@@ -375,9 +369,6 @@ piece({box, _, _, X, Y, W, H, T, coil, Px}, Cls, Mode, C) ->
 
 is_check({box, _, _, _, _, _, _, _, check, _}) -> true;
 is_check(_) -> false.
-
-mark(X, Y, W, H, Col, Dash) ->
-    {rect, X - ?MARK, Y - ?MARK, W + 2 * ?MARK, H + 2 * ?MARK, 4, none, Col, Dash}.
 
 %% The text's height inside a box: the box less its padding and frame.
 ch_of(H, ladder) -> H - 2 * ?PADY - 2;

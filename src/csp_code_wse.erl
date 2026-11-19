@@ -6,7 +6,7 @@
 %%% gate header g<I>, a trace cell tr_<Col>_<Step>, a signal sl_<N> / sv_<N>,
 %%% a value m_<N> / v_<N>, csp_st -- and paints them with class names: ct t
 %%% (holds), ct u (cannot tell), co nx (will fire), co on (fired), rw off (its
-%%% block is not in force), hd t, mt / mf (marked), sgt / sgf, cur, bad, any.
+%%% block is not in force), hd t, cur, bad, any.
 %%% A renderer builds the pieces under those ids and shows the classes in its
 %%% own way; css/1 is this one's.
 %%%
@@ -19,8 +19,7 @@
 -define(FONT, "13px monospace").
 -define(LINE_H, 16).                      % px, a line of ?FONT
 
--export([new/4, metrics/2, shown/3, rungs/6, draw/3, paint/4, goal/3,
-	 answer/5]).
+-export([new/4, metrics/2, shown/3, rungs/6, draw/3, paint/4, answer/5]).
 
 
 css(C) ->
@@ -40,18 +39,11 @@ css(C) ->
        "  padding:2px 8px}"
        ".vals b{color:#ddd;font-weight:normal;float:right}"
        ".vals i{color:#8ab}"
-       %% The model frame, in the panel's top: goal, solve, the answer.
+       %% The top frame: what was clicked, a trace from the solver.
        ".md{font:13px monospace;color:#bbb}"
        ".md button,.md select{font:12px monospace;padding:2px 8px;"
        "  margin-left:4px;border:1px solid #555;background:#333;color:#ccc}"
        ".md button+button{margin-left:-1px}"
-       ".md .goal{display:inline-block;min-width:320px;padding:3px 10px;"
-       "  border:2px solid ", Col(want), ";border-radius:3px;color:#eee;"
-       "  background:", Fill(want), "}"
-       ".md .goal.none{border-style:dashed;color:#888;background:none}"
-       ".md input.goal{font:13px monospace;outline:none;min-width:320px;"
-       "  max-width:100%;box-sizing:border-box}"
-       ".md input.goal::placeholder{color:#888}"
        ".md .res{margin:6px 0 4px 0;white-space:pre-wrap;color:#aaa;"
        "  max-height:30vh;overflow:auto}"
        ".md .res.bad{color:", Col(unwant), "}"
@@ -66,21 +58,18 @@ css(C) ->
        ".md td.cur,.md th.cur{background:", Fill(want), "}"
        ".md td.bad{background:", Fill(unwant), ";color:", Ink(unwant), "}"
        "[data-sig]{cursor:pointer}"
-       ".sgt{outline:2px solid ", Col(want), ";outline-offset:1px}"
-       ".sgf{outline:2px dashed ", Col(unwant), ";outline-offset:1px}"
        ".cv .bind{color:#8ab;margin-bottom:8px}"
        ".cv canvas{display:block}"]).
 
 %%% ----------------------------------------------------------------- view
 
-%% The view, hidden, with its tab buttons; the model frame (goal, clear,
-%% solve, k) in the top frame's row, and the answer and the program's own
-%% values below it. Where is what the panel made for it (candid_wse:panel/3);
-%% Spec: colours, ks and k (solve's bounds and the one picked). Back: the
-%% handles, the event id among them -- what the browser sends on it is
-%% `tab=I', `ct=Id', `sig=Name', `clear', `solve', `k=K' and the trace's
+%% The view, hidden, with its tab buttons; what was clicked in the top
+%% frame's row, and a trace from the solver and the program's own values
+%% below it. Where is what the panel made for it (candid_wse:panel/3); Spec:
+%% the colours. Back: the handles, the event id among them -- what the
+%% browser sends on it is `tab=I', `ct=Id', `sig=Name' and the trace's
 %% buttons.
-new(Ws, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
+new(Ws, Where, Tabs, #{colours := Colours}) ->
     #{code := Parent, status := Row, top := Top} = Where,
     Style = wse:createElement(Ws, "style"),
     wse:set(Ws, Style, "textContent", candid_wse:u(css(Colours))),
@@ -112,55 +101,14 @@ new(Ws, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
     wse:appendChild(Ws, Box, Body),
     wse:appendChild(Ws, Box, Canvas),
     wse:appendChild(Ws, Parent, Box),
-    %% The model frame: goal, clear, solve within k, and below them the answer
-    %% and the values.
+    %% What was clicked, and below it a trace from the solver and the values.
     Md = wse:createElement(Ws, "span"),
     wse:set(Ws, Md, "className", "md"),
-    %% The goal: what the marks add up to, or typed. Up and down step the
-    %% number at the cursor (the one before it): `Lock == 128' to 127, 129.
-    Goal = wse:createElement(Ws, "input"),
-    wse:set(Ws, Goal, "className", "goal none"),
-    wse:set(Ws, Goal, "placeholder",
-	    "goal: click a contact or a signal, or type one"),
-    GoalTag = "'goal=' + this.value",
-    %% As wide as what it says, as the text it replaced was.
-    wse:set(Ws, Goal, "size", 40),
-    wse:set(Ws, Goal, "oninput",
-	    wse:newf(Ws, "e", "{ this.size = Math.max(40, this.value.length + 2); }")),
-    wse:set(Ws, Goal, "onchange", wse:newf(Ws, "e", "{ Wse.notify(" ++
-					   integer_to_list(Ev) ++ ", " ++ GoalTag ++
-					   "); }")),
-    wse:set(Ws, Goal, "onkeydown",
-	    wse:newf(Ws, "e",
-		     "{ if (e.key == 'ArrowUp' || e.key == 'ArrowDown') {"
-		     "   e.preventDefault();"
-		     "   var d = e.key == 'ArrowUp' ? 1 : -1, v = this.value,"
-		     "       p = this.selectionStart, re = /-?\\b\\d+\\b/g, m, b = null;"
-		     "   while ((m = re.exec(v))) { if (b === null || m.index <= p) b = m; }"
-		     "   if (b) { this.value = v.slice(0, b.index) + (parseInt(b[0]) + d)"
-		     "              + v.slice(b.index + b[0].length);"
-		     "            this.selectionStart = this.selectionEnd = b.index; }"
-		     "   Wse.notify(" ++ integer_to_list(Ev) ++ ", " ++ GoalTag ++ ");"
-		     " } else if (e.key == 'Enter') {"
-		     "   Wse.notify(" ++ integer_to_list(Ev) ++ ", " ++ GoalTag ++ "); } }")),
-    wse:appendChild(Ws, Md, Goal),
-    [begin
-	 B = wse:createElement(Ws, "button"),
-	 wse:appendChild(Ws, B, wse:createTextNode(Ws, candid_wse:u(Label))),
-	 wse:set(Ws, B, "onclick", Notify("'" ++ Label ++ "'")),
-	 wse:appendChild(Ws, Md, B)
-     end || Label <- ["clear", "solve"]],
-    Sel = wse:createElement(Ws, "select"),
-    [begin
-	 O = wse:createElement(Ws, "option"),
-	 wse:set(Ws, O, "value", K),
-	 wse:appendChild(Ws, O, wse:createTextNode(
-				  Ws, "k \x{2264} " ++ integer_to_list(K))),
-	 K =:= K0 andalso wse:set(Ws, O, "selected", true),
-	 wse:appendChild(Ws, Sel, O)
-     end || K <- Ks],
-    wse:set(Ws, Sel, "onchange", Notify("'k=' + this.value")),
-    wse:appendChild(Ws, Md, Sel),
+    %% What was clicked last, a name or a contact, and its value now.
+    Watch = wse:createElement(Ws, "span"),
+    wse:set(Ws, Watch, "id", "watch"),
+    wse:setStyle(Ws, Watch, "color:#ddd;margin-left:16px"),
+    wse:appendChild(Ws, Md, Watch),
     wse:appendChild(Ws, Row, Md),
     Res = wse:createElement(Ws, "div"),
     wse:set(Ws, Res, "className", "md"),
@@ -214,7 +162,7 @@ new(Ws, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
 		    "      x.font = (o[5] ? 'bold ' : '') + '" ++ ?FONT ++ "';"
 		    "      x.fillStyle = o[4]; x.fillText(o[3], o[1], o[2]); } }); }"),
     #{box => Box, body => Body, canvas => Canvas, draw => Draw,
-      tab_buttons => Btns, event => Ev, paint => Paint, goal => Goal,
+      tab_buttons => Btns, event => Ev, paint => Paint,
       res => Res}.
 
 enum(L) -> lists:zip(lists:seq(0, length(L) - 1), L).
@@ -348,12 +296,3 @@ cell(_C, V, _Sts, _Names, Id) when is_integer(V) ->
 cell(_C, V, _Sts, _Names, Id) ->
     ["<td", Id, ">", esc(V), "</td>"].
 
-%% The goal the marks add up to, or none: into the field, to change.
-goal(Ws, #{goal := G}, none) ->
-    wse:set(Ws, G, "className", "goal none"),
-    wse:set(Ws, G, "value", ""),
-    wse:set(Ws, G, "size", 40);
-goal(Ws, #{goal := G}, Text) ->
-    wse:set(Ws, G, "className", "goal"),
-    wse:set(Ws, G, "value", candid_wse:u(Text)),
-    wse:set(Ws, G, "size", max(40, length(Text) + 2)).

@@ -22,7 +22,8 @@
 %% from now on.
 start(L) ->
     Old = group_leader(),
-    Log = spawn_link(fun() -> init(L, Old) end),
+    Panel = self(),
+    Log = spawn_link(fun() -> init(L, Old, Panel) end),
     group_leader(Log, self()),
     Log.
 
@@ -37,9 +38,9 @@ toggle(Log) -> Log ! toggle, ok.
 show(undefined) -> ok;
 show(Log) -> Log ! {show, true}, ok.
 
-init(L, Old) ->
+init(L, Old, Panel) ->
     Pane = cui(L, pane, ["log"]),
-    loop(#{ui => L, pane => Pane, old => Old, shown => false,
+    loop(#{ui => L, pane => Pane, old => Old, panel => Panel, shown => false,
 	   part => "", n => 0}).
 
 cui({M, H}, F, A) -> apply(M, F, [H | A]).
@@ -65,8 +66,10 @@ loop(S = #{ui := {M, _}, pane := Pane, old := Old}) ->
 	    end
     end.
 
-show(S, On) ->
+%% The panel lights the bar's button.
+show(S = #{panel := Panel}, On) ->
     pui(S, show, [On]),
+    Panel ! {candid_pane, "log", On},
     S#{shown := On}.
 
 %% io:format's output arrives in pieces; a line is shown when it is whole.

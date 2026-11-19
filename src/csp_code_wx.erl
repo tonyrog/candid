@@ -12,16 +12,15 @@
 -include_lib("wx/include/wx.hrl").
 
 -export([zoom_at/5]).   % the tests
--export([new/4, metrics/2, shown/3, rungs/6, draw/3, paint/4, goal/3,
-	 answer/5]).
+-export([new/4, metrics/2, shown/3, rungs/6, draw/3, paint/4, answer/5]).
 
 -define(BG, {18, 18, 18}).
 -define(ZOOMS, [2.0, 1.0, 0.75, 0.5, 0.25]).   % the zoom menu's
 
-%% The view, hidden, with its tab buttons; the model frame (goal, clear,
-%% solve, k) in the top frame's status row, the answer and the program's own
-%% values below. See csp_code_wse:new/4 for what is sent on its events.
-new(H, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
+%% The view, hidden, with its tab buttons; what was clicked in the top
+%% frame's status row, a trace from the solver and the program's own values
+%% below. See csp_code_wse:new/4 for what is sent on its events.
+new(H, Where, Tabs, #{colours := Colours}) ->
     #{code := Right, head := TabsP, status := {Top, Row}, top := {Top, TopS}} = Where,
     Box = wxPanel:new(Right),
     BoxS = wxBoxSizer:new(?wxVERTICAL),
@@ -64,62 +63,12 @@ new(H, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
     wxSizer:add(BoxS, Canvas, []),
     wxSizer:add(wxWindow:getSizer(Right), Box, [{proportion, 1}, {flag, ?wxEXPAND}]),
     wxWindow:hide(Box),
-    %% The model frame.
-    %% The goal: what the marks add up to, or typed; Enter, or leaving it,
-    %% says so. Up and down step the number at the cursor.
-    GoalF = wxPanel:new(Top),
-    GoalS = wxBoxSizer:new(?wxHORIZONTAL),
-    wxWindow:setSizer(GoalF, GoalS),
-    Goal = wxTextCtrl:new(GoalF, ?wxID_ANY, [{style, ?wxTE_PROCESS_ENTER}]),
-    wxWindow:setFont(Goal, candid_wx:font(H)),
-    candid_wx:bg(H, Goal, ?BG),
-    candid_wx:fg(H, Goal, {136, 136, 136}),
-    wxWindow:setMinSize(Goal, {320, -1}),
-    wxWindow:setToolTip(Goal, "click a contact or a signal, or type a goal; "
-			"up and down step a number"),
-    wxSizer:add(GoalS, Goal, [{proportion, 1}, {flag, ?wxALL}, {border, 2}]),
-    %% As wide as what it says, as the label it replaced was.
-    wxWindow:connect(Goal, command_text_updated,
-		     [{callback, fun(_, O) -> fit_goal(Goal, GoalF), wxEvent:skip(O) end}]),
-    Said = fun() -> Pid ! {candid_wx, {code, "goal=" ++ wxTextCtrl:getValue(Goal)}} end,
-    wxWindow:connect(Goal, command_text_enter, [{callback, fun(_, _) -> Said() end}]),
-    wxWindow:connect(Goal, kill_focus,
-		     [{callback, fun(_, O) -> Said(), wxEvent:skip(O) end}]),
-    wxWindow:connect(Goal, key_down,
-		     [{callback,
-		       fun(#wx{event = #wxKey{keyCode = K}}, O)
-			     when K =:= ?WXK_UP; K =:= ?WXK_DOWN ->
-			       D = case K of ?WXK_UP -> 1; _ -> -1 end,
-			       {V, P} = csp_code:bump(wxTextCtrl:getValue(Goal),
-						      wxTextCtrl:getInsertionPoint(Goal),
-						      D),
-			       wxTextCtrl:setValue(Goal, V),
-			       wxTextCtrl:setInsertionPoint(Goal, P),
-			       Said(),
-			       _ = O;
-			  (_E, O) -> wxEvent:skip(O)
-		       end}]),
-    wxSizer:add(Row, GoalF, [{flag, ?wxLEFT bor ?wxALIGN_CENTER_VERTICAL},
-			     {border, 12}]),
-    [begin
-	 B = candid_wx:btn(H, Top, L,
-			   #{click => fun() -> Pid ! {candid_wx, {code, L}} end}),
-	 wxSizer:add(Row, B, [{flag, ?wxLEFT bor ?wxALIGN_CENTER_VERTICAL},
-			      {border, case L of "clear" -> 4; _ -> 0 end}])
-     end || L <- ["clear", "solve"]],
-    Sel = candid_wx:menu_btn(H, Top, ["k \x{2264} " ++ integer_to_list(K)
-				      || K <- Ks],
-			     length(lists:takewhile(fun(K) -> K =/= K0 end, Ks)),
-			     fun(I) -> Pid ! {candid_wx, {code, "k=" ++
-						 integer_to_list(lists:nth(I, Ks))}}
-			     end),
-    wxSizer:add(Row, Sel, [{flag, ?wxLEFT bor ?wxALIGN_CENTER_VERTICAL}, {border, 4}]),
     %% What was clicked last, a name or a contact, and its value now.
     Watch = candid_wx:text(H, Top, "", {221, 221, 221}),
     candid_wx:register(H, "watch", {text, Watch}, perm),
     wxSizer:add(Row, Watch, [{flag, ?wxLEFT bor ?wxALIGN_CENTER_VERTICAL},
 			     {border, 16}]),
-    %% The answer: its text, and what a found trace brings.
+    %% A trace from the solver (csp_solve): what it is, and the step tool.
     Res = wxPanel:new(Top),
     ResS = wxBoxSizer:new(?wxVERTICAL),
     wxWindow:setSizer(Res, ResS),
@@ -133,8 +82,7 @@ new(H, Where, Tabs, #{colours := Colours, ks := Ks, k := K0}) ->
     vals(H, Top, TopS, "m_", none, MainVars, perm),
     wxWindow:layout(Top),
     #{box => Box, tabs_panel => TabsP, body => Body, canvas => Canvas, right => Right, top => Top,
-      tab_buttons => Btns, event => code, goal => Goal, goal_frame => GoalF,
-      res => ResT, extra => Extra, colours => Colours}.
+      tab_buttons => Btns, event => code, res => ResT, extra => Extra, colours => Colours}.
 
 enum(L) -> lists:zip(lists:seq(0, length(L) - 1), L).
 
@@ -370,7 +318,8 @@ in_right(C) ->
     {Bx + Cx, By + Cy}.
 
 %% Zoom to Z1 with the canvas point M (pixels, as it is drawn now) staying
-%% where it is in Right's window.
+%% where it is in Right's window -- across only when the view was scrolled
+%% across: one at its left edge stays there, the code's start in sight.
 zoom_at(H, C, Right, Z1, {Mx, My}) ->
     Z0 = zoom(H),
     {Ox, Oy} = in_right(C),
@@ -390,7 +339,10 @@ zoom_at(H, C, Right, Z1, {Mx, My}) ->
 	wxWindow:layout(wxWindow:getParent(C)),
 	wxWindow:layout(Right),
 	wxScrolledWindow:fitInside(Right),
-	X = Ax + round(Px * Z1) - (Ox + Mx),
+	X = case Vx of
+		0 -> 0;
+		_ -> Ax + round(Px * Z1) - (Ox + Mx)
+	    end,
 	Y = Ay + round(Py * Z1) - (Oy + My),
 	wxScrolledWindow:scroll(Right, max(0, X) div max(1, Ux),
 				max(0, Y) div max(1, Uy))
@@ -513,8 +465,6 @@ texts(H, [Id, Txt | T]) ->
     texts(H, T);
 texts(_H, []) -> ok.
 
-style(H, {frame, F}, Cls, Hd) ->
-    frame(H, F, Cls, [{"sgt", want}, {"sgf", unwant}], Hd);
 style(H, {cell, G, R, C}, Cls, Hd) ->
     {Bg, Fg} = case {lists:member("bad", Cls), lists:member("cur", Cls),
 		     lists:member("any", Cls)} of
@@ -533,43 +483,9 @@ style(_H, _What, _Cls, _Hd) ->
     ok.
 
 %% The frame's colour is the mark: the first of Marks the classes carry.
-frame(H, F, Cls, Marks, Hd) ->
-    Col = case [K || {Cl, K} <- Marks, lists:member(Cl, Cls)] of
-	      [K | _] -> c(K, Hd);
-	      []      -> ?BG
-	  end,
-    candid_wx:bg(H, F, Col),
-    wxWindow:refresh(F).
-
 c(K, #{colours := C}) -> candid_wx:colour(maps:get(K, C)).
 fill(K, Hd) -> candid_wx:mix(c(K, Hd), 25, {17, 17, 17}).
 ink(K, Hd)  -> candid_wx:mix(c(K, Hd), 35, {255, 255, 255}).
-
-%% The goal the marks add up to, or none.
-goal(H, Hd = #{goal := G, goal_frame := F}, none) ->
-    wxTextCtrl:setValue(G, ""),
-    fit_goal(G, F),
-    candid_wx:fg(H, G, {136, 136, 136}),
-    candid_wx:bg(H, G, ?BG),
-    candid_wx:bg(H, F, ?BG),
-    wxWindow:refresh(F),
-    _ = Hd,
-    ok;
-goal(H, Hd = #{goal := G, goal_frame := F}, Text) ->
-    wxTextCtrl:setValue(G, Text),
-    fit_goal(G, F),
-    candid_wx:fg(H, G, {238, 238, 238}),
-    candid_wx:bg(H, G, fill(want, Hd)),
-    candid_wx:bg(H, F, c(want, Hd)),
-    wxWindow:refresh(F),
-    wxWindow:layout(wxWindow:getParent(F)).
-
-%% The goal field as wide as its text, never under 320 pixels.
-fit_goal(G, F) ->
-    W = element(1, wxWindow:getTextExtent(G, wxTextCtrl:getValue(G) ++ "MM")),
-    wxWindow:setMinSize(G, {max(320, W + 16), -1}),
-    wxWindow:layout(F),
-    wxWindow:layout(wxWindow:getParent(F)).
 
 %% varp's answer, and with a trace found its buttons, the line the walk
 %% writes (tr_ev) and the table (tr_tab), a cell per step and column.

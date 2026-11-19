@@ -12,10 +12,10 @@
 
 -module(candid_wse).
 
--export([start/2, code_view/0, chat_view/0, log_view/0]).
+-export([start/2, code_view/0, chat_view/0, log_view/0, solve_view/0]).
 -export([clear/2, message/3, chooser/3, panel/3, event/2, save_file/4,
 	 tabs/3]).
--export([status/3, trace_view/3, theme/2, view_buttons/4, mode/3]).
+-export([status/3, trace_view/3, theme/2, view_buttons/4, pane_button/4, mode/3]).
 -export([paint/3, trace_clear/2, trace_column/3, plot/4]).
 -export([dock_pane/3, dock_show/3]).
 -export([u/1, btn_style/1]).                % the log's and the chat's
@@ -83,6 +83,7 @@ ensure_inets() ->
 code_view() -> csp_code_wse.
 chat_view() -> csp_chat_wse.
 log_view() -> candid_log_wse.
+solve_view() -> csp_solve_wse.
 
 %% Text as wse is to send it. Its ej.js reads a string as UTF-8 bytes, so a
 %% character past ASCII goes as its bytes: `lås' sent as three Latin-1
@@ -228,6 +229,13 @@ view_buttons(Ws, #{views := Views}, Key, V) ->
     [style(Ws, B, btn_style(Val =:= V))
      || {{K1, Val}, B} <- maps:to_list(Views), K1 =:= Key],
     ok.
+
+%% A pane's button, lit while the pane is shown.
+pane_button(Ws, #{panes := Ps}, P, On) ->
+    case Ps of
+	#{P := B} -> style(Ws, B, btn_style(On));
+	_ -> ok
+    end.
 
 %% Which of run, pause and step is in force, so the bar says where you are.
 mode(Ws, #{run := RunB, pause := PauseB, one := OneB}, Step) ->
@@ -377,11 +385,16 @@ runstep(Ws, Bar, Spec = #{views := Vs, chat := Chat}) ->
 			  end || {K, Vals} <- Vs]),
     Panes = Box("panes"),
     %% Only when there is a chat to open: ellm on the path, not switched off.
-    Chat andalso Mk(Panes, "chat", "chat=toggle"),
-    Mk(Panes, "log", "log=toggle"),
+    On = maps:get(panes, Spec, #{}),
+    Ps = [begin
+	      B = Mk(Panes, P, P ++ "=toggle"),
+	      style(Ws, B, btn_style(maps:get(P, On, false))),
+	      {P, B}
+	  end || P <- ["chat" || Chat] ++ ["log", "solver"]],
     wse:appendChild(Ws, Bar, Wrap),
     #{event => Id, run => RunB, pause => PauseB, one => OneB,
-      views => maps:from_list(Views), tabs => TabsDiv}.
+      views => maps:from_list(Views), panes => maps:from_list(Ps),
+      tabs => TabsDiv}.
 
 mk(Ws, Id, In, Label, Tag) ->
     B = wse:createElement(Ws, "button"),
@@ -424,7 +437,7 @@ save_file(Ws, #{event := Id}, _Dir, Name) ->
     cancel.
 
 %% Where the program runs: a csp of our own, or a node. Read by
-%% csp_link:target/1, sent on Enter.
+%% csp_cmd:target/1, sent on Enter.
 target_field(Ws, Wrap, Id, Target) ->
     In = wse:createElement(Ws, "input"),
     wse:set(Ws, In, "type", "text"),

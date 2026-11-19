@@ -25,10 +25,11 @@
 -include_lib("wx/include/wx.hrl").
 -include("candid.hrl").
 
--export([start/0, start/1, start0/0, code_view/0, chat_view/0, log_view/0]).
+-export([start/0, start/1, start0/0, code_view/0, chat_view/0, log_view/0,
+	 solve_view/0]).
 -export([clear/2, message/3, chooser/3, panel/3, event/2, open_file/2,
 	 save_file/4, tabs/3]).
--export([status/3, trace_view/3, theme/2, view_buttons/4, mode/3]).
+-export([status/3, trace_view/3, theme/2, view_buttons/4, pane_button/4, mode/3]).
 -export([tc/3, is_light/1, theme_hook/3]).
 -export([rich/3, rich_add/4, rich_trim/3, rich_clear/2]).
 -export([btn/4, btn_on/3, btn_enable/3, btn_label/3, btn_group/3, menu_btn/5]).
@@ -99,6 +100,7 @@ start(File) ->
 code_view() -> csp_code_wx.
 chat_view() -> csp_chat_wx.
 log_view() -> candid_log_wx.
+solve_view() -> csp_solve_wx.
 
 %%% ------------------------------------------------------------ the page
 
@@ -245,13 +247,19 @@ chooser(H, Root, Spec = #{target := Target,
 		[{{K, V}, Button(G, V, K ++ "=" ++ V)} || V <- Vals]
 	    end || {K, Vals} <- Views]),
     Panes = Group(Row2, "panes"),
-    Chat andalso Button(Panes, "chat", "chat=toggle"),
-    Button(Panes, "log", "log=toggle"),
+    %% Lit while shown: the panes say so themselves (pane_button/4).
+    On = maps:get(panes, Spec, #{}),
+    PBs = [begin
+	       B = Button(Panes, P, P ++ "=toggle"),
+	       btn_on(H, B, maps:get(P, On, false)),
+	       {P, B}
+	   end || P <- ["chat" || Chat] ++ ["log", "solver"]],
     wxSizer:add(wxWindow:getSizer(Root), Bar, [{flag, ?wxALL bor ?wxEXPAND},
 					       {border, 4}]),
     relayout(Root),
     {pick, #{event => bar, run => RunB, pause => PauseB, one => OneB,
-	     views => maps:from_list(Vs), tabs => {Root, Row0, Pid}}}.
+	     views => maps:from_list(Vs), panes => maps:from_list(PBs),
+	     tabs => {Root, Row0, Pid}}}.
 
 %% The tabs again, as they are now: a file saved under another name.
 tabs(H, #{tabs := {Root, Row, Pid}}, Tabs) ->
@@ -420,6 +428,13 @@ view_buttons(H, #{views := Views}, Key, V) ->
     [btn_on(H, B, Val =:= V)
      || {{K1, Val}, B} <- maps:to_list(Views), K1 =:= Key],
     ok.
+
+%% A pane's button, lit while the pane is shown.
+pane_button(H, #{panes := Ps}, P, On) ->
+    case Ps of
+	#{P := B} -> btn_on(H, B, On);
+	_ -> ok
+    end.
 
 mode(H, #{run := RunB, pause := PauseB, one := OneB}, Step) ->
     btn_on(H, RunB, not Step),
@@ -911,10 +926,9 @@ bg(H, W, C) -> set_colour(H, W, bg, C).
 set_colour(#{ids := Ids} = H, W, Which, C0) ->
     C = colour(C0),
     K = {colour, W, Which},
-    Scope = case {ets:lookup(Ids, K), ets:lookup(Ids, colour_scope)} of
-		{[{_, _, Sc}], _} -> Sc;
-		{[], [{_, Sc, _}]} -> Sc;
-		{[], []} -> perm
+    Scope = case ets:lookup(Ids, K) of
+		[{_, _, Sc}] -> Sc;
+		[] -> colour_scope()
 	    end,
     ets:insert(Ids, {K, C, Scope}),
     wx_colour(W, Which, tc(H, C, Which)).
@@ -978,10 +992,7 @@ light_fg({R, G, B}) ->
 btn(H, Parent, Label, Opts) ->
     W = wxPanel:new(Parent, [{style, ?wxBORDER_NONE}]),
     wxWindow:setFont(W, font(H)),
-    Scope = case ets:lookup(maps:get(ids, H), colour_scope) of
-		[{_, Sc, _}] -> Sc;
-		[] -> perm
-	    end,
+    Scope = colour_scope(),
     register(H, {btn, W}, #{label => Label, on => false, enabled => true,
 			    min_w => maps:get(min_w, Opts, 0)}, Scope),
     bg(H, W, ?BTN_BG),
@@ -1307,9 +1318,26 @@ forget(#{ids := Ids}, Scope) -> ets:match_delete(Ids, {'_', '_', Scope}).
 %% them with the windows registered there. theme/2 sets the colour of every
 %% window it knows, and one that is gone takes the whole emulator down -- a
 %% segfault, not an error.
-in_scope(#{ids := Ids}, Scope, F) ->
-    ets:insert(Ids, {colour_scope, Scope, perm}),
-    try F() after ets:delete(Ids, colour_scope) end.
+%%
+%% The CALLER's scope, kept in its own process: the panes build their windows
+%% in processes of their own, and a pane made while the panel draws in a scope
+%% must not land in it -- the panel forgets that scope, and the pane's buttons
+%% with it (the solver's k menu, built while the ladder drew).
+in_scope(_H, Scope, F) ->
+    Old = put(candid_wx_colour_scope, Scope),
+    try F()
+    after
+	case Old of
+	    undefined -> erase(candid_wx_colour_scope);
+	    _ -> put(candid_wx_colour_scope, Old)
+	end
+    end.
+
+colour_scope() ->
+    case get(candid_wx_colour_scope) of
+	undefined -> perm;
+	Sc -> Sc
+    end.
 
 lookup(#{ids := Ids}, Id) ->
     case ets:lookup(Ids, Id) of

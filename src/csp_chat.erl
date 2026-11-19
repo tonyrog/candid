@@ -166,8 +166,10 @@ send(S = #{worker := none}, Text) ->
 send(S, _Text) ->
     say(S, note, "busy -- wait for the answer").
 
-show(S, On) ->
+%% The panel lights the bar's button.
+show(S = #{panel := Panel}, On) ->
     pui(S, show, [On]),
+    Panel =:= undefined orelse (Panel ! {candid_pane, "chat", On}),
     S#{shown := On}.
 
 model_name() ->
@@ -257,8 +259,11 @@ tools() ->
 	      <<"Ask varp about the program the panel shows. kind=invariants "
 		"looks for a run breaking the program's `#annotate varp "
 		"invariant' lines within k steps; kind=reach looks for a run "
-		"reaching EXPR (a CandySpeak condition) within k steps. With "
-		"no run found it tries to prove there never is one.">>,
+		"reaching EXPR within k steps. EXPR is a CandySpeak condition "
+		"about one cycle: X is what the cycle reads, X' what it leaves "
+		"X at, rising(I)/falling(I) between two samples, A => B for "
+		"!A || B. With no run found it tries to prove there never is "
+		"one.">>,
 	      #{kind => #{type => <<"string">>,
 			  enum => [<<"invariants">>, <<"reach">>]},
 		expr => str(<<"for reach: a condition, e.g. Red && Green">>),

@@ -33,15 +33,12 @@
 %%% tab starts with the values the panel has no widget for: the variables and
 %%% the #locals, worked out.
 %%%
-%%% MARKS. A click on a contact says it should hold, the next that it should
-%%% not, the third forgets it. The marks add up to one condition, the GOAL,
-%%% shown in the panel's top frame, and `solve' asks varp whether some run of
-%%% the program gets there within k steps, and when none does, whether one
-%%% ever can: k-induction proves `never' (candyspeak_varp:model/2, prove/5).
-%%% `clear' drops the marks and checks the model itself: that it has
-%%% transitions at all, and what it leaves free. A signal is marked the same
-%%% way, by its label among the devices or its cell among the values: `Siren'
-%%% (it is on) for one bit, `N == 5' (its value now) for more.
+%%% WATCH. A click on a contact, or on a signal among the devices or the
+%%% values, shows what it is now in the top frame.
+%%%
+%%% THE SOLVER (csp_solve, a pane of its own) says what the program should
+%%% do and asks varp; a trace it finds is handed here, trace/2, to walk and
+%%% to replay.
 %%%
 %%% REPLAY. A trace varp found is played back on the running csp: reset, then
 %%% per step the trace's inputs are set and one step is run. The column of the
@@ -58,19 +55,16 @@
 
 -module(csp_code).
 
--export([new/4, new/5, disabled/2, bump/3, refresh/2, fired/2, infer/5, tick/1, control/2, model/2, actions/1]).
+-export([new/4, new/5, disabled/2, refresh/2, fired/2, infer/5, tick/1, control/2, trace/2, actions/1]).
 -export([look/1]).
 -export([assign/1, bind/1, chain/2, cols/1, tr_id/2, col_name/1,
 	 signed/3]).                                     % for the renderers
--export([goal_text/1, contact_of/3, state_name/2, sig_expr/2,
-	 look_values/1, look_text/1, show/1, watch_text/3, items/1, seen/2]).  % tests
+-export([contact_of/3, state_name/2,
+	 look_values/1, look_text/1, show/1, watch_text/3, items/1]).  % tests
 -export([split/1]).
 -export([rules/1, rules/2, tabs/1, tabs/2]).
 
 -define(GLOW, 600).                     % ms a coil stays lit after firing
--define(KS, [1, 2, 5, 10, 20, 50]).     % solve's bounds, k steps from INIT
--define(K, 10).
--define(VARP_TIMEOUT, 30).              % s; long runs belong on the big box
 
 %% The highlights, settable from candid.config ({colors, [{true, "#3f3"}]}).
 %% Any css colour. The fill and the text are mixed from it, so one colour is
@@ -79,8 +73,8 @@
 		   fired => "#fb3",         % a coil whose rule fired
 		   next => "#fb3",          % outline: the guard holds now
 		   block => "#bdf",         % the #in / #when block in force
-		   want => "#4af",          % marked: should hold
-		   unwant => "#f55"}).      % marked: should not
+		   want => "#4af",          % a trace: the cycle replayed
+		   unwant => "#f55"}).      % a trace: csp disagrees
 
 colours(Cfg) -> maps:merge(?COLOURS, maps:with(maps:keys(?COLOURS), Cfg)).
 
@@ -279,9 +273,9 @@ number([], _N)                -> [].
 %%
 %% C is the renderer, {Module, Handle} (csp_code_wse and wse's handle for
 %% the browser). Where: #{code => the code view's column, status => the top
-%% frame's row of boxes (the goal and solve go there), top => the top frame
-%% below it (the answer and the program's values)} -- the renderer's own,
-%% handed on.
+%% frame's row of boxes (what was clicked goes there), top => the top frame
+%% below it (a trace from the solver and the program's values)} -- the
+%% renderer's own, handed on.
 new(C, Where, Src, Cfg) -> new(C, Where, Src, Cfg, #{}).
 
 %% Opts: float -- how the program's floats read where it runs, fixpoint
@@ -291,18 +285,16 @@ new(C, Where, {Ast, File}, Cfg, Opts) ->
     Float = maps:get(float, Opts, fixpoint),
     Tabs = tabs(Ast, File),
     Cols = colours(Cfg),
-    H = cui(C, new, [Where, Tabs, #{colours => Cols, ks => ?KS, k => ?K}]),
+    H = cui(C, new, [Where, Tabs, #{colours => Cols}]),
     V = #{ui => C, h => H, event => maps:get(event, H),
 	  colours => Cols, metrics => cui(C, metrics, [H]), ladder => none,
 	  redraw => false,
 	  tabs => Tabs, tab => 0, file => File,
 	  prog => candyspeak_eval:prog(Ast, File, [{float, Float}]),
 	  mode => hide, shown => #{}, fired => [], glow => #{}, last => #{},
-	  off => maps:get(off, Opts, []), typed => none,
-	  marks => #{}, sigs_seen => [], k => ?K, watch => none, open => [],
+	  off => maps:get(off, Opts, []), watch => none, open => [],
 	  states => state_names(hd(Tabs)), trace => none, at => none,
 	  bad => #{}, acts => [], look => none, tshow => false},
-    goal(V),
     V.
 
 %% The renderer's function F on its handle, C = {Module, Handle}: csp_code_wse
@@ -346,31 +338,11 @@ control(V = #{off := Off, acts := As}, "dis=" ++ No) ->
 	       false -> Off -- [N]
 	   end,
     paint(V#{off := Off1, acts := As ++ [{switch, Dis, N}]});
-%% A click on a contact: holds, does not hold, forgotten. Marks survive a
-%% change of tab.
-control(V = #{marks := Ms, tab := I}, "ct=" ++ Id) ->
-    Key = {I, Id},
-    Ms1 = case maps:find(Key, Ms) of
-	      error            -> Ms#{Key => {true, contact_of(V, I, Id)}};
-	      {ok, {true, X}}  -> Ms#{Key => {false, X}};
-	      {ok, {false, _}} -> maps:remove(Key, Ms)
-	  end,
-    V1 = V#{marks := Ms1, typed := none, watch := contact_of(V, I, Id)},
-    goal(V1),
-    paint(V1);
-%% A signal: on / off for one bit, == / != its value now for more.
-control(V = #{marks := Ms, sigs_seen := Seen}, "sig=" ++ N) ->
-    Key = {sig, N},
-    Ms1 = case maps:find(Key, Ms) of
-	      error            -> Ms#{Key => {true, sig_expr(V, N)}};
-	      {ok, {true, X}}  -> Ms#{Key => {false, X}};
-	      {ok, {false, _}} -> maps:remove(Key, Ms)
-	  end,
-    V1 = V#{marks := Ms1, typed := none,
-	    sigs_seen := lists:usort([N | Seen]),
-	    watch := {field, 0, {'WORD', 0, N}}},
-    goal(V1),
-    paint(V1);
+%% A click on a contact, or a signal: what it is now, in the top frame.
+control(V = #{tab := I}, "ct=" ++ Id) ->
+    paint(V#{watch := contact_of(V, I, Id)});
+control(V, "sig=" ++ N) ->
+    paint(V#{watch := {field, 0, {'WORD', 0, N}}});
 %% From the start of the trace: csp back to its initial values, paused, and
 %% its clock held -- the trace says how much time passes, not the person. The
 %% code view goes back to csp's own values, which the replay is checking.
@@ -421,27 +393,6 @@ control(V = #{trace := {Rows, M}, at := T}, "rstep")
 	 end,
     paint(V#{at := T + 1, look := none,
 		 acts := Sets ++ Out ++ Dt ++ [step]});
-%% Drop the marks and look at the model itself.
-control(V, "clear") ->
-    V1 = V#{marks := #{}, typed := none},
-    goal(V1),
-    ask(V1, check),
-    paint(V1);
-control(V = #{marks := Ms, typed := T}, "solve") ->
-    case {T, maps:size(Ms)} of
-	{none, 0} -> answer(V, "", "click a contact or a signal, or type a "
-			    "goal, to say what should hold");
-	{none, _} -> ask(V, {solve, goal_text(Ms), maps:get(k, V)});
-	_ -> ask(V, {solve, T, maps:get(k, V)})
-    end,
-    V;
-%% The goal as typed -- or changed with the arrows -- is the one to solve; a
-%% click on a contact or a signal makes it the marks' again.
-control(V, "goal=" ++ T0) ->
-    case string:trim(T0) of
-	"" -> V#{typed := none};
-	T -> V#{typed := T}
-    end;
 %% A click on the picture: what is at X, Y.
 control(V = #{ladder := L}, "xy=" ++ XY) when L =/= none ->
     [X, Y] = [list_to_integer(N) || N <- string:lexemes(XY, ",")],
@@ -449,134 +400,28 @@ control(V = #{ladder := L}, "xy=" ++ XY) when L =/= none ->
 	none -> V;
 	Tag  -> control(V, Tag)
     end;
-control(V, "k=" ++ K) ->
-    V#{k := list_to_integer(K)};
 control(V, _Tag) -> V.
 
-%%% ------------------------------------------------------------ the model
+%%% ------------------------------------------------------------ a trace
 %%%
-%%% varp runs for a second or more, so it runs beside the panel: the answer
-%%% comes back as {csp_model, Answer} and the panel hands it to model/3.
+%%% The solver's (csp_solve): {Label, {At, Rows, Model}} to walk and replay,
+%%% Label what it is the trace of; none, the solver closed, lets it go.
 
-ask(#{file := File} = V, Q) ->
-    answer(V, "", "asking varp ..."),
-    Self = self(),
-    spawn(fun() -> Self ! {csp_model, run(File, Q)} end),
-    ok.
-
-run(File, Q) ->
-    Opts = case Q of
-	       check            -> [{params, fixed}];
-	       {solve, G, _}    -> [{reach, G}, {params, fixed}]
-	   end,
-    case {candyspeak_varp:model(File, Opts), candyspeak_varp:varp_cmd()} of
-	{_, none} ->
-	    {error, "varp not found: put varp on the code path, or set VARP_SH"};
-	{{ok, M = #{text := Text, name := Name}}, Sh} ->
-	    T = " --timeout " ++ integer_to_list(?VARP_TIMEOUT) ++ " bmc ",
-	    case Q of
-		check ->
-		    {check, M, candyspeak_varp:bmc(
-				 Text, T ++ "--runs --k-min 2 --k-max 2 "
-				 "--trace false", Sh)};
-		{solve, Goal, K} ->
-		    {solve, Goal, K, M,
-		     candyspeak_varp:prove(M, "--property " ++ Name ++ "_reach",
-					   K, ?VARP_TIMEOUT, Sh)}
-	    end;
-	{Error, _} ->
-	    {error, why(Error)}
-    end.
-
-why({error, {instances_not_modelled, Ms}}) ->
-    "no #module for " ++ string:join(Ms, ", ");
-why({error, {varp_annotate, Loc, _Kind, {not_modelled, _T, Names}}}) ->
-    Loc ++ ": the model has nothing for " ++ string:join(Names, ", ");
-why({error, {varp_annotate, Loc, _Kind, Why}}) ->
-    lists:flatten(io_lib:format("~s: ~p", [Loc, Why]));
-why(Error) ->
-    lists:flatten(io_lib:format("~p", [Error])).
-
-model(undefined, _A) -> undefined;
-model(V0, {error, Why}) ->
-    V = V0#{trace := none, at := none, look := none},
-    said(V, "bad", Why);
-%% What the model is -- runs, and what it leaves free -- is for the log: the
-%% frame above the code keeps still.
-model(V, {check, M, {found, _, _}}) ->
+trace(undefined, _T) -> undefined;
+trace(V0, none) ->
+    V = V0#{trace := none, at := none, look := none, bad := #{}},
     answer(V, "", ""),
-    logged(V, "the model runs." ++ free_text(M));
-model(V, {check, _M, {none, _}}) ->
-    said(V, "bad", no_transitions());
-%% The goal is what a cycle SEES. varp's step At is the state after cycle
-%% At, and the rules read it in cycle At + 1: `State == Home' is reached in
-%% the cycle that runs in Home, not in the one that sets it. That cycle is
-%% one step more, nothing known in it but what it reads.
-model(V0, {solve, Goal, _K, M, {found, At0, Rows0}}) ->
-    {At, Rows} = seen(At0, Rows0),
-    Line = lists:flatten(io_lib:format("reached at step ~w: ~s", [At, Goal])),
-    answer(V0, "ok", Line, {Rows, M, maps:get(states, V0)}),
-    V = logged(V0, Line ++ frames(Rows, M)),
+    paint(V);
+trace(V0 = #{acts := As}, {Label, {_At, Rows, M}}) ->
+    answer(V0, "ok", Label, {Rows, M, maps:get(states, V0)}),
+    V = V0#{acts := As ++ [{log, "solver: " ++ Label ++ frames(Rows, M)}]},
     paint(V#{trace := {Rows, M}, at := none, bad := #{}, shown := #{},
-	     look := first_cycle(Rows)});
-%% No trace, and a proof there never is one: by the rules alone with
-%% 0-induction, by the history that leads up to it with more.
-model(V0, {solve, Goal, _K, _M, {proved, 0}}) ->
-    V = V0#{trace := none, at := none, look := none},
-    said(V, "ok", "never: " ++ Goal ++ " -- no step can lead into it, "
-	 "whatever came before (proved by 0-induction)");
-model(V0, {solve, Goal, _K, _M, {proved, N}}) ->
-    V = V0#{trace := none, at := none, look := none},
-    said(V, "ok",
-	 lists:flatten(io_lib:format("never: ~s -- no run reaches it "
-				     "(proved by ~w-induction)", [Goal, N])));
-model(V0, {solve, Goal, K, _M, {none, _}}) ->
-    V = V0#{trace := none, at := none, look := none},
-    said(V, "bad",
-	 lists:flatten(io_lib:format("not reachable within ~w steps, and "
-				     "not proved for ever: ~s", [K, Goal])));
-model(V0, {solve, _Goal, _K, _M, no_transitions}) ->
-    V = V0#{trace := none, at := none, look := none},
-    said(V, "bad", no_transitions());
-model(V, {_, _, {error, Out}}) ->
-    said(V, "bad", "varp: " ++ Out);
-model(V, {_, _, _, _, {error, Out}}) ->
-    said(V, "bad", "varp: " ++ Out).
-
-%% varp's answer: its first line in the frame, all of it in the log.
-said(V, Cls, Text0) ->
-    Text = lists:flatten(Text0),
-    answer(V, Cls, hd(string:split(Text, "\n") ++ [""])),
-    logged(V, Text).
-
-logged(V = #{acts := As}, Text) ->
-    V#{acts := As ++ [{log, lists:flatten(["varp: ", Text])}]}.
-
-seen(At, Rows) -> {At + 1, Rows ++ [[{C, '-'} || {C, _} <- lists:last(Rows)]]}.
+	     look := first_cycle(Rows)}).
 
 %% The walk shows a cycle, step L to L+1: a trace reached at step 0 -- the
 %% goal holds at once, over the inputs alone -- has none.
 first_cycle([_, _ | _]) -> 0;
 first_cycle(_)          -> none.
-
-no_transitions() ->
-    "the model has NO transitions: every goal would come back unreachable, "
-	"which would mean nothing".
-
-%% What the model does not pin down: worth knowing before believing it.
-free_text(#{inputs := In, free := Free, frozen := Fz, abstract := Abs,
-	    skipped := Sk}) ->
-    lists:flatten(
-      [[["\ninput, any value each step: ", string:join(In, ", ")] || In =/= []],
-       [["\nwritten by rules it cannot model, so free: ",
-	 string:join(Free, ", ")] || Free =/= []],
-       [["\n#param, any value but frozen: ", string:join(Fz, ", ")]
-	|| Fz =/= []],
-       [["\nguards it cannot read (a call, a part), so a free choice: line ",
-	 string:join(lists:usort([integer_to_list(Ln) || {_, Ln} <- Abs]),
-		     ", ")] || Abs =/= []],
-       [io_lib:format("\n~w rules not modelled", [Sk]) || Sk > 0],
-       "\n#params are taken at their declared values"]).
 
 byte_col(B, K) -> B ++ "_b" ++ integer_to_list(K).
 
@@ -698,24 +543,13 @@ answer(V, Cls, Text) -> answer(V, Cls, Text, none).
 
 answer(V, Cls, Text, Trace) -> vui(V, answer, [Cls, Text, Trace]).
 
-%% A signal as a condition: on, or equal to what it is now.
-sig_expr(#{tabs := [#{env := Env} | _], last := Last}, N) ->
-    F = {field, 0, {'WORD', 0, N}},
-    case maps:find(N, maps:get(sigs, Env)) of
-	{ok, {1, _}} -> F;
-	_ ->
-	    X = case candyspeak_eval:eval(F, Last, Env) of
-		    I when is_integer(I) -> I;
-		    unknown -> maps:get(N, Last, 0)
-		end,
-	    Lit = case X < 0 of
-		      true  -> {'-', 0, {'INT', 0, integer_to_list(-X)}};
-		      false -> {'INT', 0, integer_to_list(X)}
-		  end,
-	    {'==', 0, F, Lit}
-    end.
+%% Not the model's own bookkeeping for a goal's cycle: the shadows of what
+%% it read (u_p_, u_q_, u_m_) and u_seen.
+cols(Rows) -> [N || {N, _} <- hd(Rows), N =/= "input", not shadow(N)].
 
-cols(Rows) -> [N || {N, _} <- hd(Rows), N =/= "input"].
+shadow("u_seen") -> true;
+shadow("u_" ++ [K, $_ | _]) when K =:= $p; K =:= $q; K =:= $m -> true;
+shadow(_) -> false.
 
 tr_id(step, I) -> "tr_" ++ integer_to_list(I);
 tr_id(C, I)    -> "tr_" ++ C ++ "_" ++ integer_to_list(I).
@@ -808,37 +642,6 @@ qualify(T, P, Own) when is_tuple(T) ->
 qualify(L, P, Own) when is_list(L) -> [qualify(E, P, Own) || E <- L];
 qualify(X, _P, _Own) -> X.
 
-%% The marks as one condition. Sorted, so the same marks always read the same.
-goal_text(Marks) ->
-    lists:flatten(
-      lists:join(" && ",
-		 [case Want of
-		      true  -> wrap(candyspeak_eval:text(X));
-		      false -> negate(X)
-		  end || {_, {Want, X}} <- lists:sort(maps:to_list(Marks))])).
-
-negate({'!', _, Y}) -> wrap(candyspeak_eval:text(Y));
-negate(X)           -> ["!", paren(candyspeak_eval:text(X))].
-
-%% A comparison needs no parentheses beside &&, a ! in front of it does.
-wrap(T) ->
-    case lists:member($|, T) of
-	true  -> paren(T);
-	false -> T
-    end.
-
-paren(T) ->
-    case lists:any(fun(C) -> lists:member(C, " |&") end, T) of
-	true  -> ["(", T, ")"];
-	false -> T
-    end.
-
-goal(V = #{marks := Ms}) ->
-    vui(V, goal, [case maps:size(Ms) of
-		      0 -> none;
-		      _ -> goal_text(Ms)
-		  end]).
-
 %% The program's state names by number, as the runtime numbers them: the
 %% built-ins, then the rest from 3 in order, a repeat or a built-in taking no
 %% slot.
@@ -861,23 +664,6 @@ render(V = #{mode := Mode, tab := I, tabs := Tabs, metrics := Ms}) ->
     L = csp_ladder:layout(items(V), Mode, Ms),
     vui(V, rungs, [Mode, I, Tab, csp_ladder:size(L)]),
     paint(V#{shown := #{}, ladder := L, redraw := true}).
-
-%% The number at the cursor P in a goal, stepped by D: the last whole number
-%% that starts at or before it, or the first. A name's digits (a0.N) are no
-%% number. {Text, where the number now starts}.
-bump(Text0, P, D) ->
-    Text = unicode:characters_to_list(Text0),
-    case re:run(Text, "-?\\b[0-9]+\\b", [global, {capture, first, index}]) of
-	{match, Ms} ->
-	    [{S, L} | _] = case [M || [M = {S0, _}] <- Ms, S0 =< P] of
-			       [] -> hd(Ms);
-			       Before -> [lists:last(Before)]
-			   end,
-	    N = list_to_integer(lists:sublist(Text, S + 1, L)) + D,
-	    {lists:sublist(Text, S) ++ integer_to_list(N) ++
-		 lists:nthtail(S + L, Text), S};
-	nomatch -> {Text, P}
-    end.
 
 %%% ----------------------------------------------------------------- updates
 
@@ -930,7 +716,7 @@ paint(V = #{last := Last}) ->
     paint1(judge(V, Last)).
 
 paint1(V = #{tabs := Tabs, tab := I, last := Live, fired := Now0,
-		 glow := Glow, shown := Shown, marks := Marks,
+		 glow := Glow, shown := Shown,
 		 mode := Mode, look := Look, off := Off}) ->
     Ms = erlang:monotonic_time(millisecond),
     {Last0, Fired0} =
@@ -947,24 +733,18 @@ paint1(V = #{tabs := Tabs, tab := I, last := Live, fired := Now0,
 		_ -> [{filename:basename(Fl), L} || {O, Fl, L} <- Fired0, O =:= Obj]
 	    end,
     State = maps:get("State", Last, 0),
-    Mine = maps:from_list([{Id, W} || {{J, Id}, {W, _}} <- maps:to_list(Marks),
-				      J =:= I]),
-    %% An object shown in the flow is judged over its own values, its own
-    %% marks and what fired for it.
-    Ctx = fun(none) -> {{Env, Last, Mine, Off}, Fired, State};
+    %% An object shown in the flow is judged over its own values and what
+    %% fired for it.
+    Ctx = fun(none) -> {{Env, Last, Off}, Fired, State};
 	     (O) ->
 		  #{env := OEnv} = tab_of(Tabs, O),
 		  OLast = values(Last0, O),
-		  Pre = O ++ "/",
-		  OMine = maps:from_list([{lists:nthtail(length(Pre), Id), W}
-					  || {Id, W} <- maps:to_list(Mine),
-					     lists:prefix(Pre, Id)]),
 		  OFired = case Fired0 of
 			       look -> look;
 			       _ -> [{filename:basename(Fl), L}
 				     || {O1, Fl, L} <- Fired0, O1 =:= O]
 			   end,
-		  {{OEnv, OLast, OMine, Off}, OFired, maps:get("State", OLast, 0)}
+		  {{OEnv, OLast, Off}, OFired, maps:get("State", OLast, 0)}
 	  end,
     {Cls, _} = case Mode of
 		   hide -> {[], 0};
@@ -986,18 +766,13 @@ paint1(V = #{tabs := Tabs, tab := I, last := Live, fired := Now0,
 	[{"m_" ++ N, Val(N, MEnv, Last0)} || {_, N} <- MVars] ++
 	[{"v_" ++ N, Val(N, Env, Last)} || P =/= none, Mode =/= hide,
 					   {_, N} <- Vars],
-    Sigs = [{Pre ++ N, case maps:find({sig, N}, Marks) of
-			   {ok, {true, _}}  -> "sgt";
-			   {ok, {false, _}} -> "sgf";
-			   error            -> ""
-		       end} || N <- maps:get(sigs_seen, V), Pre <- ["sl_", "sv_"]],
     Look1 = case V of
 		#{trace := {_, _}, tshow := Tbl} ->
 		    [{"tr_tab", case Tbl of true -> ""; false -> "hid" end},
 		     {{t, "tr_ev"}, look_text(V)}];
 		_ -> []
 	    end,
-    New = maps:from_list(lists:append(Cls) ++ Sigs ++ trace_classes(V) ++
+    New = maps:from_list(lists:append(Cls) ++ trace_classes(V) ++
 			     Look1 ++ [{{t, Id}, T} || {Id, T} <- Txt]),
     Changed = [{Id, C} || {Id, C} <- maps:to_list(New),
 			  maps:get(Id, Shown, undefined) =/= C],
@@ -1088,7 +863,7 @@ item_classes(R, G, Ctx) ->
     {C, Fired, State} = Ctx(none),
     classes(R, G, C, Fired, State).
 
-blocks_on(Gs, {{Env, Last, _, _}, _, State}) ->
+blocks_on(Gs, {{Env, Last, _}, _, State}) ->
     lists:all(fun(Gt) -> gate_on(Gt, Env, Last, State) end, Gs).
 
 row_class(true)  -> "rw";
@@ -1102,11 +877,11 @@ outer(_Id, C, false) -> C.
 
 classes({gate, 'end', _}, G, _Ctx, _Fired, _State) ->
     {[], G};
-classes({gate, Kind, Arg}, G, {Env, Last, _, _}, _Fired, State) ->
+classes({gate, Kind, Arg}, G, {Env, Last, _}, _Fired, State) ->
     On = gate_on({Kind, Arg}, Env, Last, State),
     {[{"g" ++ integer_to_list(G), hd_class(On)}], G + 1};
 classes(R = #{no := N, guard := Gd, gates := Gs, line := Ln, file := F},
-	G, {Env, Last, Marks, Off}, Fired, State) ->
+	G, {Env, Last, Off}, Fired, State) ->
     K = "k" ++ integer_to_list(N),
     Active = lists:all(fun(Gt) -> gate_on(Gt, Env, Last, State) end, Gs),
     Holds = Active andalso
@@ -1120,7 +895,7 @@ classes(R = #{no := N, guard := Gd, gates := Gs, line := Ln, file := F},
     Coil = string:join(["co"] ++ [ "nx" || Holds] ++ [ "on" || On], " "),
     Cs = case Gd of
 	     undefined -> [];
-	     _ -> leaves(Gd, K, Env, Last, Marks)
+	     _ -> leaves(Gd, K, Env, Last)
 	 end,
     Dis = lists:member(N, Off),
     Row = string:join(["rw"] ++ ["off" || not Active] ++ ["dis" || Dis], " "),
@@ -1140,15 +915,11 @@ hd_class(true)  -> "hd t";
 hd_class(false) -> "hd".
 
 %% The contacts in the order ladder/4 and code/5 numbered them.
-leaves(Gd, K, Env, Last, Marks) ->
+leaves(Gd, K, Env, Last) ->
     Xs = contacts(Gd),
     [begin
 	 Id = K ++ "_" ++ integer_to_list(I),
-	 {Id, ct_class(X, Env, Last) ++ case maps:find(Id, Marks) of
-					    {ok, true}  -> " mt";
-					    {ok, false} -> " mf";
-					    error       -> ""
-					end}
+	 {Id, ct_class(X, Env, Last)}
      end || {I, X} <- lists:zip(lists:seq(0, length(Xs) - 1), Xs)].
 
 contacts(X = {Op, _, _, _}) when Op =:= '&&'; Op =:= '||' ->
