@@ -92,6 +92,20 @@ run() ->
     P ! {candid_wx, {code, "down"}},
     timer:sleep(500),
     expect("another trace picked, walked: no crash", is_process_alive(P), nomatch),
+    %% Cleared: the trace goes as it does when closed, the pane stays open
+    %% and a pick of a line that is gone picks nothing.
+    Solver ! {csp_solve_wx, clear},
+    timer:sleep(?SETTLE),
+    Solver ! {csp_solve_wx, pick, 1},
+    timer:sleep(?SETTLE),
+    expect("clear: the trace let go, the pane still open",
+	   not Has("tr_tab") andalso Lit("solver") =:= [true] andalso
+	       is_process_alive(P), {Has("tr_tab"), Lit("solver")}),
+    Solver ! {csp_solve_wx, prove, "reach Green\n"},
+    timer:sleep(5000),
+    Solver ! {csp_solve_wx, pick, 1},
+    timer:sleep(?SETTLE),
+    expect("and it proves again after", Has("tr_tab"), nomatch),
     %% Closed: the trace goes, and csp is put back from the replay.
     Solver ! {csp_solve_wx, close},
     timer:sleep(?SETTLE),
@@ -106,6 +120,23 @@ run() ->
     timer:sleep(?SETTLE),
     expect("the theme changed after the code view was redrawn",
 	   is_process_alive(P), nomatch),
+    %% Save as redraws the file tabs. The old ones' entries must go with
+    %% them: New walks every window the id table knows, and a gone one is a
+    %% segfault (solver open, save as, new did it).
+    P ! {candid_wx, {bar, "solver=toggle"}},
+    Saved = filename:absname("test/ebin/wx_saved.csp"),
+    Btns = fun() -> length([W || {{btn, W}, _, _} <- ets:tab2list(Ids)]) end,
+    P ! {candid_wx, {bar, "saveas=" ++ Saved}},
+    timer:sleep(?SETTLE),
+    B0 = Btns(),
+    P ! {candid_wx, {bar, "saveas=" ++ Saved}},
+    timer:sleep(?SETTLE),
+    expect("save as redraws the tabs and leaves no dead ones behind",
+	   Btns() =:= B0, {B0, Btns()}),
+    P ! {candid_wx, {bar, "new"}},
+    timer:sleep(?SETTLE),
+    expect("new after save as, the solver open: no crash", is_process_alive(P),
+	   nomatch),
     %% wx torn down before the emulator: a halt with the window still up
     %% segfaults on the way out, after every check has passed.
     exit(P, kill),

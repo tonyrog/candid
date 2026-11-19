@@ -169,6 +169,15 @@ shown_switched(S = #{ws := Ws, code := Code}, F1) ->
     S#{ws := candid_file:update(Ws, F1),
        code := csp_code:disabled(Code, offs(F1))}.
 
+%% Lines added to what runs: the code view laid out again with them, or it
+%% shows a program that cannot do what the node is doing.
+appended(S, F1) ->
+    S1 = #{code := Code} = shown_switched(S, F1),
+    case candid_file:text(F1) of
+	{ok, Text} -> S1#{code := csp_code:source(Code, Text)};
+	_ -> S1
+    end.
+
 %% The workspace with File the active one: the tab that already holds it --
 %% a node's listing is opened as the node's when it comes (csp_program) --
 %% or a new one, read from disk.
@@ -1646,10 +1655,12 @@ loop(U, Link, S) ->
 	    case csp_chat:panel_tool(Name, Args, Info) of
 		{append, F1, Lines, Reply} ->
 		    %% typed at the prompt, a line at a time: on a node, more
-		    %% lines of the patch on its image
-		    [csp_link:raw(Link, L) || L <- Lines],
+		    %% lines of the patch on its image -- one /undo takes them
+		    %% back (a node without /undo says so and takes them anyway)
+		    [csp_link:raw(Link, L)
+		     || L <- ["/undo begin"] ++ Lines ++ ["/undo end"]],
 		    From ! {Ref, Reply},
-		    loop(U, Link, shown_switched(S, F1));
+		    loop(U, Link, appended(S, F1));
 		{switch, F1, Line, Reply} ->
 		    %% as the line typed at the prompt: on a node, one more
 		    %% line of the patch running on its image

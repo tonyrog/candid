@@ -374,7 +374,7 @@ refused(_Owner, _L, St = #{want := info}) ->
 refused(Owner, _L, St = #{want := patch, rom := Rom}) ->
     program(Owner, [{rom, Rom}], St);
 refused(Owner, L, St = #{want := rom}) ->
-    Owner ! {csp_link, "node: " ++ L},
+    Owner ! {csp_link, "node: " ++ csp_cmd:reply(L)},
     St;
 refused(_Owner, _L, St) ->
     St#{asked := none}.

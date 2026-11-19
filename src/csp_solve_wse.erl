@@ -3,7 +3,7 @@
 
 -module(csp_solve_wse).
 
--export([pane/4, show/3, results/3, busy/3, event/2]).
+-export([pane/4, show/3, results/3, busy/3, clear/2, event/2]).
 
 %% Hidden until show/3. Its events go to the process that makes it.
 pane(Ws, Title, Ks, K0) ->
@@ -36,10 +36,17 @@ pane(Ws, Title, Ks, K0) ->
 	    wse:newf(Ws, "", "{ Wse.notify(" ++ integer_to_list(Ev) ++
 		     ", 'prove=' + document.getElementById('csp_solve_k').value"
 		     " + ';' + document.getElementById('csp_solve_text').value); }")),
+    Cl = el(Ws, Foot, "button", lists:flatten(candid_wse:btn_style(false))),
+    wse:appendChild(Ws, Cl, wse:createTextNode(Ws, "clear")),
+    wse:set(Ws, Cl, "title", "the lines and the answers gone, a trace let go"),
+    wse:set(Ws, Cl, "onclick",
+	    wse:newf(Ws, "", "{ Wse.notify(" ++ integer_to_list(Ev) ++
+		     ", 'clear='); }")),
     Busy = el(Ws, Foot, "span", "color:#fb3;min-width:2em"),
     Res = el(Ws, Box, "div", "flex:1;overflow:auto;padding:4px 8px;"
 	     "white-space:pre;font-size:12px;border-top:1px solid #333"),
-    #{box => Box, ev => Ev, close => Close, busy => Busy, res => Res}.
+    #{box => Box, ev => Ev, close => Close, busy => Busy, res => Res,
+      text => Text}.
 
 show(Ws, #{box := Box}, On) ->
     candid_wse:dock_show(Ws, Box, On).
@@ -49,6 +56,7 @@ event(#{ev := Id}, {notify, Id, _, "prove=" ++ Data}) ->
     [K, Text] = string:split(Data, ";"),
     {prove, Text, list_to_integer(K)};
 event(#{ev := Id}, {notify, Id, _, "pick=" ++ I}) -> {pick, list_to_integer(I)};
+event(#{ev := Id}, {notify, Id, _, "clear=" ++ _}) -> clear;
 event(#{close := Id}, {notify, Id, _, _})         -> close;
 event(_P, _Msg)                                   -> none.
 
@@ -74,6 +82,9 @@ results(Ws, #{res := Res, ev := Ev}, Rows) ->
 				     ", 'pick=" ++ integer_to_list(I) ++ "'); }"))
      end || {I, Kind, Text, Cls, Answer, Tr} <- Rows],
     ok.
+
+%% The lines gone; the answers go by results/3.
+clear(Ws, #{text := Text}) -> wse:set(Ws, Text, "value", "").
 
 busy(Ws, #{busy := B}, On) ->
     wse:set(Ws, B, "textContent", case On of true -> "..."; false -> "" end).

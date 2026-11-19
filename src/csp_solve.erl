@@ -67,6 +67,7 @@ loop(S = #{ui := {M, _}, pane := Pane}) ->
 	Msg ->
 	    case M:event(Pane, Msg) of
 		close -> loop(show(S, false));
+		clear -> loop(clear(S));
 		{prove, Text, K} -> loop(prove(S, Text, K));
 		{pick, I} -> loop(pick(S, I));
 		none -> loop(S)
@@ -80,6 +81,14 @@ show(S = #{panel := Panel}, On) ->
     Panel ! {candid_pane, "solver", On},
     On orelse (Panel ! {csp_solve, closed}),
     S#{shown := On}.
+
+%% Back to an empty pane: no lines, no answers, a run stopped, the trace
+%% shown let go -- what closing and opening it again did.
+clear(S = #{panel := Panel}) ->
+    S1 = results(stop(S), []),
+    pui(S1, clear, []),
+    Panel ! {csp_solve, closed},
+    S1.
 
 prove(S = #{file := none}, _Text, _K) ->
     results(S, [{0, "", "", "bad", "no program to prove", none}]);

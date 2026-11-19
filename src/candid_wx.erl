@@ -195,7 +195,7 @@ chooser(H, Root, Spec = #{target := Target,
     wxSizer:add(Bar, Row1, []),
     wxSizer:add(Bar, Row2, []),
     Pid = self(),
-    tabs(H, Root, Row0, maps:get(tabs, Spec, []), Pid),
+    in_scope(H, tabs, fun() -> tabs(H, Root, Row0, maps:get(tabs, Spec, []), Pid) end),
     In = fun(Row) -> fun(W) -> wxSizer:add(Row, W, [{flag, ?wxALL bor
 						     ?wxALIGN_CENTER_VERTICAL},
 						    {border, 3}]), W end end,
@@ -262,9 +262,12 @@ chooser(H, Root, Spec = #{target := Target,
 	     tabs => {Root, Row0, Pid}}}.
 
 %% The tabs again, as they are now: a file saved under another name.
+%% The old tabs' entries go before their windows: a rebuild walks every
+%% window the id table knows (clear/2), and one that is gone is a segfault.
 tabs(H, #{tabs := {Root, Row, Pid}}, Tabs) ->
+    forget(H, tabs),
     wxSizer:clear(Row, [{delete_windows, true}]),
-    tabs(H, Root, Row, Tabs, Pid),
+    in_scope(H, tabs, fun() -> tabs(H, Root, Row, Tabs, Pid) end),
     relayout(Root).
 
 %% A tab per file open: its name, lit when it is the one shown, a node's

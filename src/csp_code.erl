@@ -55,7 +55,7 @@
 
 -module(csp_code).
 
--export([new/4, new/5, disabled/2, refresh/2, fired/2, infer/5, tick/1, control/2, trace/2, actions/1]).
+-export([new/4, new/5, source/2, disabled/2, refresh/2, fired/2, infer/5, tick/1, control/2, trace/2, actions/1]).
 -export([look/1]).
 -export([assign/1, bind/1, chain/2, cols/1, tr_id/2, col_name/1,
 	 signed/3]).                                     % for the renderers
@@ -289,7 +289,7 @@ new(C, Where, {Ast, File}, Cfg, Opts) ->
     V = #{ui => C, h => H, event => maps:get(event, H),
 	  colours => Cols, metrics => cui(C, metrics, [H]), ladder => none,
 	  redraw => false,
-	  tabs => Tabs, tab => 0, file => File,
+	  tabs => Tabs, tab => 0, file => File, float => Float,
 	  prog => candyspeak_eval:prog(Ast, File, [{float, Float}]),
 	  mode => hide, shown => #{}, fired => [], glow => #{}, last => #{},
 	  off => maps:get(off, Opts, []), watch => none, open => [],
@@ -666,6 +666,27 @@ render(V = #{mode := Mode, tab := I, tabs := Tabs, metrics := Ms}) ->
     paint(V#{shown := #{}, ladder := L, redraw := true}).
 
 %%% ----------------------------------------------------------------- updates
+
+%% The program's text after lines were added to what runs (a patch): laid
+%% out again as it is shown, the view's tab and mode kept. Text that does not
+%% parse leaves the view as it was.
+source(undefined, _Text) -> undefined;
+source(V = #{file := File, tab := I, float := Float}, Text) ->
+    case try candyspeak:parse_text(Text, File, [sources])
+	 catch _:Why -> {error, Why}
+	 end of
+	{ok, Ast} ->
+	    Tabs = tabs(Ast, File),
+	    V1 = V#{tabs := Tabs,
+		    tab := case I < length(Tabs) of true -> I; false -> 0 end,
+		    prog := candyspeak_eval:prog(Ast, File, [{float, Float}]),
+		    states := state_names(hd(Tabs)), ladder := none},
+	    case maps:get(mode, V1) of
+		hide -> V1;
+		_ -> render(V1)
+	    end;
+	_ -> V
+    end.
 
 %% The rules switched off, by number, as the panel's file has them.
 disabled(undefined, _Off) -> undefined;

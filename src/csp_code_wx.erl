@@ -27,6 +27,7 @@ new(H, Where, Tabs, #{colours := Colours}) ->
     wxWindow:setSizer(Box, BoxS),
     %% The tabs and the zoom: right over the rungs, where they stay when the
     %% rungs are scrolled (candid_wx's code head).
+    candid_wx:forget(H, code_head),           % their entries before them
     wxWindow:destroyChildren(TabsP),
     Bar = wxWindow:getSizer(TabsP),
     Pid = self(),
@@ -35,9 +36,13 @@ new(H, Where, Tabs, #{colours := Colours}) ->
 	       _ ->
 		   [begin
 			Tab = "tab=" ++ integer_to_list(I),
-			B = candid_wx:btn(H, TabsP, Name,
-					  #{click => fun() -> Pid ! {candid_wx, {code, Tab}}
-						     end}),
+			B = candid_wx:in_scope(
+			      H, code_head,
+			      fun() ->
+				      candid_wx:btn(H, TabsP, Name,
+						    #{click => fun() -> Pid ! {candid_wx, {code, Tab}}
+							       end})
+			      end),
 			wxSizer:add(Bar, B, []),
 			B
 		    end || {I, #{name := Name}} <- enum(Tabs)]
@@ -49,12 +54,17 @@ new(H, Where, Tabs, #{colours := Colours}) ->
     candid_wx:register(H, code_canvas, {Canvas, Right}, perm),
     %% The zoom, after the tabs: a menu, and ctrl + wheel, ctrl + up/down at
     %% the mouse, ctrl + 0 for 100 %, stepping through the same values.
-    ZoomB = candid_wx:menu_btn(H, TabsP, [zoom_label(Z) || Z <- ?ZOOMS],
-			       index_of(1.0, ?ZOOMS),
-			       fun(I) ->
-				       zoom_at(H, Canvas, Right, lists:nth(I, ?ZOOMS),
-					       mouse(Canvas, Right))
-			       end),
+    ZoomB = candid_wx:in_scope(
+	      H, code_head,
+	      fun() ->
+		      candid_wx:menu_btn(H, TabsP, [zoom_label(Z) || Z <- ?ZOOMS],
+					 index_of(1.0, ?ZOOMS),
+					 fun(I) ->
+						 zoom_at(H, Canvas, Right,
+							 lists:nth(I, ?ZOOMS),
+							 mouse(Canvas, Right))
+					 end)
+	      end),
     wxWindow:setToolTip(ZoomB, "zoom; ctrl + wheel or ctrl + up/down at the "
 			"mouse, ctrl + 0 back to 100 %"),
     candid_wx:register(H, code_zoom_btn, ZoomB, perm),

@@ -1,0 +1,13 @@
+#!/bin/sh
+
+ERL=erl
+WSE=$HOME/erlang/wse
+UART=$HOME/erlang/uart
+ELLM=$HOME/erlang/ellm
+RESTER=$HOME/erlang/rester
+VARP=$HOME/erlang/varp
+CANDID=$HOME/erlang/candid
+
+PA="-pa $CANDID/ebin -pa $CANDYSPEAK/ebin -pa $WSE/ebin -pa $UART/ebin -pa $ELLM/ebin -pa $RESTER/ebin -pa $VARP/ebin"
+
+$ERL -noshell -s can $PA -s candid_wx -config $CANDID/candid.config

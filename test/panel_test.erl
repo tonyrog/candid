@@ -1053,6 +1053,16 @@ timer_check(Sh) ->
     expect("an object's row drawn as a ladder, values in",
 	   is_map(csp_code:refresh(csp_code:control(Vo, "obj=a"),
 				   #{"X" => 1, "a.N" => 1})), nomatch),
+    %% Lines added to what runs (a patch): the view laid out again with them,
+    %% or it shows a program that cannot do what the node does.
+    {ok, To} = file:read_file(Fo),
+    Vp = csp_code:source(Vo, binary_to_list(To) ++ "#variable Y = 0\nY = X ? 1\n"),
+    expect("a patch's rule is in the code view at once",
+	   length(csp_code:items(Vp)) > length(csp_code:items(Vo)) andalso
+	       maps:get(mode, Vp) =:= ladder,
+	   {length(csp_code:items(Vo)), length(csp_code:items(Vp))}),
+    expect("text that does not parse leaves the view as it was",
+	   csp_code:source(Vo, "X = (\n") =:= Vo, nomatch),
     %% The solver's trace shown, then let go (the pane closed): the cycle
     %% walked in it goes with it, or the next paint looks for it there.
     {ok, At0} = candyspeak:parse(F, [sources]),
