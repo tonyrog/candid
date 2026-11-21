@@ -21,7 +21,7 @@
 %% frame's status row, a trace from the solver and the program's own values
 %% below. See csp_code_wse:new/4 for what is sent on its events.
 new(H, Where, Tabs, #{colours := Colours}) ->
-    #{code := Right, head := TabsP, status := {Top, Row}, top := {Top, TopS}} = Where,
+    #{code := Right, head := TabsP, status := {Top, _}, top := {Top, TopS}} = Where,
     Box = wxPanel:new(Right),
     BoxS = wxBoxSizer:new(?wxVERTICAL),
     wxWindow:setSizer(Box, BoxS),
@@ -73,11 +73,6 @@ new(H, Where, Tabs, #{colours := Colours}) ->
     wxSizer:add(BoxS, Canvas, []),
     wxSizer:add(wxWindow:getSizer(Right), Box, [{proportion, 1}, {flag, ?wxEXPAND}]),
     wxWindow:hide(Box),
-    %% What was clicked last, a name or a contact, and its value now.
-    Watch = candid_wx:text(H, Top, "", {221, 221, 221}),
-    candid_wx:register(H, "watch", {text, Watch}, perm),
-    wxSizer:add(Row, Watch, [{flag, ?wxLEFT bor ?wxALIGN_CENTER_VERTICAL},
-			     {border, 16}]),
     %% A trace from the solver (csp_solve): what it is, and the step tool.
     Res = wxPanel:new(Top),
     ResS = wxBoxSizer:new(?wxVERTICAL),
@@ -115,7 +110,6 @@ vals(H, Parent, Sizer, Pre, Obj, Vars0, Scope) ->
 	 wxWindow:setMinSize(F, {NameW, -1}),
 	 candid_wx:fg(H, T, case K of local -> {136, 170, 187};
 						   var -> {136, 136, 136} end),
-	 candid_wx:click(T, {code, "sig=" ++ Full}, self()),
 	 candid_wx:register(H, "sv_" ++ Full, {frame, F}, Scope),
 	 V = candid_wx:text(H, Parent, "", {221, 221, 221}),
 	 wxWindow:setMinSize(V, {70, -1}),

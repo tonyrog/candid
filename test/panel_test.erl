@@ -773,15 +773,6 @@ code_view_check() ->
 	    csp_code:show(7), csp_code:show(unknown)} =:=
 	       {"0.0", "0.3", "-1.25", "7", "?"},
 	   {csp_code:show(0.0), csp_code:show(0.3)}),
-    {ok, [{define, _, _, Cond}]} =
-	candyspeak_parse:parse(element(2, candyspeak_scan:string(
-					    "#define P_ Phase == 2\n"))),
-    Watched = {csp_code:watch_text({field, 0, {'WORD', 0, "Phase"}},
-				   #{"Phase" => 2}, E),
-	       csp_code:watch_text(Cond, #{"Phase" => 2}, E),
-	       csp_code:watch_text({field, 0, {'WORD', 0, "Nope"}}, #{}, E)},
-    expect("a click shows what it is now: a name, a contact's condition",
-	   Watched =:= {"Phase = 2", "Phase == 2 = 1", "Nope = ?"}, Watched),
     expect("false && unknown is false, true && unknown unknown",
 	   Ev("!Go && elapsed(T) > 5", #{"Go" => 1}) =:= 0 andalso
 	   Ev("Go && elapsed(T) > 5", #{"Go" => 1}) =:= unknown, nomatch),
@@ -852,7 +843,7 @@ code_view_check() ->
 	   {Shut, Opened}),
     %% main's rule is 4: the module's is 1, m0's line two (X=Go and its State)
     Mn = csp_code:contact_of(Vm, 0, "k4_0"),
-    expect("a clicked contact is watched by its name as main has it",
+    expect("a clicked contact is found by its name as main has it",
 	   {candyspeak_eval:text(Mx), candyspeak_eval:text(Mn)} =:= {"m0.X", "N > 2"},
 	   {candyspeak_eval:text(Mx), candyspeak_eval:text(Mn)}),
     model_check().
@@ -908,7 +899,28 @@ prove_check(Sh) ->
     ok = file:write_file(Fa, [Src, "#annotate varp assume \"[LTE 1](B1, Nope)\"\n"]),
     Rn = candyspeak_varp:model(Fa, []),
     expect("a count over a name the model lacks is an error",
-	   element(1, Rn) =:= error, Rn).
+	   element(1, Rn) =:= error, Rn),
+    %% A keypad that reports one key at a time: `inputs' says how they move.
+    Inp = fun(Line, Goal) ->
+		  ok = file:write_file(Fa, [Src, "#annotate varp inputs \"", Line, "\"\n"]),
+		  {ok, Mi} = candyspeak_varp:model(Fa, [{reach, Goal}]),
+		  candyspeak_varp:prove(Mi, "--property " ++ maps:get(name, Mi) ++ "_reach",
+					10, 30, Sh)
+	  end,
+    Ra = Ask("rising(B1) && falling(B2)"),
+    Re = Inp("B1 B2 B3 : events <= 1", "rising(B1) && falling(B2)"),
+    expect("inputs events <= 1: a press and a release in one cycle never; free, they are",
+	   element(1, Ra) =:= found andalso element(1, Re) =:= proved, {Ra, Re}),
+    Rl1 = Inp("B1 B2 B3 : low, presses <= 1", "falling(B1) && falling(B2)"),
+    Rl2 = Inp("B1 B2 B3 : low, presses <= 1", "rising(B1) && rising(B2)"),
+    expect("inputs low, presses <= 1: two presses (falling) never, two releases may",
+	   element(1, Rl1) =:= proved andalso element(1, Rl2) =:= found, {Rl1, Rl2}),
+    Rd = Inp("B1 B2 B3 : down <= 1, events <= 1", "Green'"),
+    expect("inputs down <= 1: all three held never", element(1, Rd) =:= proved, Rd),
+    ok = file:write_file(Fa, [Src, "#annotate varp inputs \"B1 B2 : often <= 1\"\n"]),
+    Rx = candyspeak_varp:model(Fa, []),
+    expect("inputs: a count it does not know is an error with its line",
+	   element(1, Rx) =:= error, Rx).
 
 %% The model view's side of candyspeak_varp: the question replaces the
 %% source's reach, varp's printed trace reads back as data, and -- when varp

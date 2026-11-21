@@ -29,14 +29,14 @@ run() ->
 		   end end,
     expect("ladder: the rungs drawn, a contact among them",
 	   [T || T = {text, _, _, "B1", _, _} <- Ops()] =/= [], length(Ops())),
-    %% A click where B1 is drawn watches it: its value in the top frame, and
-    %% no frame round it -- the solver is where conditions are written now.
+    %% A click where B1 is drawn: no frame round it -- the solver is where
+    %% conditions are written now.
     [{X, Y} | _] = [{X, Y} || {text, X, Y, "B1", _, _} <- Ops()],
     P ! {candid_wx, {code, "xy=" ++ integer_to_list(X + 2) ++ "," ++
 			 integer_to_list(Y + 2)}},
     timer:sleep(?SETTLE),
-    expect("ladder: a click on a contact watches it, marks nothing",
-	   is_process_alive(P) andalso Has("watch") andalso
+    expect("ladder: a click on a contact marks nothing",
+	   is_process_alive(P) andalso
 	       [R || R = {rect, _, _, _, _, _, none, {68, 170, 255}, _} <- Ops()] =:= [],
 	   nomatch),
     %% A zoom at the right of a view at its left edge: it stays there, the

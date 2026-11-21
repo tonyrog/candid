@@ -1,0 +1,11 @@
+#!/bin/sh
+# caned FILE.csp      -- the ladder editor in a terminal (src/caned_tty.erl)
+# caned -wx FILE.csp  -- in a window of its own (src/caned_wx.erl)
+# caned [-wx] -patch FILE.csp -- patch mode: rules only added at the end, and
+#                                switched off and on
+D=$(dirname "$(readlink -f "$0")")
+CANDYSPEAK=${CANDYSPEAK:-$HOME/work/candyspeak}
+M=caned_tty
+[ "$1" = "-wx" ] && { M=caned_wx; shift; }
+exec erl -noshell -pa "$D/ebin" -pa "$CANDYSPEAK/ebin" \
+    -eval "$M:main(init:get_plain_arguments())" -extra "$@"

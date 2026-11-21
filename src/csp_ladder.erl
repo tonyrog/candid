@@ -270,7 +270,7 @@ ids(Ps) ->
 				     Id =/= none]
 		      || P <- tuple_to_list(Ps)])).
 
-%% What a click at X, Y means: a contact is watched by it, a rule's box
+%% What a click at X, Y means: a contact (nothing yet), a rule's box
 %% switches it off or on. The box gets a few pixels round it: it is small.
 %% An object's line opens or closes it. An opened object's contact is
 %% `ct=O/Id'; its rule's box is the rule's, whose ever it is.

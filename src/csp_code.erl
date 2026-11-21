@@ -60,7 +60,7 @@
 -export([assign/1, bind/1, chain/2, cols/1, tr_id/2, col_name/1,
 	 signed/3]).                                     % for the renderers
 -export([contact_of/3, state_name/2,
-	 look_values/1, look_text/1, show/1, watch_text/3, items/1]).  % tests
+	 look_values/1, look_text/1, show/1, items/1]).  % tests
 -export([split/1]).
 -export([rules/1, rules/2, tabs/1, tabs/2]).
 
@@ -292,7 +292,7 @@ new(C, Where, {Ast, File}, Cfg, Opts) ->
 	  tabs => Tabs, tab => 0, file => File, float => Float,
 	  prog => candyspeak_eval:prog(Ast, File, [{float, Float}]),
 	  mode => hide, shown => #{}, fired => [], glow => #{}, last => #{},
-	  off => maps:get(off, Opts, []), watch => none, open => [],
+	  off => maps:get(off, Opts, []), open => [],
 	  states => state_names(hd(Tabs)), trace => none, at => none,
 	  bad => #{}, acts => [], look => none, tshow => false},
     V.
@@ -338,11 +338,6 @@ control(V = #{off := Off, acts := As}, "dis=" ++ No) ->
 	       false -> Off -- [N]
 	   end,
     paint(V#{off := Off1, acts := As ++ [{switch, Dis, N}]});
-%% A click on a contact, or a signal: what it is now, in the top frame.
-control(V = #{tab := I}, "ct=" ++ Id) ->
-    paint(V#{watch := contact_of(V, I, Id)});
-control(V, "sig=" ++ N) ->
-    paint(V#{watch := {field, 0, {'WORD', 0, N}}});
 %% From the start of the trace: csp back to its initial values, paused, and
 %% its clock held -- the trace says how much time passes, not the person. The
 %% code view goes back to csp's own values, which the replay is checking.
@@ -776,14 +771,7 @@ paint1(V = #{tabs := Tabs, tab := I, last := Live, fired := Now0,
     Val = fun(N, E, Vs) ->
 		  show(candyspeak_eval:eval({field, 0, {'WORD', 0, N}}, Vs, E))
 	  end,
-    %% What was clicked last -- a name, or a contact's condition -- and what
-    %% it is now: names as the main tab has them, `us.x' for an object's.
-    Watch = case maps:get(watch, V, none) of
-		none -> [];
-		X -> [{"watch", watch_text(X, Last0, MEnv)}]
-	    end,
-    Txt = Watch ++
-	[{"csp_st", "State " ++ state_name(V, maps:get("State", Last0, 0))}] ++
+    Txt = [{"csp_st", "State " ++ state_name(V, maps:get("State", Last0, 0))}] ++
 	[{"m_" ++ N, Val(N, MEnv, Last0)} || {_, N} <- MVars] ++
 	[{"v_" ++ N, Val(N, Env, Last)} || P =/= none, Mode =/= hide,
 					   {_, N} <- Vars],
@@ -831,12 +819,6 @@ values(Last, P) ->
 						     Own(K)])).
 
 %% `Name = 7', `A > 3 = 1': what was clicked, and what it is in these values.
-watch_text(X, Vals, Env) ->
-    candyspeak_eval:text(X) ++ " = " ++
-	try show(candyspeak_eval:eval(X, Vals, Env))
-	catch _:_ -> "?"
-	end.
-
 show(unknown) -> "?";
 show(V) when is_float(V) -> float_to_list(V, [{decimals, 4}, compact]);
 show(V)       -> integer_to_list(V).

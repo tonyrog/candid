@@ -40,7 +40,9 @@ wx: all
 # given wins -- test/ebin goes at the end, not the front.
 test: all
 	mkdir -p test/ebin
-	$(ERLC) -o test/ebin test/wse.erl test/panel_test.erl test/fake_llm.erl
+	$(ERLC) -o test/ebin test/wse.erl test/panel_test.erl test/fake_llm.erl \
+	  test/caned_test.erl
+	erl -noshell $(PA) -pa test/ebin -s caned_test run
 	CANDID_SETTINGS=/dev/null CSP_EXE=$(CANDYSPEAK)/csp \
 	  erl -noshell $(PA) -pa test/ebin -s panel_test run
 
@@ -82,7 +84,13 @@ test-wx: all
 	$(ERLC) -o test/ebin test/wx_test.erl
 	@CANDID_SETTINGS=/dev/null CSP_EXE=$(CANDYSPEAK)/csp xvfb-run -a -s "-screen 0 1440x940x24" \
 	  erl -noshell $(PA) -pa test/ebin -s wx_test run > test/wx.out 2>&1; \
-	  s=$$?; grep -v 'Gtk-WARNING' test/wx.out | grep -v '^$$'; exit $$s
+	  s=$$?; grep -v 'Gtk-WARNING' test/wx.out | grep -v '^$$'; [ $$s = 0 ] || exit $$s
+	$(ERLC) -o test/ebin test/caned_wx_test.erl
+	@printf '#variable x\n#variable y\n#variable z\n#digital R1 out 13\n#digital R2 out 14\n\nR1 = x+1<y && x>15\ny = 2 ? x > 3\nR2 = _\nR1 = 0, R2 = 0\n' > test/ebin/caned_wx.csp
+	@xvfb-run -a -s "-screen 0 1000x640x24" \
+	  erl -noshell $(PA) -pa test/ebin -run caned_wx_test run test/ebin/caned_wx.csp \
+	  > test/caned_wx.out 2>&1; \
+	  s=$$?; grep -v 'Gtk-WARNING' test/caned_wx.out | grep -v '^$$'; exit $$s
 
 # Generate a varp model from a .csp and check it has transitions at all. The
 # consistency probe is not optional: an inconsistent `next' makes every property

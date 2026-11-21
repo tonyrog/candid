@@ -57,7 +57,6 @@ css(C) ->
        ".md .hid{display:none}"
        ".md td.cur,.md th.cur{background:", Fill(want), "}"
        ".md td.bad{background:", Fill(unwant), ";color:", Ink(unwant), "}"
-       "[data-sig]{cursor:pointer}"
        ".cv .bind{color:#8ab;margin-bottom:8px}"
        ".cv canvas{display:block}"]).
 
@@ -67,10 +66,10 @@ css(C) ->
 %% frame's row, and a trace from the solver and the program's own values
 %% below it. Where is what the panel made for it (candid_wse:panel/3); Spec:
 %% the colours. Back: the handles, the event id among them -- what the
-%% browser sends on it is `tab=I', `ct=Id', `sig=Name' and the trace's
+%% browser sends on it is `tab=I', `xy=X,Y' and the trace's
 %% buttons.
 new(Ws, Where, Tabs, #{colours := Colours}) ->
-    #{code := Parent, status := Row, top := Top} = Where,
+    #{code := Parent, top := Top} = Where,
     Style = wse:createElement(Ws, "style"),
     wse:set(Ws, Style, "textContent", candid_wse:u(css(Colours))),
     wse:appendChild(Ws, Parent, Style),
@@ -101,15 +100,7 @@ new(Ws, Where, Tabs, #{colours := Colours}) ->
     wse:appendChild(Ws, Box, Body),
     wse:appendChild(Ws, Box, Canvas),
     wse:appendChild(Ws, Parent, Box),
-    %% What was clicked, and below it a trace from the solver and the values.
-    Md = wse:createElement(Ws, "span"),
-    wse:set(Ws, Md, "className", "md"),
-    %% What was clicked last, a name or a contact, and its value now.
-    Watch = wse:createElement(Ws, "span"),
-    wse:set(Ws, Watch, "id", "watch"),
-    wse:setStyle(Ws, Watch, "color:#ddd;margin-left:16px"),
-    wse:appendChild(Ws, Md, Watch),
-    wse:appendChild(Ws, Row, Md),
+    %% A trace from the solver, and below it the values.
     Res = wse:createElement(Ws, "div"),
     wse:set(Ws, Res, "className", "md"),
     wse:appendChild(Ws, Top, Res),
@@ -124,15 +115,6 @@ new(Ws, Where, Tabs, #{colours := Colours}) ->
 		     "  for (var i = 0; i < b.length; i += 2) {"
 		     "    var e = document.getElementById(b[i]);"
 		     "    if (e) e.textContent = b[i+1]; } }"),
-    %% Any element with data-sig is a signal to mark: the devices' labels and
-    %% the value cells. One handler on the panel, since the cells come and go
-    %% with the tabs.
-    Sig = wse:newf(Ws, "",
-		   "{ document.getElementById('panel').onclick = function(e) {"
-		   "    var t = e.target.closest('[data-sig]');"
-		   "    if (t) Wse.notify(" ++ integer_to_list(Ev) ++
-		       ", 'sig=' + t.dataset.sig); }; }"),
-    wse:cast(Ws, Sig, "call", [null]),
     %% The rungs: csp_ladder's ops, drawn as they come. A click goes back as
     %% `xy=X,Y', and csp_code says what is there.
     Draw = wse:newf(Ws, "c,w,h,ops",
@@ -226,13 +208,12 @@ head(Tab = #{binds := {M, Bs}, vars := Vars, prefix := P}) ->
      vals("v_", P, Vars)].
 
 %% The values with no widget of their own, as a table; a #local in italics.
-%% A cell is a signal to mark (data-sig), by its whole name.
 vals(_Pre, _Obj, []) -> "";
 vals(Pre, Obj, Vars) ->
     ["<div class='vals'>",
      [begin
 	  Full = case Obj of none -> N; _ -> Obj ++ "." ++ N end,
-	  ["<span data-sig='", Full, "' id='sv_", Full, "'>",
+	  ["<span id='sv_", Full, "'>",
 	   case K of local -> ["<i>", N, "</i>"]; var -> N end,
 	   "<b id='", Pre, N, "'></b></span>"]
       end || {K, N} <- Vars],

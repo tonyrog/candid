@@ -502,9 +502,7 @@ row(Ws, Root, {Kind, Name, _W}, Look) ->
     Label = wse:createElement(Ws, "span"),
     wse:setStyle(Ws, Label, "display:inline-block;width:110px;color:#ccc"),
     wse:appendChild(Ws, Label, wse:createTextNode(Ws, candid_wse:u(maps:get(label, Look)))),
-    %% The label is the signal, to mark for the model view (csp_code).
     wse:set(Ws, Label, "id", "sl_" ++ Name),
-    wse:cast(Ws, Label, "setAttribute", ["data-sig", Name]),
     wse:appendChild(Ws, Row, Label),
     Node = case Kind of
 	       toggle  -> switch(Ws, Row, Name, Look);

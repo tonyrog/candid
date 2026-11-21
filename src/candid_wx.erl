@@ -36,7 +36,7 @@
 -export([paint/3, trace_clear/2, trace_column/3, plot/4]).
 -export([fg/3, bg/3, tc/2]).
 -export([colour/1, mix/3, font/1, label/2, relayout_up/1, canvas/4, redraw/3, register/3, register/4,
-	 forget/2, lookup/2, click/3, frame_box/2, text/4]).
+	 forget/2, lookup/2, frame_box/2, text/4]).
 -export([dock_pane/4, dock_show/3, in_scope/3, lookup_scope/2]).                % the log's and the chat's                          % csp_code_wx's
 
 -define(BG,      {18, 18, 18}).
@@ -551,8 +551,7 @@ beams(_DC, [], _Beam, _Dot, _Step) -> ok.
 
 %%% ------------------------------------------------------------ building
 
-%% A row per widget: the label -- a signal to mark for the code view, by
-%% click -- then the control.
+%% A row per widget: the label, then the control.
 row(H, Left, {Kind, Name, _W}, Look) ->
     LS = wxWindow:getSizer(Left),
     Row = wxBoxSizer:new(?wxHORIZONTAL),
@@ -560,7 +559,6 @@ row(H, Left, {Kind, Name, _W}, Look) ->
     wxWindow:setMinSize(Frame, {label_w(H), -1}),
     wxWindow:setFont(Label, font(H)),
     fg(H, Label, {204, 204, 204}),
-    click(Label, {code, "sig=" ++ Name}, self()),
     register(H, "sl_" ++ Name, {frame, Frame}),
     wxSizer:add(Row, Frame, [{flag, ?wxALIGN_CENTER_VERTICAL}]),
     Node = case Kind of
@@ -640,12 +638,6 @@ frame_box(Parent, Label) ->
     label(T, Label),
     wxSizer:add(S, T, [{flag, ?wxALL}, {border, 2}]),
     {F, T}.
-
-%% A click on W sends Ev to Pid, the panel's process.
-click(W, Ev, Pid) ->
-    wxWindow:connect(W, left_down,
-		     [{callback, fun(_E, O) -> Pid ! {candid_wx, Ev},
-					       wxEvent:skip(O) end}]).
 
 switch(H, Left, Row, Name, Look = #{colour := Hue}) ->
     Idle = maps:get(idle, Look, 0),

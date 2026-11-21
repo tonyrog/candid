@@ -1,0 +1,7 @@
+ok    the window is up and took the keys and the drag
+ok    the selection is X11's PRIMARY, for a middle click anywhere
+ok    ^C ^V ^X ^S: copied onto the hole, cut, saved
+ok    ^X put the cut contact on the system clipboard
+ok    a middle click pastes X11's PRIMARY onto the contact under it
+ok    AltGr + < is `|': a branch
+ok    handles: a double click switches off, ⌥↓ and a drag move, the mark goes along
