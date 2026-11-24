@@ -44,7 +44,7 @@
 
 %%% ------------------------------------------------------------ the layout
 
-%% The rules of a tab (csp_code:rules/1) drawn as ladder or code.
+%% The rules of a tab (csp_code:rules/1) drawn as ladder.
 layout(Rules, Mode, M = #{cw := _, ch := _}) ->
     {Ps, Y, W} = lists:foldl(fun(R, Acc) -> row(R, Mode, M, Acc) end,
 			     {[], ?GAP, 0}, gates(Rules)),
@@ -103,7 +103,6 @@ row({R = #{no := N, line := Ln, guard := Gd, assigns := As}, _}, Mode, M,
     Label = lists:flatten(
 	      case {Mode, R} of
 		  {ladder, #{coil := Tgt}} -> candyspeak_eval:text(Tgt);
-		  {code, #{coil := Tgt}}   -> [candyspeak_eval:text(Tgt), " ="];
 		  _ -> lists:join(", ", [csp_code:assign(A) || A <- As])
 	      end),
     {Rw, Rh, Rail, Rps} = rung(Mode, M, K, Label, Gd, R),
@@ -130,16 +129,7 @@ rung(ladder, M, K, Label, undefined, _R) ->
     across(M, [wire(40), coil(M, K, Label, ladder)]);
 rung(ladder, M, K, Label, Gd, _R) ->
     {G, _} = ladder(M, K, Gd, 0),
-    across(M, [wire(?WMIN), G, wire(?WMIN), coil(M, K, Label, ladder)]);
-rung(code, M, K, Label, undefined, _R) ->
-    across0([coil(M, K, Label, code)]);
-rung(code, M, K, Label, Gd, R) ->
-    Sep = case R of
-	      #{coil := _} -> [text(M, " ", op)];
-	      _            -> [text(M, " ? ", op)]
-	  end,
-    {G, _} = code(M, K, Gd, 0, 0),
-    across0([coil(M, K, Label, code)] ++ Sep ++ G).
+    across(M, [wire(?WMIN), G, wire(?WMIN), coil(M, K, Label, ladder)]).
 
 %% AND across: the wire between two contacts. Returns {Element, Next}.
 ladder(M, K, X = {'&&', _, _, _}, I) ->
@@ -170,20 +160,6 @@ ladder(M, K, X = {'||', _, _, _}, I) ->
 ladder(M, K, X, I) ->
     {contact(M, K, I, X, ladder), I + 1}.
 
-%% The same walk as text: the contacts in order, the operators between.
-code(M, K, X = {Op, _, _, _}, I, P) when Op =:= '&&'; Op =:= '||' ->
-    Q = case Op of '||' -> 1; '&&' -> 2 end,
-    {Es, I1} = lists:mapfoldl(fun(C, J) -> code(M, K, C, J, Q + 1) end, I,
-			      csp_code:chain(Op, X)),
-    Sep = text(M, " " ++ atom_to_list(Op) ++ " ", op),
-    In = lists:append(lists:join([Sep], Es)),
-    {case Q < P of
-	 true  -> [text(M, "(", op)] ++ In ++ [text(M, ")", op)];
-	 false -> In
-     end, I1};
-code(M, K, X, I, _P) ->
-    {[contact(M, K, I, X, code)], I + 1}.
-
 %%% The elements, {W, H, Rail, Pieces}, the pieces placed from 0,0.
 
 contact(M, K, I, X, Mode) ->
@@ -194,17 +170,13 @@ coil(M, K, Label, Mode) -> box(M, K, Label, coil, Mode).
 
 box(M = #{ch := Ch}, Id, Text, Kind, Mode) ->
     Px = case {Mode, Kind} of
-	     {code, _}        -> 2;
 	     {ladder, coil}   -> ?CPADX;
 	     {ladder, contact} -> ?PADX
 	 end,
-    Py = case Mode of code -> 0; ladder -> ?PADY end,
+    Py = case Mode of ladder -> ?PADY end,
     W = tw(M, Text) + 2 * Px + 2,
     H = Ch + 2 * Py + 2,
     {W, H, H div 2, [{box, Id, none, 0, 0, W, H, Text, Kind, Px}]}.
-
-text(M = #{ch := Ch}, T, Style) ->
-    {tw(M, T), Ch, Ch div 2, [txt(none, none, 0, 0, T, Style)]}.
 
 wire(N) -> {wire, N}.
 
@@ -331,19 +303,10 @@ piece({box, _, _, X, Y, W, H, T, contact, Px}, Cls, Mode, C) ->
 	case {Mode, Has("t"), Has("u")} of
 	    {ladder, true, _} -> {fill(true, C), c(true, C), false, ink(true, C)};
 	    {ladder, _, true} -> {{30, 30, 30}, {85, 85, 85}, true, {102, 102, 102}};
-	    {ladder, _, _}    -> {{30, 30, 30}, {85, 85, 85}, false, {153, 153, 153}};
-	    {code, true, _}   -> {none, none, false, c(true, C)};
-	    {code, _, true}   -> {none, none, false, {102, 102, 102}};
-	    {code, _, _}      -> {none, none, false, {187, 187, 187}}
+	    {ladder, _, _}    -> {{30, 30, 30}, {85, 85, 85}, false, {153, 153, 153}}
 	end,
-    Under = case {Mode, Has("u")} of
-		{code, true} -> [{line, X + Px, Y + H - 2, X + W - Px, Y + H - 2,
-				  {102, 102, 102}, 1, true}];
-		_ -> []
-	    end,
     [{rect, X, Y, W, H, 3, Fill, Stroke, Dash},
-     {text, X + Px + 1, Y + (H - ch_of(H, Mode)) div 2, T, Ink, false}]
-	++ Under;
+     {text, X + Px + 1, Y + (H - ch_of(H, Mode)) div 2, T, Ink, false}];
 %% A rule's switch: filled while the rule is on. Drawn undimmed, so the box
 %% of a rule that is off still reads as a box to click.
 piece({box, _, _, X, Y, W, H, _, check, _}, Cls, _Mode, _C) ->
@@ -358,12 +321,9 @@ piece({box, _, _, X, Y, W, H, T, coil, Px}, Cls, Mode, C) ->
 	case {Mode, lists:member("on", Cls), lists:member("nx", Cls)} of
 	    {ladder, true, _} -> {fill(fired, C), c(fired, C), ink(fired, C)};
 	    {ladder, _, true} -> {none, c(next, C), ink(next, C)};
-	    {ladder, _, _}    -> {none, {85, 85, 85}, {153, 153, 153}};
-	    {code, true, _}   -> {fill(fired, C), none, ink(fired, C)};
-	    {code, _, true}   -> {none, none, c(next, C)};
-	    {code, _, _}      -> {none, none, {187, 187, 187}}
+	    {ladder, _, _}    -> {none, {85, 85, 85}, {153, 153, 153}}
 	end,
-    R = case Mode of ladder -> H div 2; code -> 2 end,
+    R = H div 2,
     [{rect, X, Y, W, H, R, Fill, Stroke, false},
      {text, X + Px + 1, Y + (H - ch_of(H, Mode)) div 2, T, Ink, false}].
 
@@ -371,8 +331,7 @@ is_check({box, _, _, _, _, _, _, _, check, _}) -> true;
 is_check(_) -> false.
 
 %% The text's height inside a box: the box less its padding and frame.
-ch_of(H, ladder) -> H - 2 * ?PADY - 2;
-ch_of(H, code)   -> H - 2.
+ch_of(H, ladder) -> H - 2 * ?PADY - 2.
 
 %% A row whose block is not in force, a third of itself over the page.
 dim(Op, false) -> Op;

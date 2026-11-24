@@ -29,13 +29,14 @@
 -export([plots/1, eng/2, period/0, keep/2, rows/1, rows/3]). % tests
 -export([looks/1, colour/3, warn_annotations/1]).    % tests, introspection
 -export([tab_event/2, tabs/1, target_text/0, node_file/1]).  % tests
+-export([connect_choices/0, remember_tcp/1, recent_tcp/0]).    % tests
 -export([open_dir/0, remember_dir/1]).                         % tests
 -export([pref/1]).                                % the renderers
 
 -include("candid.hrl").
 -include_lib("kernel/include/file.hrl").
 
--define(PREFS, [dir, values]).   % kept besides the views, see pref/1
+-define(PREFS, [dir, values, tcp_recent, keys]).   % kept besides the views, see pref/1
 -define(PERIOD,    100).   % ms between cycles -- the DEFAULT, see period/0
 %% What the tick rate may be set to, from the bar. 100 ms was chosen for lamps;
 %% a plot wants a good deal more than ten samples a second, and a program with
@@ -43,7 +44,6 @@
 %% about what it costs: every tick is a /commit plus one cast per plot.
 -define(PERIODS,   [10, 25, 50, 100, 250]).
 -define(VIEWS, [{"trace", ["hide", "show"]},
-		{"code",  ["hide", "ladder", "code"]},
 		{"theme", ["dark", "light"]}]).
 -define(PHOSPHOR, "#5f9").  % the beam, when the annotation names no colour
 -define(PERSIST,  0.90).           % how much of the last frame survives 100 ms
@@ -122,11 +122,17 @@ render(U, Where, File, Side0) ->
 	    ui(U, message, [Root, io_lib:format("~n~s cannot be parsed, "
 						"the log says why",
 						[shorten(File)])]),
+	    ui(U, built, []),
 	    candid_log:show(maps:get(log, Side)),
 	    idle(U, Where, File, Side#{sel => SelId, run => Run})
     end.
 
 side(S) -> maps:with([chat, log, solve, ws], S).
+
+%% How the editor may change the shown program: a node's only by rules added
+%% at the end and rules switched (patch), a file's in any way (edit).
+access(#{mode := patch}) -> patch;
+access(_) -> edit.
 
 %% How the shown program's floats read: as the image it was listed off says,
 %% for a node's; Q16.16 as the host csp runs it, for the rest.
@@ -291,12 +297,56 @@ tab_go(Side = #{ws := Ws}) ->
     end.
 
 set_target(Text) ->
+    remember_tcp(Text),
     case csp_cmd:target(Text) of
 	{ok, T} -> put(candid_target, T),
 		   put(candid_target_text, Text),
 		   ok;
 	_ -> error
     end.
+
+%% Where to run, asked (the renderer's connect/2): what there is to connect
+%% to, read again on a rescan. {ok, Target} | cancel.
+connect_ui(U) ->
+    ui(U, connect, [#{choices => fun connect_choices/0, current => target_text()}]).
+
+%% [{Label, Target}]: our own csp; each serial port, the USB device behind
+%% it and the boards it could be; the TCP addresses used last; the CAN
+%% interfaces there are.
+connect_choices() ->
+    Ports = try csp_ports:ports() catch _:_ -> [] end,
+    [{"local                our own csp, on vcan0", "local"}] ++
+	[{lists:flatten(io_lib:format("~-20s ~s  ~s~s",
+				      [D, Id, Prod, case Bs of
+							[] -> "";
+							_ -> "  = " ++ string:join(Bs, " | ")
+						    end])), D}
+	 || {D, Id, Prod, Bs} <- Ports] ++
+	[{lists:flatten(io_lib:format("~-20s a node, last used", [A])), A}
+	 || A <- recent_tcp()] ++
+	[{lists:flatten(io_lib:format("~-20s our own csp on that bus; a node: ~s to=ID from=ID",
+				      [If, If])), If}
+	 || If <- can_interfaces(), If =/= "vcan0"].
+
+recent_tcp() ->
+    case pref(tcp_recent) of
+	L when is_list(L) -> [A || A <- L, is_list(A)];
+	_ -> []
+    end.
+
+%% A TCP address connected to: first among the five kept.
+remember_tcp(Text) ->
+    case {csp_cmd:target(Text), string:lexemes(Text, " ")} of
+	{{ok, {{tcp, _, _}, _}}, [A | _]} ->
+	    set_pref(tcp_recent, lists:sublist([A | lists:delete(A, recent_tcp())], 5));
+	_ -> ok
+    end.
+
+%% The network interfaces that are CAN (type 280, ARPHRD_CAN).
+can_interfaces() ->
+    [filename:basename(D) || D <- lists:sort(filelib:wildcard("/sys/class/net/*")),
+			     {ok, B} <- [file:read_file(filename:join(D, "type"))],
+			     string:trim(binary_to_list(B)) =:= "280"].
 
 %% A file picked, from the chooser or the dialog: its own tab, csp our own.
 pick(File) ->
@@ -1057,18 +1107,11 @@ group(Id, Gs, Rest, Looks, Ann) ->
 
 %%% ---------------------------------------------------------------- rendering
 
-build(U, Where, Root, File, [], Ast, Side) ->
-    %% Parsed fine, but nothing in it is a widget yet. Say which declarations
-    %% it does have -- an empty panel otherwise looks like a failure. An
-    %% empty program is just empty.
+%% An empty program is just empty. One with no widget is shown all the same:
+%% its rules and values in the code view, the editor on it.
+build(U, Where, Root, File, [], [], Side) ->
     {SelId, Run} = ui(U, chooser, [Root, bar(File, Side)]),
-    Ast =:= [] orelse
-	ui(U, message, [Root, io_lib:format(
-				"nothing to show in ~s.~n~n"
-				"it declares: ~s~n~n"
-				"widgets come from #digital, #analog and "
-				"#field; variables and rules are not "
-				"shown yet.", [shorten(File), kinds(Ast)])]),
+    ui(U, built, []),
     csp_chat:attach(maps:get(chat, Side), chat_info(File)),
     idle(U, Where, File, Side#{sel => SelId, run => Run});
 build(U, Where, Root, File, Widgets0, Ast, Side = #{chat := Chat, log := Log}) ->
@@ -1104,13 +1147,20 @@ build(U, Where, Root, File, Widgets0, Ast, Side = #{chat := Chat, log := Log}) -
     {ok, Src} = candyspeak:parse(File, [sources]),
     Shown = candid_file:active(maps:get(ws, Side)),
     Code = csp_code:new(code_ui(U), maps:get(code, P), {Src, File}, colours(),
-			#{float => float_format(Shown), off => offs(Shown)}),
+			#{float => float_format(Shown), off => offs(Shown),
+			  access => access(Shown),
+			  %% the ladder is the editor where the renderer has it
+			  editor => element(1, U) =:= candid_wx,
+			  edit_at => maps:get(edit_at, Side, none)}),
     csp_solve:file(maps:get(solve, Side, undefined), File),
     {ok, Link} = csp_link:open(target(), csp_exe(), [File]),
     erlang:send_after(period(), self(), tick),
     TraceBox = maps:get(trace_box, P),
     S0 = #{trace_box => TraceBox, code => Code, run => Run},
-    S1 = lists:foldl(fun({K, V}, Si) -> view(U, Si, K, V) end, S0,
+    %% The code view -- the editor on the program, lit by what it does -- is
+    %% always shown.
+    S1 = lists:foldl(fun({K, V}, Si) -> view(U, Si, K, V) end,
+		     S0#{code := csp_code:control(Code, "ladder")},
 		     maps:to_list(views())),
     S2 = #{nodes  => maps:get(nodes, P),
 	   traces => [{N, K, maps:get(N, Looks)} || {K, N, _} <- Ordered],
@@ -1135,7 +1185,9 @@ build(U, Where, Root, File, Widgets0, Ast, Side = #{chat := Chat, log := Log}) -
 	   ws     => maps:get(ws, Side),
 	   where  => Where},
     csp_chat:attach(Chat, chat_info(File)),
-    loop(U, Link, start_mode(U, Link, S2)).
+    S3 = start_mode(U, Link, S2),
+    ui(U, built, []),
+    loop(U, Link, S3).
 
 %% {mode, pause} in candid.config: start stopped, ready to step. Not a node: it
 %% was running before we looked, and connecting is not a reason to stop it.
@@ -1341,9 +1393,6 @@ colours() ->
 view(U, S, "trace", V) ->
     ui(U, trace_view, [maps:get(trace_box, S), V =:= "show"]),
     view_done(U, S, "trace", V);
-view(U, S, "code", V) ->
-    S1 = S#{code := csp_code:control(maps:get(code, S), V)},
-    view_done(U, S1, "code", V);
 view(U, S, "theme", V) ->
     ui(U, theme, [V]),
     view_done(U, S, "theme", V);
@@ -1503,6 +1552,12 @@ wait_for_pick(U, Where, File, W) ->
 			_ -> Again(W)
 		    end;
 		{bar, "new"} -> Drop(), render(U, Where, new, Side);
+		{bar, "connect"} ->
+		    case connect_ui(U) of
+			{ok, T} -> self() ! {candid_wx, {bar, "target=" ++ T}};
+			cancel -> ok
+		    end,
+		    Again(W);
 		{bar, "target=" ++ Text} ->
 		    Drop(),
 		    case set_target(Text) of
@@ -1536,7 +1591,6 @@ wait_for_pick(U, Where, File, W) ->
 		%% the theme now, the others kept for when there is a panel
 		{bar, "theme=" ++ V} -> Again(view(U, W, "theme", V));
 		{bar, "trace=" ++ V} -> Again(view_done(U, W, "trace", V));
-		{bar, "code=" ++ V} -> Again(view_done(U, W, "code", V));
 		closed -> Drop(), keep_settings();
 		_ -> Again(W)
 	    end
@@ -1544,20 +1598,16 @@ wait_for_pick(U, Where, File, W) ->
 
 event({M, _H}, Ids, Msg) -> M:event(Ids, Msg).
 
-%% Which declaration types a file actually has, counted, for the message above.
-kinds(Ast) ->
-    Counts = lists:foldl(fun(D, M) when is_tuple(D) ->
-				 K = element(1, D),
-				 maps:update_with(K, fun(N) -> N + 1 end, 1, M);
-			    (_, M) -> M
-			 end, #{}, Ast),
-    string:join([io_lib:format("~w x~w", [K, N])
-		 || {K, N} <- lists:sort(maps:to_list(Counts))], ", ").
-
 %%% --------------------------------------------------------------------- loop
 
 loop(U, Link, S) ->
     receive
+	%% The editor's file was written: what runs is built from it again.
+	{caned_saved, File, Ln} ->
+	    csp_link:close(Link),
+	    flush(),
+	    render(U, maps:get(where, S), File, (side(S))#{edit_at => Ln});
+
 	{csp_state, N, Vals} ->
 	    loop(U, Link, infer(S, update(U, S, Vals), N));
 
@@ -1790,7 +1840,13 @@ act_ui(U, Link, S, {bar, "saveas=" ++ Name}) ->
 act_ui(U, Link, S, {bar, Tag = "tab=" ++ _}) -> tab_ui(U, Link, S, Tag);
 act_ui(U, Link, S, {bar, Tag = "close=" ++ _}) -> tab_ui(U, Link, S, Tag);
 %% run / pause / step, the target, the views: the bar.
+act_ui(U, Link, S, {bar, "connect"}) ->
+    case connect_ui(U) of
+	{ok, T} -> act_ui(U, Link, S, {bar, "target=" ++ T});
+	cancel -> loop(U, Link, S)
+    end;
 act_ui(U, Link, S, {bar, "target=" ++ Text}) ->
+    remember_tcp(Text),
     {Link1, S1} = retarget(U, Link, S, Text),
     csp_chat:attach(maps:get(chat, S1), chat_info(maps:get(file, S1))),
     loop(U, Link1, S1);
@@ -1810,6 +1866,12 @@ act_ui(U, Link, S, {bar, "solver=toggle"}) ->
 act_ui(U, Link, S, {bar, Tag}) ->
     loop(U, Link, control(U, Link, S, Tag));
 %% ladder / code, from the code view's own bar.
+%% A key to the editor, and every key behind it already waiting -- a key
+%% held down repeats faster than a picture is drawn -- taken together and
+%% drawn once, so the picture is where the keys are and not behind them.
+act_ui(U, Link, S, {code, {key, K}}) ->
+    loop(U, Link, code_do(U, Link, S,
+			  csp_code:control(maps:get(code, S), {keys, [K | keys_waiting()]})));
 act_ui(U, Link, S, {code, Tag}) ->
     loop(U, Link, code_do(U, Link, S,
 			  csp_code:control(maps:get(code, S), Tag)));
@@ -1828,6 +1890,11 @@ act_ui(_U, Link, _S, closed) ->
     csp_link:close(Link);
 act_ui(U, Link, S, none) ->
     loop(U, Link, S).
+
+keys_waiting() ->
+    receive {candid_wx, {code, {key, K}}} -> [K | keys_waiting()]
+    after 0 -> []
+    end.
 
 set_widget(Link, S, Data) ->
     case string:split(Data, "=") of
@@ -1885,6 +1952,39 @@ act(_U, _Link, S, {frame, Id, Bytes})   -> send_frame(Id, Bytes), S;
 act(_U, Link, S, {set, N, V})           -> csp_link:set(Link, N, V), S;
 act(_U, Link, S, step)                  -> csp_link:step(Link), S;
 act(_U, Link, S, {switch, Off, N})      -> switch_rules(Link, S, Off, [N]);
+%% The editor saved a file: on disk, then the panel built again from it, the
+%% program in csp the one saved (see the loop's caned_saved).
+act(_U, _Link, S = #{ws := Ws}, {edit_save, Text, Ln}) ->
+    case candid_file:active(Ws) of
+	F = #{name := Path} when Path =/= none ->
+	    case file:write_file(Path, unicode:characters_to_binary(Text)) of
+		ok ->
+		    {ok, L} = candid_file:load({disk, Path}),
+		    self() ! {caned_saved, Path, Ln},
+		    S#{ws := candid_file:update(Ws, F#{lines := maps:get(lines, L),
+							dirty := false})};
+		{error, Why} ->
+		    candid_log:add(maps:get(log, S, undefined), error,
+				   io_lib:format("not saved: ~p", [Why])),
+		    S
+	    end;
+	_ ->
+	    candid_log:add(maps:get(log, S, undefined), error,
+			   "the file has no name yet: save as first"),
+	    S
+    end;
+%% The editor on a node's program: the rules added sent as the chat's are,
+%% one /undo takes them back; then what it switched.
+act(_U, Link, S = #{ws := Ws}, {patch, Lines, Switched}) ->
+    S1 = case {Lines, candid_file:active(Ws)} of
+	     {[], _} -> S;
+	     {_, F = #{lines := _}} ->
+		 {ok, F1, _} = candid_file:add(F, lists:flatten([[T, $\n] || T <- Lines])),
+		 [csp_link:raw(Link, L) || L <- ["/undo begin"] ++ Lines ++ ["/undo end"]],
+		 appended(S, F1);
+	     _ -> S
+	 end,
+    lists:foldl(fun({Off, N}, Si) -> switch_rules(Link, Si, Off, [N]) end, S1, Switched);
 act(_U, _Link, S, {log, Text})          ->
     candid_log:add(maps:get(log, S, undefined), note, Text), S.
 
@@ -1943,7 +2043,6 @@ control(_U, Link, S, "step=1") ->
 %% A new tick takes effect on the NEXT one: the timer already in flight is left
 %% to arrive, so changing the rate cannot drop a tick or run two at once.
 control(U, _Link, S, "trace=" ++ V) -> view(U, S, "trace", V);
-control(U, _Link, S, "code=" ++ V)  -> view(U, S, "code", V);
 control(U, _Link, S, "theme=" ++ V) -> view(U, S, "theme", V);
 control(_U, _Link, S, "period=" ++ Ms) ->
     case string:to_integer(Ms) of

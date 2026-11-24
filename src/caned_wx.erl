@@ -28,6 +28,7 @@
 -define(FONT_PT, 11).
 -define(DRAG, 4).                          % pixels before a press is a drag
 
+main(["-keys"]) -> caned_keys:show(), halt(0);
 main(["-patch", File]) -> main(File, patch);
 main([File]) -> main(File, edit).
 
@@ -75,8 +76,10 @@ init(S, File, Caller) ->
     wxFrame:show(Frame),
     wxWindow:setFocus(Panel),
     Caller ! {self(), ready},
+    %% the keys by candid's settings ({keys, ...}), as its code view has them
+    Keys = caned_keys:settings(),
     W = #{frame => Frame, panel => Panel, tab => Tab, m => M, hits => [],
-	  press => none, drag => none},
+	  press => none, drag => none, keys => Keys, pending => []},
     loop(render(S, W)).
 
 %%% ------------------------------------------------------------------ loop
@@ -89,23 +92,42 @@ loop({S, W = #{frame := Frame}}) ->
 		false -> wxFrame:destroy(Frame), wx:destroy()
 	    end;
 	#wx{event = #wxSize{}} -> loop(render(S, W));
-	#wx{event = #wxKey{} = K} ->
-	    case wx_key(K) of
-		none -> loop({S, W});
-		Key -> act(Key, S, W)
-	    end;
+	#wx{event = #wxKey{} = K} -> act({wxkey, K}, S, W);
 	#wx{event = #wxMouse{} = Ev} -> mouse(Ev, S, W);
 	_ -> loop({S, W})
     end.
 
-act(Key, S, W) ->
+%% A key, and the keys and wheel turns already waiting behind it -- a key
+%% held down repeats faster than a screen is drawn -- taken together and
+%% drawn once.
+act(Key, S, W) -> keys([Key | waiting()], S, W).
+
+keys([], S, W) -> loop(render(primary_out(clip_out(S)), W));
+%% A key pressed: by its name, a sequence waited for (caned_keys:feed/3).
+keys([{wxkey, K} | Ks], S, W = #{keys := T, pending := P}) ->
+    case caned_keys:feed(caned_keys:name(K), P, T) of
+	{command, none} -> keys(Ks, S, W#{pending := []});
+	{command, C} -> keys([C | Ks], S, W#{pending := []});
+	{prefix, P1} -> keys([{msg, lists:flatten(lists:join(" ", P1)) ++ "-"} | Ks], S,
+			     W#{pending := P1});
+	{undefined, Seq} -> keys([{msg, Seq ++ " is undefined"} | Ks], S, W#{pending := []})
+    end;
+keys([Key | Ks], S, W) ->
     Key1 = case Key of
 	       paste -> {paste, clipboard_text(S, false)};
 	       _ -> Key
 	   end,
     case caned_ui:key(Key1, S) of
-	{ok, S1} -> loop(render(primary_out(clip_out(S1)), W));
+	{ok, S1} -> keys(Ks, S1, W);
 	{quit, _} -> wxFrame:destroy(maps:get(frame, W)), wx:destroy()
+    end.
+
+waiting() ->
+    receive
+	#wx{event = #wxKey{} = K} -> [{wxkey, K} | waiting()];
+	#wx{event = #wxMouse{type = mousewheel, wheelRotation = R}} ->
+	    [{scroll, -sign(R)} | waiting()]
+    after 0 -> []
     end.
 
 %% What caned_ui left for the clipboard goes on the system's.
@@ -223,56 +245,13 @@ sign(_) -> 0.
 
 %%% ------------------------------------------------------------------ keys
 
-%% In a char event Ctrl + a letter comes as its control code, 1..26 (^C is
-%% 3); some ports give the letter. Both are taken. AltGr arrives as Ctrl +
-%% Alt on GTK -- `|' on a Swedish keyboard is AltGr + < -- so that is a
-%% character, not a command.
-wx_key(#wxKey{keyCode = C0, controlDown = true, altDown = Alt}) when Alt =/= true ->
-    C = if C0 >= 1, C0 =< 26 -> C0 + $@;
-	   C0 >= $a, C0 =< $z -> C0 - 32;
-	   true -> C0
-	end,
-    case C of
-	$C -> copy;
-	$J -> newline;
-	$X -> cut;
-	$V -> paste;
-	$Z -> $u;
-	$R -> 18;
-	$S -> $s;
-	_ -> none
-    end;
-wx_key(#wxKey{keyCode = ?WXK_RETURN, shiftDown = true}) -> newline;
-wx_key(#wxKey{keyCode = ?WXK_UP, altDown = true}) -> alt_up;
-wx_key(#wxKey{keyCode = ?WXK_DOWN, altDown = true}) -> alt_down;
-wx_key(#wxKey{keyCode = ?WXK_TAB, shiftDown = true}) -> shift_tab;
-wx_key(#wxKey{keyCode = ?WXK_LEFT, shiftDown = true}) -> shift_left;
-wx_key(#wxKey{keyCode = ?WXK_RIGHT, shiftDown = true}) -> shift_right;
-wx_key(#wxKey{keyCode = C, uniChar = U}) ->
-    case C of
-	?WXK_LEFT -> left;
-	?WXK_RIGHT -> right;
-	?WXK_UP -> up;
-	?WXK_DOWN -> down;
-	?WXK_RETURN -> enter;
-	?WXK_NUMPAD_ENTER -> enter;
-	?WXK_ESCAPE -> esc;
-	?WXK_BACK -> backspace;
-	?WXK_DELETE -> del;
-	?WXK_TAB -> tab;
-	?WXK_PAGEUP -> page_up;
-	?WXK_PAGEDOWN -> page_down;
-	_ when is_integer(U), U >= $\s -> U;
-	_ -> none
-    end.
-
 %%% ----------------------------------------------------------------- paint
 
 %% The screen for the window's size, as ops for the paint callback.
 render(S, W = #{panel := Panel, tab := Tab, m := M = #{cw := Cw, ch := Ch}}) ->
     {Wp, Hp} = wxWindow:getClientSize(Panel),
     {S1, Rows} = caned_ui:screen(S, max(3, Hp div Ch), max(20, Wp div Cw)),
-    {Ops, Hits} = caned_ops:ops(Rows, M),
+    {Ops, Hits} = caned_ops:ops(Rows, M#{w => Wp}),
     ets:insert(Tab, {ops, Ops}),
     wxWindow:refresh(Panel, [{eraseBackground, false}]),
     {S1, W#{hits := Hits, base => Ops}}.

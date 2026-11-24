@@ -11,7 +11,7 @@
 -export([run/0]).
 -export([logger/1]).
 -export([new/4, metrics/2, paint/4, answer/5,
-	 shown/3, rungs/6, draw/3]).   % the code view's ui in a test
+	 shown/3, rungs/6, draw/3, edit_status/3, see/4]).   % the code view's ui in a test
 -export([pane/2, show/3, say/4, clear/2, busy/3, event/2]).  % the chat's, here
 
 -define(SETTLE, 600).
@@ -948,6 +948,7 @@ model_check() ->
     file_check(),
     tab_check(),
     save_check(),
+    lights_check(),
     direct_check(),
     click_check(),
     F = tree("examples/traffic.csp"),
@@ -1354,7 +1355,12 @@ varp_gen_check() ->
 					       [global, {return, list}]),
 			      NL2 = re:replace(NL1, "//   [0-9]+:", "//   N:",
 					       [global, {return, list}]),
-			      re:replace(NL2, "//   line [0-9]+", "//   line N",
+			      %% an annotation in the imported half says its file
+			      NL3 = re:replace(NL2, "// line [A-Za-z0-9_.]+\\.csp:", "// line ",
+					       [global, {return, list}]),
+			      NL4 = re:replace(NL3, "// line [0-9]+", "// line N",
+					       [global, {return, list}]),
+			      re:replace(NL4, "//   line [0-9]+", "//   line N",
 					 [global, {return, list}])
 		      end,
 	    expect("an #import-split program translates to the same model",
@@ -2169,7 +2175,20 @@ tab_check() ->
     expect("tabs: the last one is not closed",
 	   candid:tab_event("close=" ++ integer_to_list(maps:get(id, D)),
 			    Side#{ws := W1}) =:= none, nomatch),
-    erase(candid_target), erase(candid_target_text).
+    erase(candid_target), erase(candid_target_text),
+    %% connect...: the TCP addresses connected to are kept, the last first,
+    %% five of them; a serial port is not one.
+    application:unset_env(candid, {pref, tcp_recent}),
+    [candid:remember_tcp(A) || A <- ["10.0.0.5:4000", "/dev/ttyACM0", "host:15555 rom",
+                                     "10.0.0.5:4000", "a:1", "b:2", "c:3", "d:4"]],
+    Rec = candid:recent_tcp(),
+    Cs = candid:connect_choices(),
+    expect("connect: the last TCP addresses kept, newest first, five; offered after "
+           "our own csp",
+           Rec =:= ["d:4", "c:3", "b:2", "a:1", "10.0.0.5:4000"] andalso
+           element(2, hd(Cs)) =:= "local" andalso
+           [T || {_, T} <- Cs, lists:member(T, Rec)] =:= Rec, {Rec, Cs}),
+    application:unset_env(candid, {pref, tcp_recent}).
 
 %% Without a file the panel starts on an empty tab, which a file opened
 %% takes the place of; save as gives a tab a name; the views are kept for
@@ -2379,16 +2398,7 @@ ladder_check() ->
     expect("ladder: a rule switched off is dimmed, its box empty, not dimmed",
 	   hd(Texts(L3)) =/= hd(Texts(L)) andalso
 	       length(Box1(L4)) =:= length(Box1(L3)) + 1,
-	   {Box1(L3), Box1(L4)}),
-    C = csp_ladder:layout(Rules, code, M),
-    Ys = lists:usort([Y || {box, Id, _, _, Y, _, _, _, _, _}
-			       <- tuple_to_list(maps:get(pieces, C)),
-			   lists:prefix("k1", Id)]),
-    expect("code: a rule is one line, no wires",
-	   length(Ys) =:= 1 andalso
-	       [W || W = {wire, _, _, _, _, _, _, _}
-			 <- tuple_to_list(maps:get(pieces, C))] =:= [],
-	   Ys).
+	   {Box1(L3), Box1(L4)}).
 
 edge_model_check() ->
     F = "/tmp/csp_edge_model.csp",
@@ -2508,6 +2518,68 @@ logger(Acc) ->
 	{calls, From}   -> From ! {calls, lists:reverse(Acc)}, logger(Acc)
     end.
 
+%% What lights caned's rungs in candid, from the code view's own state: a
+%% contact by what it is now, a coil by csp's word that its rule fired, a
+%% rung by whether its block is in force.
+lights_check() ->
+    F = "/tmp/csp_lights.csp",
+    ok = file:write_file(F, "#variable x = 5\n#variable y = 0\n#digital R1 out 13\n"
+                         "#states S1 S2\nR1 = 1 ? x > 3 && y > 1\n#in S2\n"
+                         "R1 = 0 ? x > 1\n#end\n"),
+    {ok, Ast} = candyspeak:parse(F, [sources]),
+    V0 = csp_code:new({?MODULE, ui}, where, {Ast, F}, #{}, #{editor => true}),
+    V1 = csp_code:refresh(V0, #{"x" => 5, "y" => 0, "R1" => 0, "State" => 1}),
+    V = csp_code:fired(V1, [{"", F, 5}]),
+    L = csp_code:lights(V),
+    {ok, Toks, _} = candyspeak_scan:string("#define P x > 3\n#define Q y > 1\n"),
+    {ok, [{define, _, _, X3}, {define, _, _, Y1}]} = candyspeak_parse:parse(Toks),
+    Got = {L(5, {contact, X3}), L(5, {contact, Y1}), L(5, coil), L(5, row),
+           L(7, row), L(7, coil), L(3, coil)},
+    expect("lights: x > 3 holds, y > 1 not; rule 1 fired; #in S2 not in force",
+           Got =:= {true, false, fired, on, off, none, none}, Got),
+    %% The editor in the code view: what it saves is the panel's to do.
+    Keys = fun(Ks, Vx) -> lists:foldl(fun(K, Vi) -> csp_code:control(Vi, {key, K}) end,
+                                      Vx, Ks) end,
+    Acts = fun(Vx) -> element(1, csp_code:actions(Vx)) end,
+    Ve = Keys([$o] ++ "R1" ++ [enter] ++ "y > 7" ++ [enter, $s], csp_code:control(V, "ladder")),
+    expect("edit: a rung written and s: the file's text, for the panel to save",
+           [T || {edit_save, T, _} <- Acts(Ve)] =:=
+               [lists:flatten(["#variable x = 5\n#variable y = 0\n#digital R1 out 13\n"
+                               "#states S1 S2\nR1 = 1 ? x > 3 && y > 1\nR1 = y > 7\n#in S2\n"
+                               "R1 = 0 ? x > 1\n#end\n"])], Acts(Ve)),
+    Vp0 = csp_code:new({?MODULE, ui}, where, {Ast, F}, #{}, #{access => patch, editor => true}),
+    Vp = Keys([$-, $o] ++ "R1" ++ [enter] ++ "y > 7" ++ [enter, $s],
+              csp_code:control(csp_code:refresh(Vp0, #{}), "ladder")),
+    expect("patch: what was added and switched, as lines and rules to send",
+           [P || P = {patch, _, _} <- Acts(Vp)] =:= [{patch, ["R1 = y > 7"], [{true, 1}]}],
+           Acts(Vp)),
+    expect("a click on the canvas goes to the editor in edit mode",
+           maps:get(ln, maps:get(ed, csp_code:control(Ve, "xy=0,0"))) > 0, nomatch),
+    %% A module's body, written once and run per object: lit on an object's
+    %% tab over that object's values, not on main's.
+    Fm = "/tmp/csp_lights_obj.csp",
+    ok = file:write_file(Fm, "#module Cnt\n#variable N = 0\nN = N + 1 ? N < 3\n#end\n"
+                         "#variable G = 0\nG = 1 ? G < 9\n#Cnt c0\n#Cnt c1\n"),
+    {ok, Am} = candyspeak:parse(Fm, [sources]),
+    Vm = csp_code:refresh(csp_code:new({?MODULE, ui}, where, {Am, Fm}, #{}, #{editor => true}),
+                          #{"G" => 4, "c0.N" => 1, "c1.N" => 5, "State" => 1}),
+    {ok, Tm, _} = candyspeak_scan:string("#define P N < 3\n#define Q G < 9\n"),
+    {ok, [{define, _, _, N3}, {define, _, _, G9}]} = candyspeak_parse:parse(Tm),
+    Lm = fun(Tab) -> csp_code:lights(csp_code:control(Vm, "tab=" ++ integer_to_list(Tab))) end,
+    Gm = [{(Lm(T))(3, {contact, N3}), (Lm(T))(6, {contact, G9})} || T <- [0, 1, 2]],
+    expect("objects: main's rules lit on every tab, the module's body on an object's "
+           "tab over that object's values",
+           Gm =:= [{none, true}, {true, true}, {false, true}], Gm),
+    Vo1 = csp_code:control(csp_code:control(Vm, "ladder"), "tab=0"),
+    #{ehits := Ho} = Vo1,
+    [{Xo, Yo} | _] = [{X + 1, Y + 1} || {X, Y, _, _, 8, open} <- Ho],
+    Vo2 = csp_code:control(Vo1, lists:flatten(io_lib:format("xy=~w,~w", [Xo, Yo]))),
+    Lo = csp_code:lights(Vo2),
+    expect("an object's line opened by its arrow: its module's rungs under it, lit for it",
+           [H || H = {_, _, _, _, {in, "c1", 3}, _} <- maps:get(ehits, Vo2)] =/= [] andalso
+           {Lo({in, "c0", 3}, {contact, N3}), Lo({in, "c1", 3}, {contact, N3})} =:= {true, false},
+           maps:get(ehits, Vo2)).
+
 %% The code view's renderer, for csp_code:new/4 in a test: nothing drawn.
 new(ui, where, _Tabs, _Spec) -> #{event => code}.
 metrics(ui, _H) -> #{cw => 8, ch => 16}.
@@ -2516,3 +2588,5 @@ answer(ui, _H, _Cls, _Text, _Trace) -> ok.
 shown(ui, _H, _On) -> ok.
 rungs(ui, _H, _Mode, _I, _Tab, _Size) -> ok.
 draw(ui, _H, _Ops) -> ok.
+edit_status(ui, _H, _Text) -> ok.
+see(ui, _H, _Y0, _Y1) -> ok.

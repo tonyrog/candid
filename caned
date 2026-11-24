@@ -3,9 +3,13 @@
 # caned -wx FILE.csp  -- in a window of its own (src/caned_wx.erl)
 # caned [-wx] -patch FILE.csp -- patch mode: rules only added at the end, and
 #                                switched off and on
+# caned -keys     -- a window that shows each key as wx gives it, and the name
+#                    and command caned makes of it (src/caned_keys.erl)
 D=$(dirname "$(readlink -f "$0")")
+ERL=erl
 CANDYSPEAK=${CANDYSPEAK:-$HOME/work/candyspeak}
 M=caned_tty
 [ "$1" = "-wx" ] && { M=caned_wx; shift; }
-exec erl -noshell -pa "$D/ebin" -pa "$CANDYSPEAK/ebin" \
+[ "$1" = "-keys" ] && M=caned_wx
+exec $ERL -noshell -pa "$D/ebin" -pa "$CANDYSPEAK/ebin" \
     -eval "$M:main(init:get_plain_arguments())" -extra "$@"

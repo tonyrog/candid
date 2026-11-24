@@ -7,6 +7,9 @@
 %%%
 %%%   ← →        the contact before, after      ↑ ↓   the rung above, below
 %%%   ⇧← ⇧→      select from here on            Tab ⇧Tab  the next, the last rung
+%%%   PgUp PgDn  a page up, down (`page' rows)  Home End  the first, the last line
+%%%   Insert     a new rung after (as o)        (rung_start, rung_end: the first
+%%%                                              contact, the coil -- Emacs's C-a C-e)
 %%%
 %%% The coil is the last stop to the right (its path `coil'): ⏎ writes it --
 %%% the target of `X = <condition>', the assignments of the rest. A selection
@@ -42,6 +45,29 @@
 %%% declaration. The name is not written here: renaming follows its uses.
 %%% Writing a contact, `Name.' and Tab give Name's parts the same way.
 %%%
+%%% EMBEDDED (embedded => true, as candid's code view has it): s does not
+%%% write the file, it is {save, S} for the host to save as it saves; q is
+%%% the host's to do, not the editor's. key/2 then answers {ok, S} | {save, S}.
+%%%
+%%% OBJECTS. An object's line (`#Cnt c0') opens: under it its module's rungs
+%%% as that object runs them, indented, lit for it -- a line key {in, O,
+%%% Line} where the module's own line is Line, so lights/2 can tell whose
+%%% they are. Space on the line or a click on its ▸ opens and closes it; a
+%%% click on a rung shown under it goes to that rung in the module, to be
+%%% written there. Only the rules: the module's declarations stay where they
+%%% are.
+%%%
+%%% SCOPE. scope => all (the default) shows the whole file; {module, M}
+%%% only module M, from its #module (and a comment right above it) to its
+%%% #end -- an object's tab in candid. The cursor stays in it.
+%%%
+%%% LIGHTS. In candid the rungs are lit by what holds: an optional fun in the
+%%% state, lights => fun(Ln, What) -> Light, asked for every contact (What
+%%% {contact, Expr}: true | false | unknown), every coil (coil: fired | next | both |
+%%% none) and every rung (row: on | off, off when its #in/#when block is not in
+%%% force). csp_code makes it from what the program does; standalone there is
+%%% none and nothing is lit. The cursor and a selection outshine a light.
+%%%
 %%% Two ways to work (access): EDIT, on a file -- anything goes -- and PATCH,
 %%% as on a node that runs the program: rules are only added, at the end,
 %%% and switched off and on; what was there is not changed. A new rung or a
@@ -62,6 +88,7 @@
 -module(caned_ui).
 
 -export([new/2, new/3, open/1, open/2, key/2, screen/3, plain/3, sel_text/1]).
+-export([height/1, all/1, light/2, set_scope/2]).
 
 -define(HELP, "←→ contact  ↑↓ rung  ⏎ write  & series  | parallel  "
 	"! not  x out  o new  / comment  D out  - off/on  ⌥↑↓ move  u undo  s save  q quit").
@@ -87,6 +114,85 @@ new(D, File, Access) ->
     end.
 
 rungs(D) -> [N || N <- lists:seq(1, caned_doc:nlines(D)), caned_doc:rung(D, N) =/= none].
+
+%% The lines shown: {First, Last}.
+lines(S = #{doc := D}) ->
+    N = caned_doc:nlines(D),
+    case maps:get(scope, S, all) of
+        {module, M} ->
+            case module_span(D, M) of
+                none -> {1, N};
+                {F, L} -> {case caned_doc:comment_at(D, F - 1) of
+                               {C, _, _, _} -> C;
+                               none -> F
+                           end, L}
+            end;
+        all -> {1, N}
+    end.
+
+%% Module M's #module line to its #end.
+module_span(D, M) ->
+    case lists:dropwhile(fun(St) -> not is_module(St, M) end, caned_doc:stmts(D)) of
+        [St | Rest] -> {caned_doc:line_of(St), end_of(Rest, 0, caned_doc:nlines(D))};
+        [] -> none
+    end.
+
+end_of([E = {'end', _} | _], 0, _) -> caned_doc:line_of(E);
+end_of([St | Rest], Depth, N) ->
+    end_of(Rest, case element(1, St) of
+                     'end' -> Depth - 1;
+                     K when K =:= in; K =:= 'when' -> Depth + 1;
+                     _ -> Depth
+                 end, N);
+end_of([], _, N) -> N.
+
+%% What is shown set to Scope, the cursor put in it when it was not.
+set_scope(S, Scope) ->
+    S1 = S#{scope => Scope},
+    {F, L} = lines(S1),
+    case {maps:get(ln, S1), shown_stops(S1)} of
+        {_, []} -> S1;
+        {Ln, _} when Ln >= F, Ln =< L -> S1;
+        {_, [L1 | _]} -> S1#{ln := L1, cur := cur_for(maps:get(doc, S1), L1), sel := none}
+    end.
+
+%% The cursor moved by page_up | page_down (a page of rows, the state's
+%% `page', the stop nearest that far), doc_start | doc_end (the first, the
+%% last stop shown), rung_start | rung_end (the first contact, the coil; a
+%% card's first and last field).
+go(_K, S = #{ln := 0}) -> S;
+go(K, S = #{doc := D, ln := Ln}) when K =:= doc_start; K =:= doc_end ->
+    case shown_stops(S) of
+        [] -> S;
+        Ns -> L1 = case K of doc_start -> hd(Ns); doc_end -> lists:last(Ns) end,
+              case L1 of Ln -> S; _ -> S#{ln := L1, cur := cur_for(D, L1)} end
+    end;
+go(K, S = #{doc := D, ln := Ln, cur := C}) when K =:= rung_start; K =:= rung_end ->
+    case {C, K} of
+        {comment, _} -> S;
+        {{seg, _}, rung_start} -> S#{cur := {seg, 1}};
+        {{seg, _}, rung_end} -> S#{cur := {seg, max(1, length(fields(D, Ln)))}};
+        {_, rung_start} -> S#{cur := first_leaf(D, Ln)};
+        {_, rung_end} -> S#{cur := coil}
+    end;
+go(K, S = #{doc := D, ln := Ln}) ->
+    Dir = case K of page_up -> -1; page_down -> 1 end,
+    {_, Starts} = body(S),
+    Ns = shown_stops(S),
+    Row = maps:get(Ln, Starts, 1),
+    To = Row + Dir * maps:get(page, S, 20),
+    Near = lists:sort([{abs(maps:get(L, Starts, 1) - To), L} || L <- Ns]),
+    L1 = case Near of
+             [{_, Ln} | _] -> lists:nth(max(1, min(length(Ns), index_in(Ns, Ln) + Dir)), Ns);
+             [{_, L} | _] -> L;
+             [] -> Ln
+         end,
+    S#{ln := L1, cur := cur_for(D, L1)}.
+
+%% The stops in the lines shown.
+shown_stops(S = #{doc := D}) ->
+    {F, L} = lines(S),
+    [X || X <- stops(D), X >= F, X =< L].
 
 %% Where the cursor stops: the rungs, the comments by their first line, the
 %% declarations.
@@ -119,6 +225,7 @@ first_leaf(D, Ln) -> hd(caned_tree:leaves(tree(D, Ln))).
 %%% ------------------------------------------------------------------ keys
 
 %% {ok, S} | {quit, S}.
+key({msg, M}, S) -> {ok, S#{msg := M}};          % what the keys say: `C-x-'
 key(K, S = #{mode := {edit, Text}}) -> edit(K, Text, S);
 key(K, S = #{mode := {edit_coil, Text}}) -> edit_coil(K, Text, S);
 key(K, S = #{mode := {coil, Text, At}}) -> coil_key(K, Text, At, S);
@@ -133,6 +240,15 @@ key(K, S = #{access := patch}) ->
 key(K, S) -> key1(K, S).
 
 %% The rule's handle: the whole rule selected; switched off or on.
+key1(K, S) when K =:= page_up; K =:= page_down; K =:= doc_start; K =:= doc_end;
+                K =:= rung_start; K =:= rung_end ->
+    {ok, maps:without([anchor, free], go(K, S#{msg := "", sel := none}))};
+key1({click, Ln, open}, S) -> toggle_open(S, Ln);
+key1({click, Ln, check}, S) -> key1({dclick, Ln, handle}, S);
+%% A rung shown under an object: the module's own, where it is written.
+key1({click, {in, _, Ln}, P}, S) -> key1({click, Ln, P}, S);
+key1({dclick, {in, _, Ln}, P}, S) -> key1({dclick, Ln, P}, S);
+key1({select, {in, _, Ln}, Ps}, S) -> key1({select, Ln, Ps}, S);
 key1({click, Ln, handle}, S) -> key1({rule, Ln}, S);
 key1({rule, Ln}, S = #{doc := D}) ->
     {ok, maps:remove(free, S#{ln := Ln, cur := first_leaf(D, Ln), sel := {Ln, rule},
@@ -207,13 +323,14 @@ switch(S) -> {ok, S}.
 key2({click, Ln, P}, S) ->
     {ok, maps:remove(free, S#{ln := Ln, cur := P, sel := none, msg := ""})};
 key2({scroll, N}, S = #{top := Top}) -> {ok, S#{top := max(1, Top + N), free => true}};
-key2(page_up, S) -> key2({scroll, -10}, S);
-key2(page_down, S) -> key2({scroll, 10}, S);
 key2({dclick, Ln, P}, S) -> {ok, start_edit(S#{ln := Ln, cur := P, sel := none})};
-key2({select, Ln, Ps}, S = #{doc := D}) ->
-    R = sel_range(tree(D, Ln), Ps),
-    {ok, S#{ln := Ln, cur := hd(Ps), sel := {Ln, R},
-	    msg := "selected: " ++ copy(D, Ln, R)}};
+%% A rectangle over a card or a comment: what is in it is no range of
+%% contacts, so it is a click on the first.
+key2({select, Ln, Ps = [P | _]}, S = #{doc := D}) when is_integer(Ln) ->
+    case caned_doc:rung(D, Ln) of
+        none -> key1({click, Ln, P}, S);
+        _ -> select(Ln, [P0 || P0 <- Ps, is_list(P0) orelse P0 =:= coil], S)
+    end;
 key2(copy, S = #{doc := D, ln := Ln}) when Ln > 0 ->
     {_, R} = target(S),
     Text = copy(D, Ln, R),
@@ -285,6 +402,12 @@ no(D, Ln) ->
 	{_, N} -> integer_to_list(N);
 	false -> "?"
     end.
+
+select(Ln, [], S) -> {ok, S#{ln := Ln}};
+select(Ln, Ps, S = #{doc := D}) ->
+    R = sel_range(tree(D, Ln), Ps),
+    {ok, S#{ln := Ln, cur := hd(Ps), sel := {Ln, R},
+            msg := "selected: " ++ copy(D, Ln, R)}}.
 
 %% The range a set of contacts makes; with the coil among them, the rule.
 sel_range(T, Ps) ->
@@ -362,6 +485,8 @@ normal($u, S) -> {ok, S#{msg := "nothing to undo"}};
 normal(18, S = #{redo := [D1 | Rs], undo := Us, doc := D}) ->      % ^R
     {ok, fix_cur(S#{doc := D1, redo := Rs, undo := [D | Us]})};
 normal(18, S) -> {ok, S#{msg := "nothing to redo"}};
+normal(K, S = #{embedded := true}) when K =:= $q; K =:= $Q -> {ok, S};
+normal($s, S = #{embedded := true}) -> {save, S};
 normal($s, S = #{doc := D, file := F, ln := Ln}) ->
     case caned_doc:save(D, F) of
 	ok ->
@@ -386,7 +511,7 @@ step(Dir, S = #{doc := D, ln := Ln, cur := P}) ->
 
 %% The rung Dir lines away, on the contact as far in as the cursor was.
 line(Dir, S = #{doc := D, ln := Ln, cur := P}) ->
-    Rs = stops(D),
+    Rs = shown_stops(S),
     J = index_in(Rs, Ln) + Dir,
     case J >= 1 andalso J =< length(Rs) of
 	true ->
@@ -451,6 +576,7 @@ card_key(K, S = #{doc := D, ln := Ln, cur := {seg, I}}) when K =:= enter; K =:= 
         {name, _, _} -> {ok, S#{msg := "the name is renamed with its uses -- not yet"}};
         {Key, _, T} -> {ok, S#{mode := {field, Key, "", T, 0}, msg := ""}}
     end;
+card_key($\s, S = #{ln := Ln}) -> toggle_open(S, Ln);
 card_key($+, S = #{doc := D, ln := Ln}) ->
     case caned_menu:add(caned_doc:stmt(D, Ln), D) of
         [] -> {ok, S#{msg := "nothing more goes on this one"}};
@@ -561,6 +687,67 @@ after_keys(Fs, New, Keys) ->
                                (is_tuple(K) andalso lists:member(element(1, K), Keys)) end,
     {A, B} = lists:splitwith(In, Fs),
     {A ++ [New | B], length(A) + 1}.
+
+%% An object's line opened, or closed again; another line is left alone.
+toggle_open(S = #{doc := D}, Ln) ->
+    case caned_doc:stmt(D, Ln) of
+        {object, _, _, {'WORD', _, O}, _} ->
+            Open = maps:get(open, S, []),
+            {ok, S#{open => case lists:member(O, Open) of
+                                true -> Open -- [O];
+                                false -> [O | Open]
+                            end, msg := ""}};
+        _ -> {ok, S}
+    end.
+
+%% The lines of module M's rungs, in its body: between its #module and the
+%% #end that closes it, not one of a block inside.
+module_rungs(D, M) ->
+    Ss = caned_doc:stmts(D),
+    case lists:dropwhile(fun(St) -> not is_module(St, M) end, Ss) of
+        [_Start | Rest] -> body_rungs(D, Rest, 0, []);
+        [] -> []
+    end.
+
+is_module({module, _, {'WORD', _, M}}, M) -> true;
+is_module({module, _, {'WORD', _, M}, _}, M) -> true;
+is_module(_, _) -> false.
+
+body_rungs(_D, [{'end', _} | _], 0, Acc) -> Acc;
+body_rungs(D, [St | Rest], Depth, Acc) ->
+    Depth1 = case element(1, St) of
+                 'end' -> Depth - 1;
+                 K when K =:= in; K =:= 'when' -> Depth + 1;
+                 _ -> Depth
+             end,
+    Ln = caned_doc:line_of(St),
+    Acc1 = case caned_doc:rung(D, Ln) of
+               none -> Acc;
+               _ -> Acc ++ [Ln]
+           end,
+    body_rungs(D, Rest, Depth1, Acc1);
+body_rungs(_D, [], _, Acc) -> Acc.
+
+%% Under an open object's line: its module's rungs, keyed {in, O, Line}.
+inline_rows(S = #{doc := D}, L, Widths, Nos, Cs) ->
+    case caned_doc:stmt(D, L) of
+        {object, _, {'WORD', _, M}, {'WORD', _, O}, _} ->
+            case lists:member(O, maps:get(open, S, [])) of
+                true ->
+                    S1 = S#{ln := 0, sel := none},
+                    lists:append(
+                      [[[{{shade, inline, none}, ""}, {lineno, "     "}, {text, "    "} |
+                         [re_key(Run, O) || Run <- tl(R)]]
+                        || R <- line_rows(S1, X, maps:get(X, Widths, {0, 0}), Nos, Cs)]
+                       || X <- module_rungs(D, M)]);
+                false -> []
+            end;
+        _ -> []
+    end.
+
+re_key({{A, {X, P}}, T}, O) when is_integer(X), P =/= handle -> {{A, {{in, O, X}, P}}, T};
+re_key({{A, {_X, handle}}, T}, _O) -> {A, T};
+re_key(Run, _O) -> Run.
 
 %%% -------------------------------------------------------------- comments
 
@@ -743,15 +930,63 @@ parts_at(Text, #{doc := D}) ->
 
 %%% ---------------------------------------------------------------- screen
 
+%% How many rows the whole document takes on a screen.
+height(S) ->
+    {Body, _} = body(S),
+    length(Body).
+
 %% Rows by Cols: the file from the top line, the status line last. The view
 %% scrolls to keep the cursor's rung in it.
 screen(S0, Rows, Cols) ->
-    S = scroll(S0, Rows - 1),
+    S = scroll(S0#{page => Rows - 2}, Rows - 1),
     {Body, _} = body(S),
     #{top := Top} = S,
-    View = lists:sublist(lists:nthtail(min(Top - 1, length(Body)), Body), Rows - 1),
+    View = light(lists:sublist(lists:nthtail(min(Top - 1, length(Body)), Body), Rows - 1), S),
     Pad = lists:duplicate(Rows - 1 - length(View), [{blank, ""}]),
     {S, [clip(R, Cols) || R <- View ++ Pad] ++ [clip(status(S), Cols)]}.
+
+%% The whole document's rows, unlit, the status line last: for a host that
+%% scrolls them itself (candid's canvas) and lights them as often as what
+%% holds changes (light/2) -- the layout only when the editor's state does.
+all(S) ->
+    {Body, _} = body(S),
+    Body ++ [status(S)].
+
+%% Rows lit by the state's `lights' (see LIGHTS above); as they are without.
+light(Rows, #{lights := Lt} = S) ->
+    {Lit, _} = lists:mapfoldl(fun(R, M) -> light_row(R, M, Lt, S) end, #{}, Rows),
+    Lit;
+light(Rows, _S) -> Rows.
+
+%% M memoises a line's tree and whether its rung's block is in force.
+light_row(Runs, M0, Lt, S) ->
+    lists:mapfoldl(
+      fun({{A, {L, P}}, T}, M) when A =:= contact; A =:= coil ->
+              {{Tr, Dark}, M1} = line_info(L, M, Lt, S),
+              Light = case P of
+                          coil -> Lt(L, coil);
+                          _ -> Lt(L, {contact, caned_tree:expr(caned_tree:get(Tr, P))})
+                      end,
+              A1 = lit(A, Light),
+              {{{case Dark of true -> dim(A1); false -> A1 end, {L, P}}, T}, M1};
+         ({{A, {L, P}}, T}, M) when (is_integer(L) orelse element(1, L) =:= in),
+                                    A =/= lineno, A =/= lineno_off ->
+              {{_, Dark}, M1} = line_info(L, M, Lt, S),
+              {{{case Dark of true -> dim(A); false -> A end, {L, P}}, T}, M1};
+         (Run, M) -> {Run, M}
+      end, M0, Runs).
+
+line_info(L, M, Lt, S) ->
+    case maps:find(L, M) of
+        {ok, I} -> {I, M};
+        error ->
+            Real = case L of {in, _, X} -> X; _ -> L end,
+            I = {case caned_doc:rung(maps:get(doc, S), Real) of
+                     none -> none;
+                     _ -> shown(S, Real)
+                 end, Lt(L, row) =:= off},
+            {I, M#{L => I}}
+    end.
 
 %% The screen as plain text: what a test compares.
 plain(S, Rows, Cols) ->
@@ -761,26 +996,76 @@ plain(S, Rows, Cols) ->
 %% Every line's rows, and the row each line starts on.
 body(S = #{doc := D}) ->
     N = caned_doc:nlines(D),
-    Rungs = rungs(D),
-    Width = lists:max([0 | [W || L <- Rungs,
-				 {W, _, _, _} <- [caned_grid:el(shown(S, L), none)]]]),
-    CoilW = lists:max([0 | [length(caned_doc:coil_text(D, L)) || L <- Rungs]]),
+    {L0, L1} = lines(S),
+    Widths = widths(S, rungs(D)),
     Nos = maps:from_list(caned_doc:numbers(D)),
     Cs = maps:from_list([{X, {F, L}} || {F, L, _, _} <- caned_doc:comments(D),
 					X <- lists:seq(F, L)]),
-    {Rows, Starts} =
+    {RevRows, Starts, Count} =
 	lists:foldl(
-	  fun(L, {Acc, St}) ->
+	  fun(L, {Acc, St, K}) ->
 		  Rs = case note_rows(S, L) of
-			   none -> line_rows(S, L, {Width, CoilW}, Nos, Cs);
+			   none -> line_rows(S, L, maps:get(L, Widths, {0, 0}), Nos, Cs);
 			   Ns -> Ns
 		       end,
-		  {Acc ++ Rs, St#{L => length(Acc) + 1}}
-	  end, {[], #{}}, lists:seq(1, N)),
-    case note_rows(S, N + 1) of
+		  B = shade(S, L, Cs),
+		  In = inline_rows(S, L, Widths, Nos, Cs),
+		  {lists:reverse(In, lists:reverse([[B | R] || R <- Rs], Acc)), St#{L => K + 1},
+		   K + length(Rs) + length(In)}
+	  end, {[], #{}, 0}, lists:seq(L0, L1)),
+    Rows = lists:reverse(RevRows),
+    case L1 =:= N andalso note_rows(S, N + 1) of
+	false -> {Rows, Starts};
 	none -> {Rows, Starts};
-	More -> {Rows ++ More, Starts#{N + 1 => length(Rows) + 1}}
+	More -> {Rows ++ [[shade(S, N + 1, Cs) | R] || R <- More],
+		 Starts#{N + 1 => Count + 1}}
     end.
+
+%% The coils lined up and the right rail with them, a GROUP at a time: rungs
+%% on lines that follow each other. A block's head, a comment or a
+%% declaration between them starts another, so one wide rung does not push
+%% every coil in the file out of sight. #{Line => {Width, CoilW}}.
+widths(S = #{doc := D}, Rungs) ->
+    Groups = lists:foldr(fun(L, [[L1 | G] | Gs]) when L1 =:= L + 1 -> [[L, L1 | G] | Gs];
+                            (L, Gs) -> [[L] | Gs]
+                         end, [], Rungs),
+    maps:from_list(
+      lists:append(
+        [begin
+             W = lists:max([0 | [X || L <- G, {X, _, _, _} <- [caned_grid:el(shown(S, L), none)]]]),
+             C = lists:max([0 | [length(caned_doc:coil_text(D, L)) || L <- G]]),
+             [{L, {W, C}} || L <- G]
+         end || G <- Groups])).
+
+%% The shade a line's rows lie on: what kind of line it is -- rung, card
+%% (a declaration), comment, text -- and whether the cursor's node is it,
+%% focused (the keys go here) or idle (they go elsewhere). Drawn as a shade
+%% behind the line and a frame round the cursor's node; nothing in a
+%% terminal.
+shade(S = #{doc := D, ln := Cur}, L, Cs) ->
+    Being = case maps:get(mode, S) of
+		{note, _, _, {at, F0}} -> F0;
+		{note, _, _, {new, At}} -> At;
+		_ -> none
+	    end,
+    {Kind, Node} = case maps:find(L, Cs) of
+		       {ok, {F, _}} -> {comment, F};
+		       error when L =:= Being -> {comment, L};
+		       error ->
+			   case {caned_doc:rung(D, L), caned_doc:stmt(D, L)} of
+			       {none, none} -> {text, none};
+			       {none, _} -> {card, L};
+			       _ -> {rung, L}
+			   end
+		   end,
+    Focus = case Node =:= Cur orelse (Being =/= none andalso Node =:= Being) of
+		true when Cur > 0 -> case maps:get(focused, S, true) of
+					 true -> cur;
+					 false -> idle
+				     end;
+		_ -> none
+	    end,
+    {{shade, Kind, Focus}, ""}.
 
 %% A comment being written, as it will be saved, the caret in it: in place
 %% of the comment's lines, or above line At for a new one. none elsewhere.
@@ -830,12 +1115,10 @@ indent(L) -> lists:takewhile(fun(C) -> C =:= $\s orelse C =:= $\t end, L).
 
 %% One line's rows by itself (under a new comment being written).
 line_rows(S = #{doc := D}, L) ->
-    Rungs = rungs(D),
-    Width = lists:max([0 | [W || R <- Rungs, {W, _, _, _} <- [caned_grid:el(shown(S, R), none)]]]),
-    CoilW = lists:max([0 | [length(caned_doc:coil_text(D, R)) || R <- Rungs]]),
     Cs = maps:from_list([{X, {F, La}} || {F, La, _, _} <- caned_doc:comments(D),
 					 X <- lists:seq(F, La)]),
-    line_rows(S, L, {Width, CoilW}, maps:from_list(caned_doc:numbers(D)), Cs).
+    line_rows(S, L, maps:get(L, widths(S, rungs(D)), {0, 0}),
+	      maps:from_list(caned_doc:numbers(D)), Cs).
 
 %% Left of a line its rule's number, a mark after it: ✕ off, + added (in
 %% patch mode).
@@ -876,6 +1159,8 @@ line_rows(S = #{doc := D, ln := Cur}, L, {Width, CoilW}, Nos, Cs) ->
 	    E = caned_grid:rung(shown(S, L), caned_doc:coil_text(D, L), P, Sel, Width, CoilW),
 	    %% A contact's cells say which rung they are on as well, for a click;
 	    %% an off rule's are dim.
+	    %% Lit afterwards (light/2): the layout does not change when only
+	    %% what holds does.
 	    Dim = fun(A) when Off -> dim(A); (A) -> A end,
 	    Ln = fun({A, Pa}) when is_list(Pa) -> {Dim(A), {L, Pa}};
 		    ({A, coil}) -> {Dim(A), {L, coil}};
@@ -912,7 +1197,16 @@ card_row(S = #{doc := D, ln := Cur, mode := Mode}, L, St) ->
                         _ -> {{field, {L, {seg, I}}}, T}
                     end
             end,
-    [{text, Indent}, {kw, Kw}] ++
+    Opener = case St of
+                 {object, _, _, {'WORD', _, O}, _} ->
+                     [{{opener, {L, open}},
+                       case lists:member(O, maps:get(open, S, [])) of
+                           true -> "▾ ";
+                           false -> "▸ "
+                       end}];
+                 _ -> []
+             end,
+    [{text, Indent} | Opener] ++ [{kw, Kw}] ++
         lists:append([[{text, Sep} || Sep =/= ""] ++ [Field(I, Key, T)]
                       || {I, {Key, Sep, T}} <- lists:enumerate(Fs)]) ++
         case {Edit, CI} of
@@ -925,7 +1219,20 @@ card_row(S = #{doc := D, ln := Cur, mode := Mode}, L, St) ->
             C -> [{comment, "  " ++ C}]
         end.
 
+%% A contact or coil as it is lit; the cursor's and a selection keep their
+%% own look.
+lit(contact, true) -> contact_t;
+lit(contact, unknown) -> contact_u;
+lit(coil, fired) -> coil_on;
+lit(coil, both) -> coil_on;
+lit(coil, next) -> coil_nx;
+lit(A, _) -> A.
+
 dim(contact) -> off;
+dim(contact_t) -> off;
+dim(contact_u) -> off;
+dim(coil_on) -> coil_off;
+dim(coil_nx) -> coil_off;
 dim(coil) -> coil_off;
 dim(A) -> A.
 
@@ -945,7 +1252,7 @@ scroll(S = #{free := true, top := Top}, H) ->
 scroll(S = #{ln := 0}, _H) -> S;
 scroll(S = #{ln := Ln, top := Top}, H) ->
     {Body, Starts} = body(S),
-    First = maps:get(Ln, Starts),
+    First = maps:get(Ln, Starts, 1),
     Last = case maps:find(Ln + 1, Starts) of
 	       {ok, Nx} -> Nx - 1;
 	       error -> length(Body)
@@ -982,6 +1289,9 @@ status(S = #{mode := {edit, Text}, msg := M}) when M =:= "" ->
 status(#{mode := {edit, Text}, msg := M}) ->
     [{status, " write: "}, {edit, Text ++ "▏"}] ++
 	[{error, "   " ++ M} || M =/= ""];
+%% Embedded (candid): no name and no help -- the host has its file menu --
+%% only what is said, when something is.
+status(#{embedded := true, msg := M}) -> [{msg, M} || M =/= ""];
 status(#{file := F, doc := D, msg := M, access := A}) ->
     Dirty = case caned_doc:dirty(D) of true -> " *"; false -> "" end,
     [{status, " " ++ filename:basename(F) ++ Dirty ++ " [" ++ atom_to_list(A) ++ "]  "}] ++

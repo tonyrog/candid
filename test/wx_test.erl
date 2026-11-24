@@ -11,7 +11,7 @@
 run() ->
     _ = application:load(candid),
     application:set_env(candid, chat, off),
-    P = candid_wx:start("demo/knappar.csp"),
+    P = candid_wx:start(["demo/knappar.csp"]),
     timer:sleep(3000),
     Ids = ids(P),
     Has = fun(Id) -> ets:lookup(Ids, Id) =/= [] end,
@@ -20,13 +20,9 @@ run() ->
     expect("the window is up and lists its devices",
 	   is_process_alive(P) andalso Has("sl_B1") andalso Has("csp_st"),
 	   ets:tab2list(Ids)),
-    P ! {candid_wx, {bar, "code=ladder"}},
     P ! {candid_wx, {bar, "trace=show"}},
     timer:sleep(?SETTLE),
-    Ops = fun() -> case ets:lookup(Ids, code_ops) of
-		       [{_, O, _}] -> O;
-		       [] -> []
-		   end end,
+    Ops = fun() -> csp_code_wx:ops(Ids) end,
     expect("ladder: the rungs drawn, a contact among them",
 	   [T || T = {text, _, _, "B1", _, _} <- Ops()] =/= [], length(Ops())),
     %% A click where B1 is drawn: no frame round it -- the solver is where
@@ -56,6 +52,20 @@ run() ->
     expect("zoom: a view at its left edge stays there",
 	   Zx =:= 0 andalso Cw > Rw, {Zx, Cw, Rw}),
     csp_code_wx:zoom_at(#{ids => Ids}, Canvas, Right, 1.0, {20, 20}),
+    %% Wheel turns quicker than a view is drawn: added up and scrolled
+    %% together, all of them.
+    wxWindow:setSize(Frame, {Fw, Fh - 300}),        % lower than the rungs
+    timer:sleep(?SETTLE),
+    wxScrolledWindow:scroll(Right, 0, 0),
+    Hw = #{ids => Ids, env => wx:get_env()},
+    [csp_code_wx:wheel(Hw, Canvas, Right, 10) || _ <- lists:seq(1, 6)],
+    timer:sleep(?SETTLE),
+    {_, Wy} = wxScrolledWindow:getViewStart(Right),
+    {_, Wu} = wxScrolledWindow:getScrollPixelsPerUnit(Right),
+    expect("wheel: six turns of 10 px scroll 60 px",
+           Wy * Wu =:= 60 andalso not ets:member(Ids, code_wheeling),
+           {Wy, Wu, wxWindow:getSize(Canvas), wxWindow:getClientSize(Right)}),
+    wxScrolledWindow:scroll(Right, 0, 0),
     wxWindow:setSize(Frame, {Fw, Fh}),
     P ! {candid_wx, {widget, "B1"}},
     P ! {candid_wx, {widget, "B2=1"}},
@@ -82,9 +92,8 @@ run() ->
     timer:sleep(?SETTLE),
     expect("walking and replaying the trace", is_process_alive(P), nomatch),
     P ! {candid_wx, {bar, "theme=light"}},
-    P ! {candid_wx, {bar, "code=code"}},
     timer:sleep(?SETTLE),
-    expect("the code as text, in the light theme",
+    expect("the ladder again, in the light theme",
 	   [T || T = {text, _, _, "B1", _, _} <- Ops()] =/= [] andalso
 	       is_process_alive(P), nomatch),
     Solver ! {csp_solve_wx, pick, 2},
@@ -120,6 +129,19 @@ run() ->
     timer:sleep(?SETTLE),
     expect("the theme changed after the code view was redrawn",
 	   is_process_alive(P), nomatch),
+    %% The editor (caned) on the code view's canvas, its rungs lit by what
+    %% the program does: B1 set, its contact green.
+    P ! {candid_wx, {bar, "theme=dark"}},
+    timer:sleep(?SETTLE),
+    expect("edit: the editor drawn on the canvas, the file's lines in it",
+	   [T || T = {text, _, _, "#digital", _, _} <- Ops()] =/= [], nomatch),
+    P ! {candid_wx, {widget, "B1=1"}},
+    P ! {candid_wx, {code, {key, down}}},
+    timer:sleep(?SETTLE),
+    expect("edit: a contact that holds is lit",
+	   [R || R = {rect, _, _, _, _, _, _, {51, 255, 51}, _} <- Ops()] =/= [], nomatch),
+    P ! {candid_wx, {widget, "B1=0"}},
+    timer:sleep(?SETTLE),
     %% Save as redraws the file tabs. The old ones' entries must go with
     %% them: New walks every window the id table knows, and a gone one is a
     %% segfault (solver open, save as, new did it).

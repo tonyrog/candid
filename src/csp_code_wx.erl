@@ -11,8 +11,9 @@
 
 -include_lib("wx/include/wx.hrl").
 
--export([zoom_at/5]).   % the tests
+-export([zoom_at/5, wheel/4, ops/1, ops/3, paint_ops/3]).   % the tests, the bench
 -export([new/4, metrics/2, shown/3, rungs/6, draw/3, paint/4, answer/5]).
+-export([edit_status/3, see/4]).
 
 -define(BG, {18, 18, 18}).
 -define(ZOOMS, [2.0, 1.0, 0.75, 0.5, 0.25]).   % the zoom menu's
@@ -20,7 +21,9 @@
 %% The view, hidden, with its tab buttons; what was clicked in the top
 %% frame's status row, a trace from the solver and the program's own values
 %% below. See csp_code_wse:new/4 for what is sent on its events.
-new(H, Where, Tabs, #{colours := Colours}) ->
+new(H, Where, Tabs, Opts) -> wx:batch(fun() -> new1(H, Where, Tabs, Opts) end).
+
+new1(H, Where, Tabs, #{colours := Colours}) ->
     #{code := Right, head := TabsP, status := {Top, _}, top := {Top, TopS}} = Where,
     Box = wxPanel:new(Right),
     BoxS = wxBoxSizer:new(?wxVERTICAL),
@@ -29,7 +32,13 @@ new(H, Where, Tabs, #{colours := Colours}) ->
     %% rungs are scrolled (candid_wx's code head).
     candid_wx:forget(H, code_head),           % their entries before them
     wxWindow:destroyChildren(TabsP),
-    Bar = wxWindow:getSizer(TabsP),
+    %% Two rows: the zoom and the editor's status line; under them the tabs,
+    %% only when the program has objects to have tabs for.
+    Col = wxBoxSizer:new(?wxVERTICAL),
+    wxWindow:setSizer(TabsP, Col),
+    Bar1 = wxBoxSizer:new(?wxHORIZONTAL),
+    Bar = wxBoxSizer:new(?wxHORIZONTAL),
+    wxSizer:add(Col, Bar1, []),
     Pid = self(),
     Btns = case Tabs of
 	       [_] -> [];
@@ -52,24 +61,14 @@ new(H, Where, Tabs, #{colours := Colours}) ->
     wxSizer:add(BoxS, Body, []),
     Canvas = canvas(H, Box, Right),
     candid_wx:register(H, code_canvas, {Canvas, Right}, perm),
-    %% The zoom, after the tabs: a menu, and ctrl + wheel, ctrl + up/down at
-    %% the mouse, ctrl + 0 for 100 %, stepping through the same values.
-    ZoomB = candid_wx:in_scope(
-	      H, code_head,
-	      fun() ->
-		      candid_wx:menu_btn(H, TabsP, [zoom_label(Z) || Z <- ?ZOOMS],
-					 index_of(1.0, ?ZOOMS),
-					 fun(I) ->
-						 zoom_at(H, Canvas, Right,
-							 lists:nth(I, ?ZOOMS),
-							 mouse(Canvas, Right))
-					 end)
-	      end),
-    wxWindow:setToolTip(ZoomB, "zoom; ctrl + wheel or ctrl + up/down at the "
-			"mouse, ctrl + 0 back to 100 %"),
-    candid_wx:register(H, code_zoom_btn, ZoomB, perm),
-    wxSizer:add(Bar, ZoomB, [{flag, ?wxLEFT bor ?wxALIGN_CENTER_VERTICAL},
-			     {border, 12}]),
+    %% The zoom is the canvas's right-click menu (zoom_menu), and ctrl +
+    %% wheel, ctrl + up/down at the mouse, ctrl + 0 for 100 %.
+    %% The editor's status line: here, over the canvas, where it stays in
+    %% sight however far the rungs are scrolled.
+    EdS = candid_wx:in_scope(H, code_head,
+			     fun() -> candid_wx:text(H, TabsP, "", {200, 200, 200}) end),
+    wxSizer:add(Bar1, EdS, [{flag, ?wxALIGN_CENTER_VERTICAL}]),
+    Btns =:= [] orelse wxSizer:add(Col, Bar, [{flag, ?wxTOP}, {border, 4}]),
     wxSizer:add(BoxS, Canvas, []),
     wxSizer:add(wxWindow:getSizer(Right), Box, [{proportion, 1}, {flag, ?wxEXPAND}]),
     wxWindow:hide(Box),
@@ -87,6 +86,7 @@ new(H, Where, Tabs, #{colours := Colours}) ->
     vals(H, Top, TopS, "m_", none, MainVars, perm),
     wxWindow:layout(Top),
     #{box => Box, tabs_panel => TabsP, body => Body, canvas => Canvas, right => Right, top => Top,
+      ed_status => EdS,
       tab_buttons => Btns, event => code, res => ResT, extra => Extra, colours => Colours}.
 
 enum(L) -> lists:zip(lists:seq(0, length(L) - 1), L).
@@ -198,7 +198,7 @@ rungs1(H, #{body := Body, canvas := C, box := Box, right := Right,
     candid_wx:forget(H, rung),
     wxWindow:destroyChildren(Body),
     head(H, Body, wxWindow:getSizer(Body), Tab),
-    candid_wx:register(H, code_ops, [], perm),
+    store(H, []),
     candid_wx:register(H, code_size, Size, perm),
     size(H, C),
     wxWindow:layout(Body),
@@ -234,26 +234,99 @@ canvas(H, Parent, Right) ->
     C = wxPanel:new(Parent, [{style, ?wxFULL_REPAINT_ON_RESIZE bor ?wxWANTS_CHARS}]),
     wxWindow:setFont(C, candid_wx:font(H)),
     wxWindow:setBackgroundStyle(C, ?wxBG_STYLE_PAINT),
+    {_, Line, _, _} = wxWindow:getTextExtent(C, "M"),
     Pid = self(),
+    %% Only what is to be drawn again: a long program's canvas is many
+    %% screens tall, and a buffer of all of it, drawn whole, was seconds a
+    %% paint. GTK double-buffers the window itself. The ops are kept by
+    %% the bands they cross (see draw/3); a paint takes those it shows.
+    candid_wx:register(H, code_index, ets:new(code_index, [ordered_set, public]), perm),
     wxPanel:connect(C, paint, [{callback,
 				fun(_E, _O) ->
-					DC = wxBufferedPaintDC:new(C),
-					paint_ops(H, DC, ops(H)),
-					wxBufferedPaintDC:destroy(DC)
+					DC = wxPaintDC:new(C),
+					Box = wxRegion:getBox(wxWindow:getUpdateRegion(C)),
+					wx:batch(fun() -> paint_ops(H, DC, Box) end),
+					wxPaintDC:destroy(DC)
 				end}]),
+    Ids = maps:get(ids, H),
     wxPanel:connect(C, left_down, [{callback,
 				    fun(#wx{event = #wxMouse{x = X, y = Y}}, O) ->
 					    Z = zoom(H),
 					    wxWindow:setFocus(C),
+					    ets:insert(Ids, {code_press, {X, Y}, perm}),
 					    Pid ! {candid_wx, {code, xy(trunc(X / Z),
 									trunc(Y / Z))}},
 					    wxEvent:skip(O)
 				    end}]),
+    %% For the editor (csp_code's edit): a double click, a drag -- the rest
+    %% of the view takes no notice of either -- and a key.
+    wxPanel:connect(C, left_dclick, [{callback,
+				      fun(#wx{event = #wxMouse{x = X, y = Y}}, O) ->
+					      Z = zoom(H),
+					      Pid ! {candid_wx, {code, "d" ++ xy(trunc(X / Z),
+										trunc(Y / Z))}},
+					      wxEvent:skip(O)
+				      end}]),
+    wxPanel:connect(C, left_up, [{callback,
+				  fun(#wx{event = #wxMouse{x = X, y = Y}}, O) ->
+					  Z = zoom(H),
+					  case ets:lookup(Ids, code_press) of
+					      [{_, {X0, Y0}, _}] when abs(X - X0) > 4;
+								      abs(Y - Y0) > 4 ->
+						  Pid ! {candid_wx,
+							 {code, lists:flatten(
+								  io_lib:format("sel=~w,~w,~w,~w",
+										[trunc(V / Z) || V <- [X0, Y0, X, Y]]))}};
+					      _ -> ok
+					  end,
+					  ets:delete(Ids, code_press),
+					  wxEvent:skip(O)
+				  end}]),
+    [wxPanel:connect(C, Ev, [{callback,
+                              fun(_E, O) ->
+                                      Pid ! {candid_wx, {code, case Ev of
+                                                                   set_focus -> "focus=on";
+                                                                   kill_focus -> "focus=off"
+                                                               end}},
+                                      wxEvent:skip(O)
+                              end}]) || Ev <- [set_focus, kill_focus]],
+    %% The keys by the table (caned_keys), the settings' {keys, ...} over
+    %% the defaults; a sequence's first keys wait in the id table
+    %% (code_pending). Before a page up or down, how many rows a page is.
+    Keys = caned_keys:settings(),
+    Key = fun(Cmd) ->
+		  (Cmd =:= page_up orelse Cmd =:= page_down) andalso page(H, Right, Line, Pid),
+		  Pid ! {candid_wx, {code, {key, Cmd}}}
+	  end,
+    wxPanel:connect(C, char, [{callback,
+			       fun(#wx{event = K = #wxKey{}}, O) ->
+				       P = case ets:lookup(Ids, code_pending) of
+					       [{_, P0, _}] -> P0;
+					       [] -> []
+					   end,
+				       ets:delete(Ids, code_pending),
+				       case caned_keys:feed(caned_keys:name(K), P, Keys) of
+					   {command, none} when P =:= [] -> wxEvent:skip(O);
+					   {command, none} -> Key({msg, ""});
+					   {command, Cmd} -> Key(Cmd);
+					   {prefix, P1} ->
+					       ets:insert(Ids, {code_pending, P1, perm}),
+					       Key({msg, lists:flatten(lists:join(" ", P1)) ++ "-"});
+					   {undefined, Seq} -> Key({msg, Seq ++ " is undefined"})
+				       end
+			       end}]),
+    wxPanel:connect(C, right_down, [{callback,
+                                     fun(#wx{event = #wxMouse{x = X, y = Y}}, _O) ->
+                                             zoom_menu(H, C, Right, {X, Y})
+                                     end}]),
     wxPanel:connect(C, mousewheel,
 		    [{callback,
 		      fun(#wx{event = #wxMouse{controlDown = true, x = X, y = Y,
 					       wheelRotation = R}}, _O) when R =/= 0 ->
 			      zoom_at(H, C, Right, step(zoom(H), R), {X, Y});
+			 (#wx{event = #wxMouse{shiftDown = false, wheelRotation = R,
+					       wheelDelta = D, linesPerAction = L}}, _O) ->
+			      wheel(H, C, Right, -R * max(1, L) * Line div max(1, D));
 			 (_E, O) -> wxEvent:skip(O)
 		      end}]),
     wxPanel:connect(C, key_down,
@@ -269,6 +342,66 @@ canvas(H, Parent, Right) ->
 			 (_E, O) -> wxEvent:skip(O)
 		      end}]),
     C.
+
+%% A page: the rows of the editor (6 px over the font's) the view shows.
+page(H, Right, Line, Pid) ->
+    {_, Rh} = wxWindow:getClientSize(Right),
+    Pid ! {candid_wx, {code, "page=" ++ integer_to_list(
+                                         max(1, trunc(Rh / zoom(H) / (Line + 6)) - 2))}}.
+
+%% The wheel, Px pixels down (the rows of a notch). wx scrolled 15 px a
+%% notch and drew the view for each, and a turned wheel ran ahead of the
+%% drawing. Here the turns add up while a scroll is drawn and are scrolled
+%% together: one process scrolls, and draws, while there is any to do.
+wheel(H, C, Right, Px) ->
+    Ids = maps:get(ids, H),
+    Z = zoom(H),
+    ets:update_counter(Ids, code_wheel, {2, round(Px * Z)}, {code_wheel, 0, perm}),
+    ets:insert_new(Ids, {code_wheeling, true, perm}) andalso
+        begin
+            Env = maps:get(env, H),
+            spawn(fun() -> wx:set_env(Env), wheeling(Ids, C, Right) end)
+        end,
+    ok.
+
+wheeling(Ids, C, Right) ->
+    case ets:take(Ids, code_wheel) of
+        [{_, Px, _}] ->
+            {_, Uy} = wxScrolledWindow:getScrollPixelsPerUnit(Right),
+            {_, Vy} = wxScrolledWindow:getViewStart(Right),
+            Uy > 0 andalso
+                wxScrolledWindow:scroll(Right, -1, max(0, Vy + Px div Uy)),
+            wxWindow:update(C),
+            wheeling(Ids, C, Right);
+        [] ->
+            ets:delete(Ids, code_wheeling),
+            %% a turn between the take and the delete found it busy
+            ets:member(Ids, code_wheel) andalso
+                ets:insert_new(Ids, {code_wheeling, true, perm}) andalso
+                wheeling(Ids, C, Right),
+            ok
+    end.
+
+%% The zoom, a menu where the canvas is right-clicked, the point there kept
+%% where it is. Opened by a process of its own, not in the callback:
+%% popupMenu is modal (see candid_wx:menu_btn).
+zoom_menu(H, C, Right, At) ->
+    Env = maps:get(env, H),
+    Z = zoom(H),
+    spawn(fun() ->
+                  wx:set_env(Env),
+                  M = wxMenu:new(),
+                  [wxMenu:appendRadioItem(M, I, zoom_label(Zi))
+                   || {I, Zi} <- lists:zip(lists:seq(1, length(?ZOOMS)), ?ZOOMS)],
+                  wxMenu:check(M, index_of(Z, ?ZOOMS) + 1, true),
+                  wxMenu:connect(M, command_menu_selected,
+                                 [{callback, fun(#wx{id = I}, _) ->
+                                                     zoom_at(H, C, Right, lists:nth(I, ?ZOOMS), At)
+                                             end}]),
+                  wxWindow:popupMenu(C, M),
+                  wxMenu:destroy(M)
+          end),
+    ok.
 
 zoom(H) ->
     case candid_wx:lookup(H, code_zoom) of
@@ -333,10 +466,6 @@ zoom_at(H, C, Right, Z1, {Mx, My}) ->
     {Ax, Ay} = {Ox + Vx * Ux, Oy + Vy * Uy},
     {Px, Py} = {Mx / Z0, My / Z0},
     candid_wx:register(H, code_zoom, Z1, perm),
-    case candid_wx:lookup(H, code_zoom_btn) of
-	{ok, B} -> candid_wx:btn_label(H, B, zoom_label(Z1) ++ " \x{25BE}");
-	error   -> ok
-    end,
     wxWindow:freeze(Right),
     try
 	size(H, C),
@@ -356,10 +485,45 @@ zoom_at(H, C, Right, Z1, {Mx, My}) ->
 
 xy(X, Y) -> "xy=" ++ integer_to_list(X) ++ "," ++ integer_to_list(Y).
 
-ops(H) ->
-    case candid_wx:lookup(H, code_ops) of
-	{ok, Ops} -> Ops;
-	error     -> []
+%% The ops by band: {{Band, Seq}, Op} for each band of ?BAND rows of the
+%% picture an op crosses -- most cross one, a branch or a box a few -- Seq
+%% its place in the picture's list, which is the order they are drawn in.
+-define(BAND, 256).
+
+index(H) ->
+    {ok, T} = candid_wx:lookup(H, code_index),
+    T.
+
+store(H, Ops) ->
+    T = index(H),
+    ets:delete_all_objects(T),
+    ets:insert(T, [{{B, I}, Op} || {I, Op} <- lists:enumerate(Ops),
+                                   {Y0, Y1} <- [span(Op)],
+                                   B <- lists:seq(stripe(Y0), stripe(Y1))]).
+
+span({rect, _, Y, _, Ht, _, _, _, _}) -> {Y, Y + Ht};
+span({line, _, Ya, _, Yb, _, _, _}) -> {min(Ya, Yb), max(Ya, Yb)};
+span({text, _, Y, _, _, _}) -> {Y, Y + 40}.
+
+stripe(Y) -> floor(Y / ?BAND).
+
+%% The ops crossing rows Y0..Y1, in their order, each once.
+%% One walk from the first band's start to the last band's end; an op in
+%% two of them met twice, kept once.
+ops(H, Y0, Y1) ->
+    [Op || {_, Op} <- lists:ukeysort(1, walk(index(H), {stripe(Y0), 0}, stripe(Y1), []))].
+
+walk(T, K, B1, Acc) ->
+    case ets:next_lookup(T, K) of
+        {K1 = {B, I}, [{_, Op}]} when B =< B1 -> walk(T, K1, B1, [{I, Op} | Acc]);
+        _ -> Acc
+    end.
+
+%% All of them, as draw/3 was given them (the tests).
+ops(Ids) when not is_map(Ids) ->
+    case ets:lookup(Ids, code_index) of
+        [{_, T, _}] -> [Op || {_, Op} <- lists:usort([{I, Op} || {{_, I}, Op} <- ets:tab2list(T)])];
+        [] -> []
     end.
 
 %% The width of a character and the height of a line in the view's font.
@@ -367,51 +531,94 @@ metrics(_H, #{canvas := C}) ->
     {W, Ht, _, _} = wxWindow:getTextExtent(C, "MMMMMMMMMM"),
     #{cw => W / 10, ch => Ht}.
 
+%% What the editor says -- a field being written and its choices, a
+%% message -- over the canvas; hidden when it says nothing.
+edit_status(_H, #{ed_status := T, tabs_panel := P}, Text) ->
+    %% `&' in a label is the key it is reached by; the editor's `& series'
+    %% means an ampersand.
+    wxStaticText:setLabel(T, lists:flatten(string:replace(Text, "&", "&&", all))),
+    wxWindow:show(T, [{show, Text =/= ""}]),          % nothing said, no room taken
+    candid_wx:relayout_up(P).
+
+%% Rows Y0..Y1 of the picture (its own pixels) scrolled into sight, with a
+%% row to spare: the cursor's node after a key moved it.
+see(H, #{canvas := C, right := Right}, Y0, Y1) ->
+    Z = zoom(H),
+    {_, Oy} = in_right(C),
+    {_, Uy} = wxScrolledWindow:getScrollPixelsPerUnit(Right),
+    {_, Vy} = wxScrolledWindow:getViewStart(Right),
+    {_, Rh} = wxWindow:getClientSize(Right),
+    Top = Vy * Uy,
+    A = Top + Oy + round(Y0 * Z) - 30,
+    B = Top + Oy + round(Y1 * Z) + 30,
+    New = if A < Top -> A;
+             B > Top + Rh -> B - Rh;
+             true -> Top
+          end,
+    (New =/= Top andalso Uy > 0) andalso
+        wxScrolledWindow:scroll(Right, -1, max(0, New div Uy)),
+    ok.
+
 %% The whole picture again.
 draw(H, #{canvas := C}, Ops) ->
-    candid_wx:register(H, code_ops, Ops, perm),
+    store(H, Ops),
     wxWindow:refresh(C, [{eraseBackground, false}]).
 
-%% A pen and a brush per colour and style, made once a paint.
-paint_ops(H, DC, Ops) ->
-    {W, Ht} = wxDC:getSize(DC),
+%% A pen and a brush per colour and style, made once a paint; a pen, a
+%% brush, a font and a text colour set on the DC only when the op wants
+%% another than is set -- one wx call less, most ops: neighbours are alike.
+paint_ops(H, DC, {Bx, By, Bw, Bh}) ->
     Bg = wxBrush:new(candid_wx:tc(H, ?BG)),
     wxDC:setBackground(DC, Bg),
     wxDC:clear(DC),
     wxBrush:destroy(Bg),
-    _ = {W, Ht},
     Z = zoom(H),
+    %% the box in the picture's own pixels, a row's height to spare
+    {X0, Y0, X1, Y1} = {Bx / Z - 40, By / Z - 40, (Bx + Bw) / Z + 40, (By + Bh) / Z + 40},
+    In = fun({rect, X, Y, W, Ht, _, _, _, _}) -> Y < Y1 andalso Y + Ht > Y0 andalso
+                                                  X < X1 andalso X + W > X0;
+            ({line, Xa, Ya, Xb, Yb, _, _, _}) -> min(Ya, Yb) < Y1 andalso max(Ya, Yb) > Y0
+                                                  andalso min(Xa, Xb) < X1 andalso
+                                                  max(Xa, Xb) > X0;
+            ({text, _X, Y, _, _, _}) -> Y < Y1 andalso Y + 40 > Y0
+         end,
+    Ops = [Op || Op <- ops(H, Y0, Y1), In(Op)],
     wxDC:setUserScale(DC, Z, Z),
     Font = candid_wx:font(H),
     Bold = wxFont:new(wxFont:getPointSize(Font), ?wxFONTFAMILY_TELETYPE,
 		      ?wxFONTSTYLE_NORMAL, ?wxFONTWEIGHT_BOLD),
     wxDC:setFont(DC, Font),
-    Tools = lists:foldl(fun(Op, T) -> op(H, DC, Op, T, Font, Bold) end, #{}, Ops),
+    Tools = lists:foldl(fun(Op, T) -> op(H, DC, Op, T, Font, Bold) end, #{font => false}, Ops),
     [case K of
 	 {pen, _, _, _} -> wxPen:destroy(X);
-	 {brush, _}     -> wxBrush:destroy(X)
+	 {brush, _}     -> wxBrush:destroy(X);
+	 _              -> ok
      end || {K, X} <- maps:to_list(Tools)],
     wxFont:destroy(Bold),
     ok.
 
 op(H, DC, {rect, X, Y, W, Ht, R, F, S, D}, T0, _F, _B) ->
-    {Br, T1} = brush(H, F, T0),
-    {Pen, T2} = pen(H, S, 1, D, T1),
-    wxDC:setBrush(DC, Br),
-    wxDC:setPen(DC, Pen),
+    T1 = set(T0, brush, F, fun() -> {Br, T} = brush(H, F, T0), wxDC:setBrush(DC, Br), T end),
+    T2 = set(T1, pen, {S, 1, D}, fun() -> {P, T} = pen(H, S, 1, D, T1), wxDC:setPen(DC, P), T end),
     wxDC:drawRoundedRectangle(DC, {X, Y, W, Ht}, R),
     T2;
 op(H, DC, {line, X1, Y1, X2, Y2, C, W, D}, T0, _F, _B) ->
-    {Pen, T1} = pen(H, C, W, D, T0),
-    wxDC:setPen(DC, Pen),
+    T1 = set(T0, pen, {C, W, D}, fun() -> {P, T} = pen(H, C, W, D, T0), wxDC:setPen(DC, P), T end),
     wxDC:drawLine(DC, {X1, Y1}, {X2, Y2}),
     T1;
-op(H, DC, {text, X, Y, Txt, C, Bold}, T, Font, BoldF) ->
-    Bold andalso wxDC:setFont(DC, BoldF),
-    wxDC:setTextForeground(DC, candid_wx:tc(H, C, fg)),
+op(H, DC, {text, X, Y, Txt, C, Bold}, T0, Font, BoldF) ->
+    T1 = set(T0, font, Bold, fun() -> wxDC:setFont(DC, case Bold of true -> BoldF; false -> Font end),
+				      T0 end),
+    T2 = set(T1, fg, C, fun() -> wxDC:setTextForeground(DC, candid_wx:tc(H, C, fg)), T1 end),
     wxDC:drawText(DC, Txt, {X, Y}),
-    Bold andalso wxDC:setFont(DC, Font),
-    T.
+    T2.
+
+%% What is set on the DC as What is V: Set() sets it when it is not.
+set(T, What, V, Set) ->
+    case T of
+        #{What := V} -> T;
+        _ -> (Set())#{What => V}
+    end.
 
 brush(_H, none, T) -> {?wxTRANSPARENT_BRUSH, T};
 brush(H, C, T) ->

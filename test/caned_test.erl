@@ -4,6 +4,8 @@
 
 -export([run/0]).
 
+-include_lib("wx/include/wx.hrl").
+
 run() ->
     typing(),
     edits(),
@@ -14,6 +16,9 @@ run() ->
     patch(),
     comments(),
     cards(),
+    lights(),
+    scope(),
+    keys(),
     halt(0).
 
 txt(S) -> {ok, X} = caned_text:expr(S), caned_tree:tree(X).
@@ -244,9 +249,11 @@ ui() ->
     {_, Rows} = caned_ui:screen(S1, 12, 80),
     {_, Hits} = caned_ops:ops(Rows, #{cw => 10, ch => 20}),
     %% row 6 of the screen is y 100..119; `x > 15' starts at column 22
-    expect("a click finds the contact under it, a rectangle the ones it touches",
+    expect("a click finds the contact under it, or the nearest on its row; a rectangle "
+           "the ones it touches",
 	   caned_ops:hit(Hits, 255, 110) =:= {6, [2, 1]} andalso
-	   caned_ops:hit(Hits, 55, 110) =:= none andalso
+	   caned_ops:hit(Hits, 55, 110) =:= {6, [1]} andalso      % off a box: the nearest
+	   caned_ops:hit(Hits, 55, 5000) =:= none andalso
 	   caned_ops:hits_in(Hits, {250, 105, 260, 135}) =:= {6, [[2, 1], [2, 2]]},
 	   [H || H = {_, _, _, _, 6, _} <- Hits]),
     Ss = Keys([left, left, shift_right], S1),
@@ -490,6 +497,8 @@ cards() ->
     expect("a field that does not parse is refused and stays written",
            text(S4) =:= ?DSRC andalso element(1, maps:get(mode, S4)) =:= field
            andalso maps:get(msg, S4) =/= "", {maps:get(mode, S4), maps:get(msg, S4)}),
+    expect("a rectangle over a card is a click on its first field, no crash",
+           maps:get(cur, keys([{select, 2, [{seg, 2}, {seg, 3}]}], S0)) =:= {seg, 2}, nomatch),
     expect("the name is not written on the card",
            maps:get(mode, keys([enter], S0)) =:= normal, nomatch),
     S5 = keys([$&] ++ "R1." ++ [tab, tab, enter], caned_ui:new(D, "d.csp")),
@@ -498,6 +507,107 @@ cards() ->
            andalso string:find(lists:last(caned_ui:plain(keys([$&] ++ "R1.", caned_ui:new(D, "d.csp")),
                                                          8, 120)), "Tab: val pin port") =/= nomatch,
            text(S5)).
+
+%% Lit by what holds, as candid lights it: a fun from {line, what} to a light.
+lights() ->
+    {ok, D} = caned_doc:from_text("#variable x\n#variable y\n#digital R1 out 13\n"
+                                  "#digital R2 out 14\nR1 = x > 1 && y > 2\nR2 = x < 0\n"),
+    Txt = fun(E) -> candyspeak_eval:text(E) end,
+    L = fun(5, {contact, E}) ->
+                case Txt(E) of "x > 1" -> true; "y > 2" -> unknown end;
+           (5, coil) -> fired; (6, coil) -> next; (6, row) -> off; (_, _) -> none end,
+    S = (caned_ui:new(D, "l.csp"))#{lights => L, cur := coil},
+    {_, Rows} = caned_ui:screen(S, 10, 80),
+    At = maps:from_list([{Where, A} || R <- Rows, {{A, Where}, _} <- R]),
+    expect("lit: a contact that holds, one that cannot be known, a fired coil, a rung "
+           "whose block is not in force dim",
+           maps:get({5, [1]}, At) =:= contact_t andalso maps:get({5, [2]}, At) =:= contact_u
+           andalso maps:get({6, []}, At) =:= off andalso maps:get({6, coil}, At) =:= coil_off,
+           At),
+    {_, Rows2} = caned_ui:screen(S#{cur := [1]}, 10, 80),
+    At2 = maps:from_list([{Where, A} || R <- Rows2, {{A, Where}, _} <- R]),
+    expect("the cursor outshines a light; a coil not under it shows it fired",
+           maps:get({5, [1]}, At2) =:= cur andalso maps:get({5, coil}, At2) =:= coil_on,
+           At2),
+    {Ops, _} = caned_ops:ops(Rows, #{cw => 10, ch => 20}),
+    expect("a lit contact is drawn green", lists:member({51, 255, 51}, [St || {rect, _, _, _, _, _, _, St, _} <- Ops]),
+           nomatch).
+
+%% An object's tab: its module alone, from the comment over #module to its
+%% #end, and the cursor kept in it.
+scope() ->
+    {ok, D} = caned_doc:from_text("#variable x\n#digital Top out 1\nTop = x > 1\n"
+                                  "// the counter\n#module Cnt\n#local A in\n#local Q out\n"
+                                  "Q = A > 2\nQ = A < 0\n#end\n#Cnt c0 A=x\n"),
+    S0 = (caned_ui:new(D, "s.csp"))#{scope => {module, "Cnt"}},
+    {ok, S} = caned_ui:key({click, 8, [1]}, S0),
+    Rows = caned_ui:plain(S, 20, 80),
+    Has = fun(T) -> [R || R <- Rows, string:find(R, T) =/= nomatch] =/= [] end,
+    Downs = lists:foldl(fun(_, Si) -> {ok, Si1} = caned_ui:key(down, Si), Si1 end, S,
+                        lists:seq(1, 5)),
+    Ups = lists:foldl(fun(_, Si) -> {ok, Si1} = caned_ui:key(up, Si), Si1 end, S,
+                      lists:seq(1, 9)),
+    expect("scope: a module alone, its comment and #end in, the rest of the file out, "
+           "the cursor kept in it",
+           Has("the counter") andalso Has("A > 2") andalso Has("#end")
+           andalso not Has("Top") andalso not Has("#Cnt c0")
+           andalso maps:get(ln, Downs) =:= 10 andalso maps:get(ln, Ups) =:= 4,
+           {Rows, maps:get(ln, Downs), maps:get(ln, Ups)}).
+
+%% Keys by name, a table over them; a page, the ends of a rung and of the
+%% file.
+keys() ->
+    K = fun(Code, U, C, A, Sh) -> caned_keys:name(#wxKey{keyCode = Code, uniChar = U,
+                                                           controlDown = C, altDown = A,
+                                                           shiftDown = Sh}) end,
+    Names = [K(3, 3, true, false, false), K($C, $C, true, false, false),
+             K(?WXK_HOME, 0, true, false, false), K(?WXK_PAGEDOWN, 0, false, false, false),
+             K(?WXK_TAB, 0, false, false, true), K($<, $|, true, true, false),
+             K($a, $a, false, false, false), K(?WXK_UP, 0, false, true, false)],
+    T = caned_keys:table([{"C-n", down}, {"C-c", none}]),
+    expect("keys named as Emacs does; AltGr the character; the settings over the defaults",
+           Names =:= ["C-c", "C-c", "C-home", "pgdn", "S-tab", "|", "a", "M-up"]
+           andalso caned_keys:command("C-n", T) =:= down
+           andalso caned_keys:command("C-c", T) =:= none
+           andalso caned_keys:command("C-v", T) =:= paste
+           andalso caned_keys:command("x", T) =:= $x
+           andalso caned_keys:command("M-x", T) =:= none, Names),
+    E = caned_keys:table([emacs, {"C-z", $u}]),
+    Feed = fun(Ns) -> lists:foldl(fun(N, {_, P}) ->
+                                          case caned_keys:feed(N, P, E) of
+                                              {prefix, P1} -> {{prefix, P1}, P1};
+                                              R -> {R, []}
+                                          end
+                                  end, {none, []}, Ns) end,
+    expect("sequences: C-x waits, C-x C-s saves, C-x C-q is undefined; emacs's keys, "
+           "one of the settings' over them; a plain key as before",
+           element(1, Feed(["C-x"])) =:= {prefix, ["C-x"]}
+           andalso element(1, Feed(["C-x", "C-s"])) =:= {command, $s}
+           andalso element(1, Feed(["C-x", "C-q"])) =:= {undefined, "C-x C-q"}
+           andalso element(1, Feed(["C-v"])) =:= {command, page_down}
+           andalso element(1, Feed(["C-z"])) =:= {command, $u}
+           andalso element(1, Feed(["a"])) =:= {command, $a}
+           andalso element(1, Feed(["home"])) =:= {command, doc_start}
+           andalso caned_keys:feed("C-x", [], caned_keys:table([])) =:= {command, cut},
+           Feed(["C-x", "C-q"])),
+    Src = lists:append(["#variable x\n#digital R out 1\n" |
+                        ["R = x > " ++ integer_to_list(I) ++ " && x < 9\n" || I <- lists:seq(1, 30)]]),
+    {ok, D} = caned_doc:from_text(Src),
+    S = (caned_ui:new(D, "k.csp"))#{page => 10},
+    Go = fun(Ks, S0) -> lists:foldl(fun(Ki, Si) -> {ok, Si1} = caned_ui:key(Ki, Si), Si1 end,
+                                    S0, Ks) end,
+    #{ln := L0} = S,
+    #{ln := L1} = Go([page_down], S),
+    #{ln := L2} = Go([page_down, page_up], S),
+    #{ln := Le} = Go([doc_end], S),
+    #{ln := Ls} = Go([doc_end, doc_start], S),
+    #{cur := Ce} = Go([rung_end], S),
+    #{cur := Cs} = Go([rung_end, rung_start], S),
+    expect("page down and up a page of rows; the first and the last stop (a card first); the coil "
+           "and the first contact",
+           L1 =:= L0 + 10 andalso L2 =:= L0 andalso Le =:= 32 andalso Ls =:= 1
+           andalso Ce =:= coil andalso Cs =:= [1],
+           {L0, L1, L2, Le, Ls, Ce, Cs}).
 
 expect(What, true, _)  -> io:format("ok    ~ts~n", [What]);
 expect(What, false, D) ->

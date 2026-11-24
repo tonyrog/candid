@@ -47,6 +47,14 @@
 %%% timer did not run out. What the view cannot do itself, it leaves in
 %%% `acts' for the panel to send to csp (actions/1).
 %%%
+%%% EDIT. The third way to show the program: caned, the structure editor,
+%%% on the same canvas -- its rungs lit by lights/1, which judges them as
+%%% paint judges the ladder's. A click, a double click, a drag (xy=, dxy=,
+%%% sel=) and a key ({key, K}, caned_wx's) go to it; what it saves goes to the
+%%% panel as an act: {edit_save, Text} for a file on disk (access edit), the
+%%% rules added and switched for a node ({patch, Lines, Switched}, access
+%%% patch) -- as the chat's lines go.
+%%%
 %%% csp says which rules fired as {Object, File, Line} (--fired): a module's
 %%% rule is one piece of code run once per instance, so the object says whose
 %%% tab lights it, and file and line say which rung. A rule that fires for one
@@ -63,8 +71,10 @@
 	 look_values/1, look_text/1, show/1, items/1]).  % tests
 -export([split/1]).
 -export([rules/1, rules/2, tabs/1, tabs/2]).
+-export([lights/1]).
 
 -define(GLOW, 600).                     % ms a coil stays lit after firing
+-define(EDIT_COLS, 200).                % the editor's width, in characters
 
 %% The highlights, settable from candid.config ({colors, [{true, "#3f3"}]}).
 %% Any css colour. The fill and the text are mixed from it, so one colour is
@@ -293,6 +303,9 @@ new(C, Where, {Ast, File}, Cfg, Opts) ->
 	  prog => candyspeak_eval:prog(Ast, File, [{float, Float}]),
 	  mode => hide, shown => #{}, fired => [], glow => #{}, last => #{},
 	  off => maps:get(off, Opts, []), open => [],
+	  access => maps:get(access, Opts, edit), ed => none, eclip => "",
+	  edit_at => maps:get(edit_at, Opts, none),
+	  editor => maps:get(editor, Opts, false),
 	  states => state_names(hd(Tabs)), trace => none, at => none,
 	  bad => #{}, acts => [], look => none, tshow => false},
     V.
@@ -304,22 +317,64 @@ cui({M, H}, F, A) -> apply(M, F, [H | A]).
 %% And on the view's own handles too.
 vui(#{ui := C, h := H}, F, A) -> cui(C, F, [H | A]).
 
-%% hide | ladder | code from the panel's bar, tab=N from the view's own.
+%% hide | ladder from the panel's bar, tab=N from the view's own. Where the
+%% renderer has the editor (editor => true, the desktop's) the ladder IS the
+%% editor, caned; `code' and `edit', kept in settings from before, are the
+%% ladder too.
 control(undefined, _Tag) -> undefined;
-control(V, "hide") ->
+control(V = #{editor := true}, Tag) when Tag =:= "ladder"; Tag =:= "code"; Tag =:= "edit" ->
+    vui(V, edit_status, [""]),
+    edit_mode(V);
+control(V, "edit") -> control(V, "ladder");
+control(V, Tag) -> control1(V, Tag).
+
+edit_mode(V) ->
+    case edit_open(V) of
+	{ok, V0} ->
+	    V1 = scoped(V0),
+	    vui(V1, shown, [true]),
+	    render(V1#{mode := edit, esize => none, eops => none, estatus => none,
+		       enode => none});
+	{error, M} ->
+	    V#{acts := maps:get(acts, V) ++ [{log, "the editor: " ++ lists:flatten(M)}]}
+    end.
+
+%% The canvas has the keys or not: the editor's frame says so.
+control1(V = #{ed := Ed}, "focus=" ++ On) when Ed =/= none ->
+    V1 = V#{ed := Ed#{focused => On =:= "on"}},
+    case V1 of
+        #{mode := edit} -> edit_draw(V1);
+        _ -> V1
+    end;
+control1(V, "focus=" ++ _) -> V;
+%% How many rows a page is, the canvas's view says before a page key.
+control1(V = #{ed := Ed}, "page=" ++ N) when Ed =/= none ->
+    V#{ed := Ed#{page => list_to_integer(N)}};
+control1(V, "page=" ++ _) -> V;
+control1(V = #{mode := edit}, Tag = {key, _}) -> edit_control(V, Tag);
+control1(V = #{mode := edit}, {keys, Ks}) -> edit_draw(lists:foldl(fun(K, Vi) -> edit_key1(Vi, K) end, V, Ks));
+control1(V, {keys, _}) -> V;
+control1(V = #{mode := edit}, Tag = "xy=" ++ _) -> edit_control(V, Tag);
+control1(V = #{mode := edit}, Tag = "dxy=" ++ _) -> edit_control(V, Tag);
+control1(V = #{mode := edit}, Tag = "sel=" ++ _) -> edit_control(V, Tag);
+control1(V, {key, _}) -> V;
+control1(V, "hide") ->
     vui(V, shown, [false]),
+    vui(V, edit_status, [""]),
     V#{mode := hide};
-control(V, Tag) when Tag =:= "ladder"; Tag =:= "code" ->
+%% `code', the rules as text, is gone: a setting kept from then is ladder.
+control1(V, Tag) when Tag =:= "ladder"; Tag =:= "code" ->
     vui(V, shown, [true]),
-    render(V#{mode := list_to_atom(Tag)});
-control(V = #{mode := Mode}, "tab=" ++ I) ->
-    V1 = V#{tab := list_to_integer(I)},
+    vui(V, edit_status, [""]),
+    render(V#{mode := ladder});
+control1(V = #{mode := Mode}, "tab=" ++ I) ->
+    V1 = tab_cursor(scoped(V#{tab := list_to_integer(I), esize => none, enode => none})),
     case Mode of
 	hide -> V1;
 	_    -> render(V1)
     end;
 %% An object's line in the flow: its rules shown in place, or not again.
-control(V = #{open := Open}, "obj=" ++ O) ->
+control1(V = #{open := Open}, "obj=" ++ O) ->
     V1 = V#{open := case lists:member(O, Open) of
 			true  -> Open -- [O];
 			false -> [O | Open]
@@ -330,7 +385,7 @@ control(V = #{open := Open}, "obj=" ++ O) ->
     end;
 %% A rule's box: switched off or on again. The panel sends the #disable or
 %% #enable and says what is off then (disabled/2); the box changes now.
-control(V = #{off := Off, acts := As}, "dis=" ++ No) ->
+control1(V = #{off := Off, acts := As}, "dis=" ++ No) ->
     N = list_to_integer(No),
     Dis = not lists:member(N, Off),
     Off1 = case Dis of
@@ -341,11 +396,11 @@ control(V = #{off := Off, acts := As}, "dis=" ++ No) ->
 %% From the start of the trace: csp back to its initial values, paused, and
 %% its clock held -- the trace says how much time passes, not the person. The
 %% code view goes back to csp's own values, which the replay is checking.
-control(V = #{trace := {_, _}}, "replay") ->
+control1(V = #{trace := {_, _}}, "replay") ->
     paint(V#{at := 0, bad := #{}, look := none,
 		 acts := [pause, reset, {clock, 0}]});
 %% Walk the trace's cycles in the code view, csp left as it is.
-control(V = #{trace := {Rows = [_, _ | _], _}, look := L}, Dir)
+control1(V = #{trace := {Rows = [_, _ | _], _}, look := L}, Dir)
   when Dir =:= "up"; Dir =:= "down" ->
     Last = length(Rows) - 2,
     L1 = case {L, Dir} of
@@ -354,14 +409,14 @@ control(V = #{trace := {Rows = [_, _ | _], _}, look := L}, Dir)
 	     {_, "down"}  -> min(Last, L + 1)
 	 end,
     paint(V#{look := L1});
-control(V, "live") ->
+control1(V, "live") ->
     paint(V#{look := none});
-control(V = #{tshow := T}, "table") ->
+control1(V = #{tshow := T}, "table") ->
     paint(V#{tshow := not T});
 %% One step of the trace: its inputs and the time before it, then the step.
 %% A frame goes out a step AHEAD: csp takes it in during one cycle and the
 %% rules see .rx in the next.
-control(V = #{trace := {Rows, M}, at := T}, "rstep")
+control1(V = #{trace := {Rows, M}, at := T}, "rstep")
   when is_integer(T), T + 1 < length(Rows) ->
     Row = lists:nth(T + 2, Rows),
     Fs = maps:get(frames, M),
@@ -389,13 +444,128 @@ control(V = #{trace := {Rows, M}, at := T}, "rstep")
     paint(V#{at := T + 1, look := none,
 		 acts := Sets ++ Out ++ Dt ++ [step]});
 %% A click on the picture: what is at X, Y.
-control(V = #{ladder := L}, "xy=" ++ XY) when L =/= none ->
+control1(V = #{ladder := L}, "xy=" ++ XY) when L =/= none ->
     [X, Y] = [list_to_integer(N) || N <- string:lexemes(XY, ",")],
     case csp_ladder:hit(L, X, Y) of
 	none -> V;
 	Tag  -> control(V, Tag)
     end;
-control(V, _Tag) -> V.
+control1(V, _Tag) -> V.
+
+%%% ------------------------------------------------------------------ edit
+
+%% The editor opened on the file, once; kept while the view is shown.
+edit_open(V = #{ed := none, file := File, access := A}) ->
+    case caned_ui:open(File, A) of
+	{ok, S0} ->
+	    %% where it was when the panel was built again from a save
+	    S = case maps:get(edit_at, V, none) of
+		    none -> S0;
+		    Ln -> at_line(S0, Ln)
+		end,
+	    {ok, V#{ed := S#{embedded => true, focused => false}}};
+	{error, {L, M}} -> {error, io_lib:format("~s:~w: ~s", [File, L, M])}
+    end;
+edit_open(V) -> {ok, V}.
+
+%% The editor's screen, the whole document, its status line first, as ops
+%% on the canvas; the canvas sized again only when the picture's size moved.
+edit_draw(V = #{ed := Ed, metrics := M0, tab := I, tabs := Tabs}) ->
+    M = M0#{ch := maps:get(ch, M0) + 6, w => round(maps:get(cw, M0) * ?EDIT_COLS)},
+    Raw = case V of
+	      #{eraw := {Ed, R}} -> R;                 % the layout, as it was
+	      _ -> caned_ui:all(Ed)
+	  end,
+    Rows = caned_ui:light(Raw, Ed#{lights => lights(V)}),
+    %% The status line is the head's, over the canvas (edit_status); the
+    %% rest is the picture.
+    Rows1 = lists:droplast(Rows),
+    Status = status_text(lists:last(Rows)),
+    maps:get(estatus, V, none) =:= Status orelse vui(V, edit_status, [Status]),
+    {Ops0, Hits} = caned_ops:ops(Rows1, M),
+    %% A text op is drawn at its row's top here; caned's rows are 6 px
+    %% taller than the font, so it goes down half of that.
+    Ops = [case Op of
+	       {text, X, Y, T, C, B} -> {text, X, Y + 3, T, C, B};
+	       _ -> Op
+	   end || Op <- Ops0],
+    Size = {round(maps:get(cw, M) * ?EDIT_COLS), round(maps:get(ch, M) * length(Rows1))},
+    maps:get(esize, V, none) =:= Size orelse
+	vui(V, rungs, [edit, I, lists:nth(I + 1, Tabs), Size]),
+    maps:get(eops, V, none) =:= Ops orelse vui(V, draw, [Ops]),
+    %% The cursor moved to another node: that node in sight.
+    Node = caned_ops:node_rows(Rows1, maps:get(ch, M)),
+    case {Node, maps:get(enode, V, none)} of
+        {none, _} -> ok;
+        {{Y0, Y1, _}, {Y0, Y1, _}} -> ok;
+        {{Y0, Y1, _}, _} -> vui(V, see, [Y0, Y1])
+    end,
+    V#{eraw => {Ed, Raw}, eops => Ops, ehits => Hits, esize => Size,
+       estatus => Status, enode => Node}.
+
+%% The status row as one line of text; the choice Tab put in, in brackets.
+status_text(Runs) ->
+    lists:flatten([case A of
+                       menu_sel -> "[" ++ string:trim(T) ++ "] ";
+                       _ -> T
+                   end || {A, T} <- Runs]).
+
+edit_control(V = #{ehits := Hs}, "xy=" ++ XY) ->
+    [X, Y] = xy(XY),
+    case caned_ops:hit(Hs, X, Y) of
+	{Ln, P} -> edit_key(V, {click, Ln, P});
+	none -> V
+    end;
+edit_control(V = #{ehits := Hs}, "dxy=" ++ XY) ->
+    [X, Y] = xy(XY),
+    case caned_ops:hit(Hs, X, Y) of
+	{Ln, P} -> edit_key(V, {dclick, Ln, P});
+	none -> V
+    end;
+edit_control(V = #{ehits := Hs}, "sel=" ++ R) ->
+    [X0, Y0, X1, Y1] = xy(R),
+    case {caned_ops:hit(Hs, X0, Y0), caned_ops:hits_in(Hs, {X0, Y0, X1, Y1})} of
+	{{Ln, handle}, _} ->
+	    case caned_ops:handle_at(Hs, Y1) of
+		none -> V;
+		To -> edit_key(V, {move, Ln, To})
+	    end;
+	{_, {Ln, Ps}} -> edit_key(V, {select, Ln, Ps});
+	{_, none} -> V
+    end;
+edit_control(V, {key, K}) -> edit_key(V, K);
+edit_control(V, _) -> V.
+
+xy(S) -> [list_to_integer(N) || N <- string:lexemes(S, ",")].
+
+
+
+%% A key to the editor; ^V pastes what it last copied.
+edit_key(V, K) -> edit_draw(edit_key1(V, K)).
+
+%% A key to the editor, not drawn: several that came at once (a key held
+%% down) are taken and the picture drawn once, after the last.
+edit_key1(V = #{ed := Ed, eclip := Clip}, K0) ->
+    K = case K0 of paste -> {paste, Clip}; _ -> K0 end,
+    case caned_ui:key(K, Ed) of
+	{ok, S} -> clip(V, S);
+	{save, S} -> edit_save(clip(V, S), S)
+    end.
+
+clip(V, S = #{clip := none}) -> V#{ed := S};
+clip(V, S = #{clip := C}) -> V#{ed := S#{clip := none}, eclip := C}.
+
+%% Saved: a file's text to the panel to write; on a node, what was added and
+%% switched since the listing, as lines to send.
+edit_save(V = #{access := edit, acts := As}, #{doc := D, ln := Ln}) ->
+    V#{acts := As ++ [{edit_save, caned_doc:text(D), caned_doc:saved_line(D, max(1, Ln))}]};
+edit_save(V = #{access := patch, acts := As, off := Off}, #{doc := D}) ->
+    Nos = caned_doc:numbers(D),
+    Lines = [string:trim(caned_doc:line(D, L))
+	     || {L, _} <- Nos, caned_doc:added(D, L)],
+    Switched = [{caned_doc:off(D, L), N} || {L, N} <- Nos,
+					    caned_doc:off(D, L) =/= lists:member(N, Off)],
+    V#{acts := As ++ [{patch, Lines, Switched}]}.
 
 %%% ------------------------------------------------------------ a trace
 %%%
@@ -654,6 +824,7 @@ state_names(#{env := #{states := Ss}}) ->
 		    lists:zip(lists:seq(3, 2 + length(User)), User)]).
 
 %% The tab's rungs laid out afresh (csp_ladder), and every class sent again.
+render(V = #{mode := edit}) -> paint(V);
 render(V = #{mode := Mode, tab := I, tabs := Tabs, metrics := Ms}) ->
     Tab = lists:nth(I + 1, Tabs),
     L = csp_ladder:layout(items(V), Mode, Ms),
@@ -672,15 +843,66 @@ source(V = #{file := File, tab := I, float := Float}, Text) ->
 	 end of
 	{ok, Ast} ->
 	    Tabs = tabs(Ast, File),
-	    V1 = V#{tabs := Tabs,
-		    tab := case I < length(Tabs) of true -> I; false -> 0 end,
-		    prog := candyspeak_eval:prog(Ast, File, [{float, Float}]),
-		    states := state_names(hd(Tabs)), ladder := none},
+	    V1 = reedit(V#{tabs := Tabs,
+			   tab := case I < length(Tabs) of true -> I; false -> 0 end,
+			   prog := candyspeak_eval:prog(Ast, File, [{float, Float}]),
+			   states := state_names(hd(Tabs)), ladder := none}, Text),
 	    case maps:get(mode, V1) of
 		hide -> V1;
 		_ -> render(V1)
 	    end;
 	_ -> V
+    end.
+
+%% The editor on the program as it is now -- on a node, what was sent is
+%% the node's and no longer added -- the cursor on the line it was on.
+reedit(V = #{ed := none}, _Text) -> V;
+reedit(V = #{ed := Ed = #{ln := Ln}, file := File, access := A}, Text) ->
+    case caned_doc:from_text(Text, File) of
+	{ok, D} ->
+	    S = (caned_ui:new(D, File, A))#{embedded => true,
+					    focused => maps:get(focused, Ed, false)},
+	    S1 = case Ln > 0 andalso Ln =< caned_doc:nlines(D) andalso
+		     caned_doc:rung(D, Ln) =/= none of
+		     true -> caned_ui:key({click, Ln, hd(caned_tree:leaves(
+							element(2, caned_doc:rung(D, Ln))))},
+					  S);
+		     false -> {ok, S}
+		 end,
+	    {ok, S2} = S1,
+	    V#{ed := S2#{msg := maps:get(msg, Ed, "")}};
+	_ -> V
+    end.
+
+%% In the editor an object's tab shows its module, no more: from its
+%% #module to its #end (caned_ui's scope); main the whole file.
+scoped(V = #{ed := Ed = #{doc := _}, tabs := Tabs, tab := I}) ->
+    V#{ed := caned_ui:set_scope(Ed, case maps:get(binds, lists:nth(I + 1, Tabs)) of
+                                        {M, _} -> {module, M};
+                                        none -> all
+                                    end)};
+scoped(V) -> V.
+
+%% In the editor, a tab chosen puts the cursor on its first rung: an
+%% object's, its module's body -- what is lit for it.
+tab_cursor(V = #{ed := Ed = #{doc := _}, tabs := Tabs, tab := I, file := File}) ->
+    Base = filename:basename(File),
+    case [Ln || #{line := Ln, file := F} <- maps:get(rules, lists:nth(I + 1, Tabs)),
+                F =:= Base orelse F =:= ""] of
+        [Ln | _] -> V#{ed := at_line(Ed, Ln)};
+        [] -> V
+    end;
+tab_cursor(V) -> V.
+
+%% The editor's cursor put on line Ln's node, or the nearest before it.
+at_line(S = #{doc := D}, Ln) ->
+    Ls = [L || L <- lists:seq(Ln, 1, -1), caned_doc:rung(D, L) =/= none],
+    case Ls of
+        [L | _] ->
+            {ok, S1} = caned_ui:key({click, L, hd(caned_tree:leaves(
+                                                     element(2, caned_doc:rung(D, L))))}, S),
+            S1;
+        [] -> S
     end.
 
 %% The rules switched off, by number, as the panel's file has them.
@@ -728,6 +950,8 @@ chain(_Op, X)            -> [X].
 %% Every id's class from the current state; only what changed is sent, in one
 %% cast -- a setStyle per contact would be a round trip each. The top frame's
 %% values and State are painted with the view hidden too.
+paint(V = #{mode := edit, last := Last}) ->
+    edit_draw(paint1(judge(V, Last)));
 paint(V = #{last := Last}) ->
     paint1(judge(V, Last)).
 
@@ -764,6 +988,7 @@ paint1(V = #{tabs := Tabs, tab := I, last := Live, fired := Now0,
 	  end,
     {Cls, _} = case Mode of
 		   hide -> {[], 0};
+		   edit -> {[], 0};                  % the editor lights its own
 		   _ -> lists:mapfoldl(fun(R, G) -> item_classes(R, G, Ctx) end,
 				       0, items(V))
 	       end,
@@ -794,10 +1019,79 @@ paint1(V = #{tabs := Tabs, tab := I, last := Live, fired := Now0,
     end,
     V1#{shown := New}.
 
+%% What lights caned's rungs (caned_ui's `lights'), from the same state paint
+%% judges the ladder's by: Fun(Line, What) for a line of the top file, What
+%% {contact, Expr} (true | false | unknown), coil (fired | next | both |
+%% none) or row (on | off: its blocks in force or not).
+%%
+%% A line is judged in the scope its rule runs in: the main program's over
+%% the program's values; a module's body, written once and run per object,
+%% over the object of the tab shown -- its own values (`c0.N' read as `N'),
+%% what fired for it, its State. On the main tab a module's body is not lit:
+%% it is no one's there.
+lights(V = #{tabs := Tabs = [Main | _], tab := I, last := Live, fired := Now0,
+             glow := Glow, look := Look, file := File}) ->
+    Ms = erlang:monotonic_time(millisecond),
+    {Last0, Fired0} =
+        case Look of
+            none -> {Live, Now0 ++ [R || {R, T} <- maps:to_list(Glow), Ms - T < ?GLOW]};
+            _ -> {look_values(V), look}
+        end,
+    Base = filename:basename(File),
+    Scope = fun(#{env := Env, rules := Rules, prefix := P}) ->
+                    O = case P of none -> ""; _ -> P end,
+                    Last = values(Last0, P),
+                    Fired = case Fired0 of
+                                look -> look;
+                                _ -> [{filename:basename(Fl), L} || {O1, Fl, L} <- Fired0,
+                                                                    O1 =:= O]
+                            end,
+                    C = {Env, Last, Fired, maps:get("State", Last, 0)},
+                    [{Ln, {R, C}} || R = #{line := Ln, file := F} <- Rules,
+                                     F =:= Base orelse F =:= ""]
+            end,
+    ByLine = maps:from_list(Scope(Main) ++
+                                case I of
+                                    0 -> [];
+                                    _ -> Scope(lists:nth(I + 1, Tabs))
+                                end ++
+                                %% a module's rungs shown under an object's line
+                                [{{in, P, Ln}, X} || T = #{prefix := P} <- tl(Tabs),
+                                                     {Ln, X} <- Scope(T)]),
+    Active = fun(#{gates := Gs}, {Env, Last, _, State}) ->
+                     lists:all(fun(Gt) -> gate_on(Gt, Env, Last, State) end, Gs)
+             end,
+    fun(Ln, What) ->
+            case maps:find(Ln, ByLine) of
+                error -> none;
+                {ok, {_, {Env, Last, _, _}}} when element(1, What) =:= contact ->
+                    candyspeak_eval:truth(element(2, What), Last, Env);
+                {ok, {R, C}} when What =:= row ->
+                    case Active(R, C) of true -> on; false -> off end;
+                {ok, {R = #{guard := Gd}, C = {Env, Last, Fired, _}}} when What =:= coil ->
+                    Holds = Active(R, C) andalso
+                        ((Gd =:= undefined) orelse
+                         (candyspeak_eval:truth(Gd, Last, Env) =:= true)),
+                    On = case R of
+                             #{coil := Tgt} -> candyspeak_eval:truth(Tgt, Last, Env) =:= true;
+                             _ when Fired =:= look -> Holds;
+                             #{file := F, line := L} -> lists:member({F, L}, Fired)
+                         end,
+                    case {On, Holds} of
+                        {true, true} -> both;
+                        {true, false} -> fired;
+                        {false, true} -> next;
+                        {false, false} -> none
+                    end;
+                {ok, _} -> none
+            end
+    end.
+
 %% The classes of the rungs' pieces go to the picture, which is drawn again
 %% when one of them changed; the rest to the renderer's own pieces.
 draw(V = #{ladder := none}, Cs) -> {V, Cs};
 draw(V = #{mode := hide}, Cs) -> {V, Cs};
+draw(V = #{mode := edit}, Cs) -> {V, Cs};
 draw(V = #{ladder := L, redraw := Re, colours := Cols}, Cs) ->
     {L1, Rest, Changed} = csp_ladder:set(L, Cs),
     (Changed orelse Re) andalso vui(V, draw, [csp_ladder:ops(L1, Cols)]),

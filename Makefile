@@ -87,7 +87,7 @@ test-wx: all
 	  s=$$?; grep -v 'Gtk-WARNING' test/wx.out | grep -v '^$$'; [ $$s = 0 ] || exit $$s
 	$(ERLC) -o test/ebin test/caned_wx_test.erl
 	@printf '#variable x\n#variable y\n#variable z\n#digital R1 out 13\n#digital R2 out 14\n\nR1 = x+1<y && x>15\ny = 2 ? x > 3\nR2 = _\nR1 = 0, R2 = 0\n' > test/ebin/caned_wx.csp
-	@xvfb-run -a -s "-screen 0 1000x640x24" \
+	@CANDID_SETTINGS=/dev/null xvfb-run -a -s "-screen 0 1000x640x24" \
 	  erl -noshell $(PA) -pa test/ebin -run caned_wx_test run test/ebin/caned_wx.csp \
 	  > test/caned_wx.out 2>&1; \
 	  s=$$?; grep -v 'Gtk-WARNING' test/caned_wx.out | grep -v '^$$'; exit $$s

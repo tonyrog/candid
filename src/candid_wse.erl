@@ -13,7 +13,7 @@
 -module(candid_wse).
 
 -export([start/2, code_view/0, chat_view/0, log_view/0, solve_view/0]).
--export([clear/2, message/3, chooser/3, panel/3, event/2, save_file/4,
+-export([clear/2, built/1, message/3, chooser/3, panel/3, event/2, save_file/4,
 	 tabs/3]).
 -export([status/3, trace_view/3, theme/2, view_buttons/4, pane_button/4, mode/3]).
 -export([paint/3, trace_clear/2, trace_column/3, plot/4]).
@@ -166,6 +166,10 @@ clear(Ws, Where) ->
     Root = wse:id(Where),
     wse:set(Ws, Root, "innerHTML", candid_wse:u("")),
     Root.
+
+%% The page is all there (candid_wx thaws what clear/2 froze); here it
+%% shows as it is made.
+built(_Ws) -> ok.
 
 message(Ws, Root, Str) ->
     text(Ws, Root, Str).

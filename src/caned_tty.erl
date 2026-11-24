@@ -64,6 +64,10 @@ sgr(coil)    -> "\e[0;36m";
 sgr(coil_cur) -> "\e[0;1;7;36m";
 sgr(coil_sel) -> "\e[0;44;97m";
 sgr(off)     -> "\e[0;2m";
+sgr(contact_t) -> "\e[0;30;42m";
+sgr(contact_u) -> "\e[0;2;4m";
+sgr(coil_on) -> "\e[0;30;43m";
+sgr(coil_nx) -> "\e[0;1;33m";
 sgr(comment) -> "\e[0;32m";
 sgr(frame)   -> "\e[0;2;32m";
 sgr(frame_cur) -> "\e[0;1;33m";
@@ -126,7 +130,8 @@ next_key() ->
 	C -> C
     end.
 
-%% ESC [ ... final: the arrows, Del; the rest ignored.
+%% ESC [ ... final: the arrows, Del, the pages, Home and End; the rest
+%% ignored.
 csi(Acc) ->
     case byte() of
 	B when B >= $@, B =< $~ ->
@@ -143,6 +148,15 @@ csi(Acc) ->
 		{[], $Z} -> shift_tab;
 		{"5", $~} -> page_up;
 		{"6", $~} -> page_down;
+		{[], $H} -> doc_start;
+		{"1", $~} -> doc_start;
+		{"7", $~} -> doc_start;
+		{[], $F} -> doc_end;
+		{"4", $~} -> doc_end;
+		{"8", $~} -> doc_end;
+		{"1;5", $H} -> doc_start;
+		{"1;5", $F} -> doc_end;
+		{"2", $~} -> $o;                         % Insert: a new rung after
 		_ -> none
 	    end;
 	B -> csi([B | Acc])
@@ -152,4 +166,6 @@ ss3($A) -> up;
 ss3($B) -> down;
 ss3($C) -> right;
 ss3($D) -> left;
+ss3($H) -> doc_start;
+ss3($F) -> doc_end;
 ss3(_) -> none.

@@ -20,6 +20,7 @@
 -define(LINE_H, 16).                      % px, a line of ?FONT
 
 -export([new/4, metrics/2, shown/3, rungs/6, draw/3, paint/4, answer/5]).
+-export([edit_status/3, see/4]).
 
 
 css(C) ->
@@ -176,6 +177,11 @@ rungs(Ws, #{box := Box, body := Body, tab_buttons := Btns, canvas := C,
     wse:cast(Ws, D, "call", [null, C, W, H, "[]"]).
 
 %% csp_ladder's ops, the whole picture.
+%% The editor (csp_code's edit) is the desktop's so far: its status line
+%% and keeping its cursor in sight are not drawn here yet.
+edit_status(_Ws, _Hd, _Text) -> ok.
+see(_Ws, _Hd, _Y0, _Y1) -> ok.
+
 draw(Ws, #{canvas := C, draw := D}, Ops) ->
     wse:cast(Ws, D, "call", [null, C, -1, -1, json(Ops)]).
 

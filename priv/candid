@@ -1,5 +1,6 @@
 #!/bin/sh
-
+D=$(dirname "$(readlink -f "$0")")
+P=`pwd`
 ERL=erl
 WSE=$HOME/erlang/wse
 UART=$HOME/erlang/uart
@@ -7,7 +8,25 @@ ELLM=$HOME/erlang/ellm
 RESTER=$HOME/erlang/rester
 VARP=$HOME/erlang/varp
 CANDID=$HOME/erlang/candid
+CANDYSPEAK=${CANDYSPEAK:-$HOME/work/candyspeak}
 
-PA="-pa $CANDID/ebin -pa $CANDYSPEAK/ebin -pa $WSE/ebin -pa $UART/ebin -pa $ELLM/ebin -pa $RESTER/ebin -pa $VARP/ebin"
+join()
+{
+    case $2 in
+        /*) p=$2 ;;
+        *)  p=$1/$2 ;;
+    esac
+    #// Squeeze repeated slashes and drop a trailing one (but keep "/")
+    printf '%s\n' "$p" | sed 's|//*|/|g; s|\(.\)/$|\1|'
+}
 
-$ERL -noshell -s can $PA -s candid_wx -config $CANDID/candid.config
+
+PA="-pa $CANDID/ebin -pa $WSE/ebin -pa $UART/ebin -pa $ELLM/ebin -pa $RESTER/ebin -pa $VARP/ebin"
+
+if [ -z "$1" ]; then
+   unset ARG
+else
+    ARG=`join $P $1`
+fi
+       
+exec $ERL -noshell -pa "$D/ebin" -pa "$CANDYSPEAK/ebin" $PA -s can -config $CANDID/candid.config -s candid_wx start $ARG

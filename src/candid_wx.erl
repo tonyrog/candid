@@ -27,8 +27,8 @@
 
 -export([start/0, start/1, start0/0, code_view/0, chat_view/0, log_view/0,
 	 solve_view/0]).
--export([clear/2, message/3, chooser/3, panel/3, event/2, open_file/2,
-	 save_file/4, tabs/3]).
+-export([clear/2, built/1, message/3, chooser/3, panel/3, event/2, open_file/2,
+	 save_file/4, tabs/3, connect/2]).
 -export([status/3, trace_view/3, theme/2, view_buttons/4, pane_button/4, mode/3]).
 -export([tc/3, is_light/1, theme_hook/3]).
 -export([rich/3, rich_add/4, rich_trim/3, rich_clear/2]).
@@ -65,6 +65,12 @@ start0() ->
     ok.
 
 start(File) ->
+    Filename = 
+	case File of
+	    default -> default;
+	    [File1] when is_atom(File1) -> [atom_to_list(File1)];
+	    [File1] when is_list(File1) -> [File1]
+	end,
     _ = application:load(candid),
     spawn(fun() ->
 		  Wx = wx:new(),
@@ -82,9 +88,9 @@ start(File) ->
 					   ?wxFONTWEIGHT_NORMAL)},
 		  bg(H, Dock, ?BG),
 		  wxFrame:show(F),
-		  case File of
+		  case Filename of
 		      default -> candid:run_ui({?MODULE, H}, F);
-		      _       -> candid:run_ui({?MODULE, H}, F, File)
+		      _       -> candid:run_ui({?MODULE, H}, F, Filename)
 		  end,
 		  wx:destroy(),
 		  %% The window WAS the program when there is no shell (the
@@ -106,7 +112,17 @@ solve_view() -> csp_solve_wx.
 
 %% The window emptied for a rebuild, and a fresh root to build in. The dock
 %% stays.
-clear(H = #{ids := Ids, dock := Dock}, Frame) ->
+%% Frozen from here until built/1: what is made is not drawn, piece by
+%% piece as it comes -- the page shows when it is all there.
+clear(H, Frame) ->
+    wxWindow:isFrozen(Frame) orelse wxWindow:freeze(Frame),
+    wx:batch(fun() -> clear1(H, Frame) end).
+
+built(#{frame := Frame}) ->
+    wxWindow:isFrozen(Frame) andalso wxWindow:thaw(Frame),
+    ok.
+
+clear1(H = #{ids := Ids, dock := Dock}, Frame) ->
     Keep = [E || E = {K, _, _} <- ets:tab2list(Ids), outlives(K, Dock)],
     ets:delete_all_objects(Ids),
     ets:insert(Ids, Keep),
@@ -183,8 +199,9 @@ message(H, Root, Str) ->
 %% The bar: the chooser, the target, run/pause/step, the tick, the views and
 %% the chat. Back: the chooser's event (any term; the bar's events say what
 %% they are) and the bar's buttons, as candid_wse gives them.
-chooser(H, Root, Spec = #{target := Target,
-			  period := Now, periods := Periods, views := Views,
+chooser(H, Root, Spec) -> wx:batch(fun() -> chooser1(H, Root, Spec) end).
+
+chooser1(H, Root, Spec = #{period := Now, periods := Periods, views := Views,
 			  chat := Chat}) ->
     %% The tabs, then two rows: what runs and how, then what is shown.
     Bar = wxBoxSizer:new(?wxVERTICAL),
@@ -196,9 +213,6 @@ chooser(H, Root, Spec = #{target := Target,
     wxSizer:add(Bar, Row2, []),
     Pid = self(),
     in_scope(H, tabs, fun() -> tabs(H, Root, Row0, maps:get(tabs, Spec, []), Pid) end),
-    In = fun(Row) -> fun(W) -> wxSizer:add(Row, W, [{flag, ?wxALL bor
-						     ?wxALIGN_CENTER_VERTICAL},
-						    {border, 3}]), W end end,
     %% The buttons that go together in a frame of their own, named on it:
     %% run, and each view. The buttons side by side, no gap.
     Group = fun(Row, Title) ->
@@ -218,18 +232,8 @@ chooser(H, Root, Spec = #{target := Target,
     Button(File, "new", "new"),
     Button(File, "save", "save"),
     Button(File, "save as\x{2026}", "saveas"),
-    Add = In(Row1),
-    Tgt = Add(wxTextCtrl:new(Root, ?wxID_ANY,
-			     [{value, Target}, {size, {260, -1}},
-			      {style, ?wxTE_PROCESS_ENTER}])),
-    bg(H, Tgt, {34, 34, 34}),
-    fg(H, Tgt, ?INK),
-    wxWindow:setFont(Tgt, font(H)),
-    wxWindow:setToolTip(Tgt, "local, or a can interface: a csp of our own on "
-			"that bus\nhost:port or /dev/tty...[@baud]: a node's "
-			"console\nrom | eeprom: without or with the EEPROM patch\n"
-			"image=SLOT: read a node's program from that flash slot"),
-    wxTextCtrl:connect(Tgt, command_text_enter, [{userData, {bar_text, "target="}}]),
+    %% Where it runs: a dialog (connect/2), the tab says where it is.
+    Button(File, "connect\x{2026}", "connect"),
     Run = {RBox, RIn} = Group(Row1, "run"),
     RunB = Button(Run, "go", "mode=run"),
     PauseB = Button(Run, "pause", "mode=step"),
@@ -304,6 +308,70 @@ open_file(#{frame := F}, Dir) ->
     R.
 
 %% The same for saving, Name offered: {ok, Path} or cancel.
+%% Where to run, asked: what there is to connect to, a line each -- our own
+%% csp, the serial ports and the boards behind them, the TCP addresses used
+%% last, the CAN interfaces -- and under them the target as csp_cmd reads it,
+%% filled in by a choice and written further by hand (@baud, to= from=, rom,
+%% image=, an address not in the list). A double click connects. Spec:
+%% #{choices => fun() -> [{Label, Target}] end, current => Target}.
+%% {ok, Target} | cancel.
+connect(#{frame := F} = H, #{choices := Choices, current := Cur}) ->
+    D = wxDialog:new(F, ?wxID_ANY, "connect", [{size, {720, 460}},
+                                               {style, ?wxDEFAULT_DIALOG_STYLE bor
+                                                    ?wxRESIZE_BORDER}]),
+    S = wxBoxSizer:new(?wxVERTICAL),
+    Mono = font(H),
+    L = wxListBox:new(D, ?wxID_ANY, [{style, ?wxLB_SINGLE}]),
+    wxWindow:setFont(L, Mono),
+    T = wxTextCtrl:new(D, ?wxID_ANY, [{value, Cur}, {style, ?wxTE_PROCESS_ENTER}]),
+    wxWindow:setFont(T, Mono),
+    Help = wxStaticText:new(D, ?wxID_ANY,
+                            "local or a CAN interface: a csp of our own on that bus;  "
+                            "/dev/tty...[@baud] or host:port: a node's console\n"
+                            "after it: rom | eeprom (the patch or not), image=SLOT, "
+                            "and on CAN to=ID from=ID for a node on the bus"),
+    Ets = ets:new(connect, [public]),
+    Fill = fun() ->
+                   Cs = Choices(),
+                   ets:insert(Ets, {targets, [Tg || {_, Tg} <- Cs]}),
+                   wxListBox:set(L, [Lb || {Lb, _} <- Cs])
+           end,
+    Fill(),
+    Pick = fun() ->
+                   [{_, Ts}] = ets:lookup(Ets, targets),
+                   case wxListBox:getSelection(L) of
+                       I when I >= 0, I < length(Ts) -> wxTextCtrl:setValue(T, lists:nth(I + 1, Ts));
+                       _ -> ok
+                   end
+           end,
+    wxListBox:connect(L, command_listbox_selected, [{callback, fun(_, _) -> Pick() end}]),
+    wxListBox:connect(L, command_listbox_doubleclicked,
+                      [{callback, fun(_, _) -> Pick(), wxDialog:endModal(D, ?wxID_OK) end}]),
+    wxTextCtrl:connect(T, command_text_enter,
+                       [{callback, fun(_, _) -> wxDialog:endModal(D, ?wxID_OK) end}]),
+    Btns = wxBoxSizer:new(?wxHORIZONTAL),
+    Rescan = wxButton:new(D, ?wxID_ANY, [{label, "rescan"}]),
+    wxButton:connect(Rescan, command_button_clicked, [{callback, fun(_, _) -> Fill() end}]),
+    wxSizer:add(Btns, Rescan, []),
+    wxSizer:addStretchSpacer(Btns),
+    wxSizer:add(Btns, wxButton:new(D, ?wxID_CANCEL, [{label, "cancel"}]), [{flag, ?wxRIGHT}, {border, 6}]),
+    wxSizer:add(Btns, wxButton:new(D, ?wxID_OK, [{label, "connect"}]), []),
+    wxSizer:add(S, L, [{proportion, 1}, {flag, ?wxEXPAND bor ?wxALL}, {border, 8}]),
+    wxSizer:add(S, T, [{flag, ?wxEXPAND bor ?wxLEFT bor ?wxRIGHT}, {border, 8}]),
+    wxSizer:add(S, Help, [{flag, ?wxALL}, {border, 8}]),
+    wxSizer:add(S, Btns, [{flag, ?wxEXPAND bor ?wxALL}, {border, 8}]),
+    wxWindow:setSizer(D, S),
+    R = case wxDialog:showModal(D) of
+            ?wxID_OK -> case string:trim(wxTextCtrl:getValue(T)) of
+                            "" -> cancel;
+                            Tg -> {ok, Tg}
+                        end;
+            _ -> cancel
+        end,
+    wxDialog:destroy(D),
+    ets:delete(Ets),
+    R.
+
 save_file(#{frame := F}, _Bar, Dir, Name) ->
     D = wxFileDialog:new(F, [{message, "save the program as"},
 			     {defaultDir, Dir}, {defaultFile, Name},
@@ -324,7 +392,9 @@ index_of(_, [], _) -> 0.
 %% The page under the bar, as candid_wse:panel/3 makes it: the top frame
 %% (State, clock, link, and room for the code view's goal and answer), the
 %% devices left and the code view right, the trace at the bottom.
-panel(H, Root, #{rows := Rows, pixels := Pixels, plots := Plots0,
+panel(H, Root, Spec) -> wx:batch(fun() -> panel1(H, Root, Spec) end).
+
+panel1(H, Root, #{rows := Rows, pixels := Pixels, plots := Plots0,
 		 traces := Traces}) ->
     RS = wxWindow:getSizer(Root),
     Top = wxPanel:new(Root),
@@ -418,7 +488,9 @@ trace_view(_H, TraceBox, Show) ->
 
 %% DARK is the panel as drawn; LIGHT the page and its frames pale. A widget's
 %% own colours -- a lamp, a contact -- stay: they say something.
-theme(H = #{ids := Ids}, T) ->
+theme(H, T) -> wx:batch(fun() -> theme1(H, T) end).
+
+theme1(H = #{ids := Ids}, T) ->
     ets:insert(Ids, {theme, T, perm}),
     [wx_colour(W, Which, tc(H, C, Which))
      || {{colour, W, Which}, C, _} <- ets:tab2list(Ids)],

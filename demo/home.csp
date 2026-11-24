@@ -47,6 +47,8 @@
 #annotate panel HallMotion   kind=toggle  // motion is a pulse, not a switch
 #annotate panel BathMotion   kind=push
 
+#annotate varp inputs "NightButton ArmButton : low, down <= 1, events <= 1"
+
 #annotate panel Siren   kind=action color=red     // it sounds; it does not indicate
 #annotate panel BathFan kind=action color=blue
 #annotate panel Heater  kind=action color=orange
