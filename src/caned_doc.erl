@@ -47,7 +47,7 @@
 -export([nlines/1, line/2, dirty/1]).
 -export([new_rung/3, delete_line/2, last_line/1]).
 -export([coil_text/2, set_coil/3, set_stmt/3, set_decl/3]).
--export([numbers/1, off/2, set_off/3, added/2, move_line/3, insert_stmt/3]).
+-export([numbers/1, off/2, set_off/3, added/2, move_line/3, insert_stmt/3, insert_line/3]).
 -export([saved_line/2, saved/1]).
 -export([comments/1, comment_at/2, set_comment/3, new_comment/3, delete_lines/3,
          trailing/2, wrap/3, wrap_text/3, text_width/2]).
@@ -173,9 +173,19 @@ line_of(S) when is_integer(element(2, S)) -> element(2, S);
 line_of({immediate, E}) -> line_of(E);
 line_of(S) -> line_of(element(2, S)).
 
-stmts(#{stmts := Ss}) -> [S || {_, S} <- lists:keysort(1, maps:to_list(Ss))].
+%% The statements, each with the line it is on now: a line put in or moved
+%% moves the map's keys (shift/3, move_line/3), not the line the parser
+%% wrote into a statement -- 1, for one parsed by itself.
+stmts(#{stmts := Ss}) -> [on(L, S) || {L, S} <- lists:keysort(1, maps:to_list(Ss))].
 
-stmt(#{stmts := Ss}, Ln) -> maps:get(Ln, Ss, none).
+stmt(#{stmts := Ss}, Ln) ->
+    case maps:find(Ln, Ss) of
+	{ok, S} -> on(Ln, S);
+	error -> none
+    end.
+
+on(L, S) when is_integer(element(2, S)) -> setelement(2, S, L);
+on(_, S) -> S.
 
 %%% ----------------------------------------------------------------- rungs
 
@@ -302,19 +312,31 @@ new_rung(D = #{lines := Ls}, At, Coil) ->
 
 %% A whole rule from its text as line At, on the indentation of the line
 %% before it. {ok, Doc} | {error, Message}.
-insert_stmt(D = #{lines := Ls}, At, Text) ->
+insert_stmt(D, At, Text) ->
     case parse(Text ++ "\n") of
-	{ok, [R = {rule, _, _, _}]} ->
-	    Prev = case At > 1 of true -> lists:nth(At - 1, Ls); false -> "" end,
-	    Indent = lists:takewhile(fun(C) -> C =:= $\s orelse C =:= $\t end, Prev),
-	    D2 = shift(D, At, 1),
-	    #{lines := Ls2, stmts := Ss, dirty := Dy} = D2,
-	    {A, B} = lists:split(At - 1, Ls2),
-	    {ok, mark_added(D2#{lines := A ++ [Indent | B], stmts := Ss#{At => R},
-			   dirty := Dy#{At => true}}, At)};
+	{ok, [R = {rule, _, _, _}]} -> {ok, insert(D, At, R)};
 	{ok, _} -> {error, "not one rule: " ++ Text};
 	{error, {_, M}} -> {error, M}
     end.
+
+%% Any one statement -- a declaration, a block's head, a rule -- as a new
+%% line At.
+insert_line(D, At, Text) ->
+    case parse(Text ++ "\n") of
+	{ok, [St]} -> {ok, insert(D, At, St)};
+	{ok, _} -> {error, "not one statement: " ++ Text};
+	{error, {_, M}} -> {error, M}
+    end.
+
+%% St on a new line At, indented as the line above it; printed when saved.
+insert(D = #{lines := Ls}, At, St) ->
+    Prev = case At > 1 of true -> lists:nth(At - 1, Ls); false -> "" end,
+    Indent = lists:takewhile(fun(C) -> C =:= $\s orelse C =:= $\t end, Prev),
+    D2 = shift(D, At, 1),
+    #{lines := Ls2, stmts := Ss, dirty := Dy} = D2,
+    {A, B} = lists:split(At - 1, Ls2),
+    mark_added(D2#{lines := A ++ [Indent | B], stmts := Ss#{At => St},
+		   dirty := Dy#{At => true}}, At).
 
 mark_added(D = #{added := A, dirty := Dy}, Ln) ->
     D#{added := A#{Ln => true}, dirty := Dy#{'$lines' => true}}.

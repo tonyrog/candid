@@ -11,6 +11,7 @@ run([File]) ->
     {ok, P} = caned_wx:start(File),
     timer:sleep(1200),
     shot("1-start"),
+    key(P, ?WXK_SPACE, $\s),                         % from the top to the first rung
     key(P, ?WXK_RIGHT, 0), key(P, $|, $|),
     [key(P, C, C) || C <- "z==17"],
     key(P, ?WXK_RETURN, 0),
@@ -46,7 +47,7 @@ run([File]) ->
     {ok, B} = file:read_file(File),
     Want = ["R1 = x + 1 < y && (x > 15 || z == 17)", "y = 2 ? _",
 	    "R2 = x + 1 < y && (x > 15 || z == 17)", "R1 = 0, R2 = 0"],
-    Got = lists:nthtail(6, string:split(string:trim(binary_to_list(B)), "\n", all)),
+    Got = rules(lists:nthtail(6, string:split(string:trim(binary_to_list(B)), "\n", all))),
     expect("^C ^V ^X ^S: copied onto the hole, cut, saved", Got =:= Want, Got),
     case os:find_executable("xclip") of
 	false -> ok;
@@ -94,7 +95,7 @@ run([File]) ->
 	    timer:sleep(400),
 	    shot("7-handles"),
 	    {ok, B4} = file:read_file(File),
-	    Tail = lists:nthtail(6, string:split(string:trim(binary_to_list(B4)), "\n", all)),
+	    Tail = rules(lists:nthtail(6, string:split(string:trim(binary_to_list(B4)), "\n", all))),
 	    WantT = ["R1 = 0, R2 = 0", "R1 = x + 1 < y && (x > 15 || z == 17)",
 		     "R2 = x + 1 < y && (x > 15 || z == 17)", "y = 2 ? (a || q1) && b",
 		     "#disable 2"],
@@ -103,6 +104,10 @@ run([File]) ->
     end,
     exit(P, kill),
     halt(0).
+
+%% The file's lines but for the declarations at its end (a b q1: the names
+%% the test writes in, declared, so the editor does not declare them).
+rules(Ls) -> [L || L <- Ls, L =/= "", not lists:prefix("#variable ", L)].
 
 key(P, C, U) ->
     P ! #wx{event = #wxKey{type = char, keyCode = C, uniChar = U}},

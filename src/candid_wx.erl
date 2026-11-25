@@ -123,9 +123,10 @@ built(#{frame := Frame}) ->
     ok.
 
 clear1(H = #{ids := Ids, dock := Dock}, Frame) ->
-    Keep = [E || E = {K, _, _} <- ets:tab2list(Ids), outlives(K, Dock)],
-    ets:delete_all_objects(Ids),
-    ets:insert(Ids, Keep),
+    %% Only what was there and goes: the dock's panes are made by processes
+    %% of their own, and one registering a button while this runs keeps it
+    %% (it was lost between a read of all and a delete of all).
+    [ets:delete(Ids, K) || {K, _, _} <- ets:tab2list(Ids), not outlives(K, Dock)],
     Fs = wxBoxSizer:new(?wxVERTICAL),
     wxWindow:setSizer(Frame, Fs),
     [wxWindow:destroy(W) || W <- wxWindow:getChildren(Frame),
@@ -424,7 +425,8 @@ panel1(H, Root, #{rows := Rows, pixels := Pixels, plots := Plots0,
     Head = wxPanel:new(Root),
     wxWindow:setSizer(Head, wxBoxSizer:new(?wxHORIZONTAL)),
     wxWindow:hide(Head),
-    wxSizer:add(RCol, Head, [{flag, ?wxBOTTOM}, {border, 6}]),
+    %% as wide as the column: the tabs wrap in it (csp_code_wx)
+    wxSizer:add(RCol, Head, [{flag, ?wxBOTTOM bor ?wxEXPAND}, {border, 6}]),
     wxSizer:add(RCol, Right, [{proportion, 1}, {flag, ?wxEXPAND}]),
     wxSizer:add(Main, RCol, [{proportion, 1}, {flag, ?wxEXPAND bor ?wxLEFT},
 			     {border, 24}]),

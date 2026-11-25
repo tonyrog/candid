@@ -142,6 +142,10 @@ run() ->
 	   [R || R = {rect, _, _, _, _, _, _, {51, 255, 51}, _} <- Ops()] =/= [], nomatch),
     P ! {candid_wx, {widget, "B1=0"}},
     timer:sleep(?SETTLE),
+    %% Written in the editor, saved by the bar's save as: the editor's text
+    %% is what is written, not the file as it was read.
+    [P ! {candid_wx, {code, {key, K}}} || K <- [$/ | "saved by the bar"] ++ [enter]],
+    timer:sleep(?SETTLE),
     %% Save as redraws the file tabs. The old ones' entries must go with
     %% them: New walks every window the id table knows, and a gone one is a
     %% segfault (solver open, save as, new did it).
@@ -151,6 +155,9 @@ run() ->
     P ! {candid_wx, {bar, "saveas=" ++ Saved}},
     timer:sleep(?SETTLE),
     B0 = Btns(),
+    {ok, SavedText} = file:read_file(Saved),
+    expect("save as writes what the editor has written",
+	   string:find(SavedText, <<"saved by the bar">>) =/= nomatch, SavedText),
     P ! {candid_wx, {bar, "saveas=" ++ Saved}},
     timer:sleep(?SETTLE),
     expect("save as redraws the tabs and leaves no dead ones behind",
@@ -159,6 +166,9 @@ run() ->
     timer:sleep(?SETTLE),
     expect("new after save as, the solver open: no crash", is_process_alive(P),
 	   nomatch),
+    expect("new starts from a program: its comment and its rung in the editor",
+	   [T || T = {text, _, _, Tx, _, _} <- Ops(), string:find(Tx, "A new program") =/= nomatch]
+	   =/= [], [Tx || {text, _, _, Tx, _, _} <- Ops()]),
     %% wx torn down before the emulator: a halt with the window still up
     %% segfaults on the way out, after every check has passed.
     exit(P, kill),

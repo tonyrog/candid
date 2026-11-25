@@ -40,7 +40,7 @@
 
 -module(candid_file).
 
--export([new/0, load/1, from_node/3, save/2, write/2]).
+-export([new/0, starter/0, set_text/2, load/1, from_node/3, save/2, write/2]).
 -export([edit/2, add/2, disable/2, enable/2]).
 -export([text/1, source/1, numbers/1, rules/1, label/1, live/1,
 	 same_image/2, image_id/1]).
@@ -54,6 +54,19 @@
 new() ->
     #{id => erlang:unique_integer([positive]), name => none, origin => new,
       mode => edit, lines => [], image => none, dirty => false}.
+
+%% A new program to start from: a comment and a rule that is all holes --
+%% the editor has a rung to stand on and write in.
+starter() ->
+    (new())#{lines => lines("// A new program.\n"
+                            "_ ? _\n")}.
+
+%% F's lines as Text (characters) has them -- what the editor has written in it, not
+%% saved yet; its `#disable' lines the marks, as a file loaded.
+set_text(F, Text) ->
+    %% in bytes, as load/1 reads a file: the editor's text is characters
+    {Ls, Offs} = marks(lines(binary_to_list(unicode:characters_to_binary(Text)))),
+    mark_off(F#{lines := Ls, dirty := true}, Offs).
 
 %% A program on disk, named by where it is. Its `#disable' lines become the
 %% marks on the lines they name.

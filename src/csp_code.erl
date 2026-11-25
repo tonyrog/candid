@@ -63,7 +63,7 @@
 
 -module(csp_code).
 
--export([new/4, new/5, source/2, disabled/2, refresh/2, fired/2, infer/5, tick/1, control/2, trace/2, actions/1]).
+-export([new/4, new/5, edit_text/1, source/2, disabled/2, refresh/2, fired/2, infer/5, tick/1, control/2, trace/2, actions/1]).
 -export([look/1]).
 -export([assign/1, bind/1, chain/2, cols/1, tr_id/2, col_name/1,
 	 signed/3]).                                     % for the renderers
@@ -490,9 +490,11 @@ edit_draw(V = #{ed := Ed, metrics := M0, tab := I, tabs := Tabs}) ->
 	       _ -> Op
 	   end || Op <- Ops0],
     Size = {round(maps:get(cw, M) * ?EDIT_COLS), round(maps:get(ch, M) * length(Rows1))},
-    maps:get(esize, V, none) =:= Size orelse
-	vui(V, rungs, [edit, I, lists:nth(I + 1, Tabs), Size]),
-    maps:get(eops, V, none) =:= Ops orelse vui(V, draw, [Ops]),
+    %% A canvas made again (rungs) is an empty one: the ops go to it even
+    %% when they are the ones drawn before -- d1's tab and d2's, one module.
+    Fresh = maps:get(esize, V, none) =/= Size,
+    Fresh andalso vui(V, rungs, [edit, I, lists:nth(I + 1, Tabs), Size]),
+    (Fresh orelse maps:get(eops, V, none) =/= Ops) andalso vui(V, draw, [Ops]),
     %% The cursor moved to another node: that node in sight.
     Node = caned_ops:node_rows(Rows1, maps:get(ch, M)),
     case {Node, maps:get(enode, V, none)} of
@@ -554,6 +556,16 @@ edit_key1(V = #{ed := Ed, eclip := Clip}, K0) ->
 
 clip(V, S = #{clip := none}) -> V#{ed := S};
 clip(V, S = #{clip := C}) -> V#{ed := S#{clip := none}, eclip := C}.
+
+%% What the editor has written and not saved, a file's (access edit):
+%% {Text, the line the cursor will be on in it} | none. The panel's save
+%% and save as take it (candid's save_edited).
+edit_text(#{mode := edit, access := edit, ed := #{doc := D, ln := Ln}}) ->
+    case caned_doc:dirty(D) of
+        true -> {caned_doc:text(D), caned_doc:saved_line(D, max(1, Ln))};
+        false -> none
+    end;
+edit_text(_) -> none.
 
 %% Saved: a file's text to the panel to write; on a node, what was added and
 %% switched since the listing, as lines to send.
@@ -883,15 +895,11 @@ scoped(V = #{ed := Ed = #{doc := _}, tabs := Tabs, tab := I}) ->
                                     end)};
 scoped(V) -> V.
 
-%% In the editor, a tab chosen puts the cursor on its first rung: an
-%% object's, its module's body -- what is lit for it.
-tab_cursor(V = #{ed := Ed = #{doc := _}, tabs := Tabs, tab := I, file := File}) ->
-    Base = filename:basename(File),
-    case [Ln || #{line := Ln, file := F} <- maps:get(rules, lists:nth(I + 1, Tabs)),
-                F =:= Base orelse F =:= ""] of
-        [Ln | _] -> V#{ed := at_line(Ed, Ln)};
-        [] -> V
-    end;
+%% In the editor, a tab chosen starts at its top, as the file does: the
+%% cursor on its first line (Space goes on to the first rung).
+tab_cursor(V = #{ed := Ed = #{doc := _}}) ->
+    {ok, Ed1} = caned_ui:key(doc_start, Ed),
+    V#{ed := Ed1};
 tab_cursor(V) -> V.
 
 %% The editor's cursor put on line Ln's node, or the nearest before it.
@@ -951,7 +959,14 @@ chain(_Op, X)            -> [X].
 %% cast -- a setStyle per contact would be a round trip each. The top frame's
 %% values and State are painted with the view hidden too.
 paint(V = #{mode := edit, last := Last}) ->
-    edit_draw(paint1(judge(V, Last)));
+    V1 = paint1(judge(V, Last)),
+    V2 = edit_draw(V1),
+    %% the head made again (a tab chosen): what it shows sent to it, all of
+    %% it -- what went before went to the head it replaced
+    case maps:get(esize, V1, none) =:= maps:get(esize, V2) of
+        true -> V2;
+        false -> paint1(V2#{shown := #{}})
+    end;
 paint(V = #{last := Last}) ->
     paint1(judge(V, Last)).
 

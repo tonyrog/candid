@@ -37,7 +37,9 @@ new1(H, Where, Tabs, #{colours := Colours}) ->
     Col = wxBoxSizer:new(?wxVERTICAL),
     wxWindow:setSizer(TabsP, Col),
     Bar1 = wxBoxSizer:new(?wxHORIZONTAL),
-    Bar = wxBoxSizer:new(?wxHORIZONTAL),
+    %% the tabs in as many rows as the view's width takes (bridgezone has
+    %% 33): rows of their own, made again when the width changes (wrap/4)
+    Bar = wxBoxSizer:new(?wxVERTICAL),
     wxSizer:add(Col, Bar1, []),
     Pid = self(),
     Btns = case Tabs of
@@ -52,10 +54,15 @@ new1(H, Where, Tabs, #{colours := Colours}) ->
 						    #{click => fun() -> Pid ! {candid_wx, {code, Tab}}
 							       end})
 			      end),
-			wxSizer:add(Bar, B, []),
 			B
 		    end || {I, #{name := Name}} <- enum(Tabs)]
 	   end,
+    wrap(H, TabsP, Bar, Btns),
+    Btns =:= [] orelse
+	wxWindow:connect(TabsP, size, [{callback, fun(_E, O) ->
+							  wrap(H, TabsP, Bar, Btns),
+							  wxEvent:skip(O)
+						  end}]),
     Body = wxPanel:new(Box),
     wxWindow:setSizer(Body, wxBoxSizer:new(?wxVERTICAL)),
     wxSizer:add(BoxS, Body, []),
@@ -68,7 +75,7 @@ new1(H, Where, Tabs, #{colours := Colours}) ->
     EdS = candid_wx:in_scope(H, code_head,
 			     fun() -> candid_wx:text(H, TabsP, "", {200, 200, 200}) end),
     wxSizer:add(Bar1, EdS, [{flag, ?wxALIGN_CENTER_VERTICAL}]),
-    Btns =:= [] orelse wxSizer:add(Col, Bar, [{flag, ?wxTOP}, {border, 4}]),
+    Btns =:= [] orelse wxSizer:add(Col, Bar, [{flag, ?wxTOP bor ?wxEXPAND}, {border, 4}]),
     wxSizer:add(BoxS, Canvas, []),
     wxSizer:add(wxWindow:getSizer(Right), Box, [{proportion, 1}, {flag, ?wxEXPAND}]),
     wxWindow:hide(Box),
@@ -342,6 +349,33 @@ canvas(H, Parent, Right) ->
 			 (_E, O) -> wxEvent:skip(O)
 		      end}]),
     C.
+
+%% The tab buttons in rows as wide as TabsP is; again only when its width
+%% changed (a row more or less changes its height, and a size event
+%% follows).
+wrap(_H, _TabsP, _Bar, []) -> ok;
+wrap(H, TabsP, Bar, Btns) ->
+    {W, _} = wxWindow:getClientSize(TabsP),
+    case candid_wx:lookup(H, code_tabs_w) of
+        {ok, W} -> ok;
+        _ ->
+            candid_wx:register(H, code_tabs_w, W, perm),
+            wxSizer:clear(Bar, [{delete_windows, false}]),
+            Max = case W of 0 -> 1 bsl 30; _ -> W end,
+            Rows = lists:foldl(fun(B, [{Used, Row} | Rs]) ->
+                                       {Bw, _} = wxWindow:getBestSize(B),
+                                       case Row =/= [] andalso Used + Bw > Max of
+                                           true -> [{Bw, [B]}, {Used, Row} | Rs];
+                                           false -> [{Used + Bw, Row ++ [B]} | Rs]
+                                       end
+                               end, [{0, []}], Btns),
+            [begin
+                 RowS = wxBoxSizer:new(?wxHORIZONTAL),
+                 [wxSizer:add(RowS, B, []) || B <- Row],
+                 wxSizer:add(Bar, RowS, [])
+             end || {_, Row} <- lists:reverse(Rows)],
+            candid_wx:relayout_up(TabsP)
+    end.
 
 %% A page: the rows of the editor (6 px over the font's) the view shows.
 page(H, Right, Line, Pid) ->

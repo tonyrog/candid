@@ -19,6 +19,9 @@
 %%%   x or Del   the contact out                u     undo, ^R redo
 %%%   o O        a new rung after, before       D     the rung out
 %%%   -          the rule off (#disable), on    ⌥↑ ⌥↓ the rule a line up, down
+%%%   Space      the next rung (on an object's line: open, close it)
+%%%   #          a new line after: a declaration, #module ..., written in
+%%%              the status line (not in patch mode)
 %%%   s          save                           q     quit (Q: unsaved too)
 %%%
 %%% The number left of a rung is its RULE number, csp's -- what #disable
@@ -91,7 +94,7 @@
 -export([height/1, all/1, light/2, set_scope/2]).
 
 -define(HELP, "←→ contact  ↑↓ rung  ⏎ write  & series  | parallel  "
-	"! not  x out  o new  / comment  D out  - off/on  ⌥↑↓ move  u undo  s save  q quit").
+	"! not  x out  o new  # line  / comment  D out  - off/on  ⌥↑↓ move  u undo  s save  q quit").
 -define(PATCH_ONLY, "patch: only rules added at the end, and rules off and on").
 
 open(File) -> open(File, edit).
@@ -108,7 +111,7 @@ new(D, File) -> new(D, File, edit).
 new(D, File, Access) ->
     S = #{doc => D, file => File, ln => 0, cur => [], mode => normal, access => Access,
 	  undo => [], redo => [], msg => "", top => 1, sel => none, clip => none},
-    case rungs(D) ++ stops(D) of                    % on the first rung
+    case stops(D) of                    % at the top: the first line that is a stop
 	[L | _] -> S#{ln := L, cur := cur_for(D, L)};
 	[] -> S
     end.
@@ -160,13 +163,19 @@ set_scope(S, Scope) ->
 %% `page', the stop nearest that far), doc_start | doc_end (the first, the
 %% last stop shown), rung_start | rung_end (the first contact, the coil; a
 %% card's first and last field).
-go(_K, S = #{ln := 0}) -> S;
+go(next_rung, S = #{doc := D, ln := Ln}) ->
+    {F, L} = lines(S),
+    case [X || X <- rungs(D), X > Ln, X >= F, X =< L] of
+        [X | _] -> S#{ln := X, cur := first_leaf(D, X)};
+        [] -> S
+    end;
 go(K, S = #{doc := D, ln := Ln}) when K =:= doc_start; K =:= doc_end ->
     case shown_stops(S) of
         [] -> S;
         Ns -> L1 = case K of doc_start -> hd(Ns); doc_end -> lists:last(Ns) end,
               case L1 of Ln -> S; _ -> S#{ln := L1, cur := cur_for(D, L1)} end
     end;
+go(_K, S = #{ln := 0}) -> S;
 go(K, S = #{doc := D, ln := Ln, cur := C}) when K =:= rung_start; K =:= rung_end ->
     case {C, K} of
         {comment, _} -> S;
@@ -229,6 +238,8 @@ key({msg, M}, S) -> {ok, S#{msg := M}};          % what the keys say: `C-x-'
 key(K, S = #{mode := {edit, Text}}) -> edit(K, Text, S);
 key(K, S = #{mode := {edit_coil, Text}}) -> edit_coil(K, Text, S);
 key(K, S = #{mode := {coil, Text, At}}) -> coil_key(K, Text, At, S);
+key(K, S = #{mode := {stmt, Text, At}}) -> stmt_key(K, Text, At, S);
+key(K, S = #{mode := {declare, N, Near}}) -> declare_key(K, N, Near, S);
 key(K, S = #{mode := {note, Text, At, Where}}) -> note(K, Text, At, Where, S);
 key(K, S = #{mode := {field, Key, Typed, Text, Sel}}) -> field(K, Key, Typed, Text, Sel, S);
 key(newline, S) -> key(enter, S);
@@ -243,6 +254,13 @@ key(K, S) -> key1(K, S).
 key1(K, S) when K =:= page_up; K =:= page_down; K =:= doc_start; K =:= doc_end;
                 K =:= rung_start; K =:= rung_end ->
     {ok, maps:without([anchor, free], go(K, S#{msg := "", sel := none}))};
+%% Space: an object's line opened or closed; anywhere else the next rung --
+%% from the top, where the editor starts, the first rule.
+key1($\s, S = #{doc := D, ln := Ln}) ->
+    case caned_doc:stmt(D, Ln) of
+        {object, _, _, _, _} -> toggle_open(S, Ln);
+        _ -> {ok, maps:without([anchor, free], go(next_rung, S#{msg := "", sel := none}))}
+    end;
 key1({click, Ln, open}, S) -> toggle_open(S, Ln);
 key1({click, Ln, check}, S) -> key1({dclick, Ln, handle}, S);
 %% A rung shown under an object: the module's own, where it is written.
@@ -282,6 +300,16 @@ key1($/, S = #{doc := D, ln := Ln, access := A}) ->
 	     _ -> element(1, span(S, D, Ln))
 	 end,
     {ok, S#{mode := {note, "", 0, {new, At}}, msg := "", sel := none}};
+%% A new line of any statement -- a declaration, #module, ... -- after the
+%% cursor's node, written in the status line. Not in patch mode: a node is
+%% only given rules.
+key1($#, S = #{access := patch}) -> {ok, S#{msg := ?PATCH_ONLY}};
+key1($#, S = #{doc := D, ln := Ln}) ->
+    At = case Ln of
+	     0 -> caned_doc:last_line(D);
+	     _ -> element(2, span(S, D, Ln)) + 1
+	 end,
+    {ok, S#{mode := {stmt, "#", At}, msg := "", sel := none}};
 key1({dclick, Ln, comment}, S) -> key1(enter, S#{ln := Ln, cur := comment, sel := none});
 key1(K, S = #{cur := comment}) -> comment_key(K, S);
 key1({dclick, Ln, {seg, I}}, S) -> key1(enter, S#{ln := Ln, cur := {seg, I}, sel := none});
@@ -378,7 +406,7 @@ paste(Text, S = #{doc := D, ln := Ln}) ->
 			 end, true}
 		end,
     case R of
-	{ok, D1} -> {ok, fix_cur(doc_change(D1, S#{sel := none}))};
+	{ok, D1} -> {ok, declare_new(fix_cur(doc_change(D1, S#{sel := none})))};
 	{error, M} ->
 	    case Rule andalso is_rule(Text, S) of
 		true -> paste_rule(Text, Ln + 1, S);
@@ -392,7 +420,7 @@ paste_rule(Text, At, S = #{doc := D}) ->
 	    S1 = doc_change(D1, S#{sel := none}),
 	    {ok, case caned_doc:rung(D1, At) of
 		     none -> S1#{msg := "pasted as rule " ++ no(D1, At)};
-		     _ -> S1#{ln := At, cur := first_leaf(D1, At)}
+		     _ -> declare_new(S1#{ln := At, cur := first_leaf(D1, At)})
 		 end};
 	{error, M} -> {ok, S#{msg := "not pasted: " ++ M}}
     end.
@@ -576,7 +604,6 @@ card_key(K, S = #{doc := D, ln := Ln, cur := {seg, I}}) when K =:= enter; K =:= 
         {name, _, _} -> {ok, S#{msg := "the name is renamed with its uses -- not yet"}};
         {Key, _, T} -> {ok, S#{mode := {field, Key, "", T, 0}, msg := ""}}
     end;
-card_key($\s, S = #{ln := Ln}) -> toggle_open(S, Ln);
 card_key($+, S = #{doc := D, ln := Ln}) ->
     case caned_menu:add(caned_doc:stmt(D, Ln), D) of
         [] -> {ok, S#{msg := "nothing more goes on this one"}};
@@ -845,6 +872,75 @@ coil_key(C, Text, At, S) when is_integer(C), C > $\s ->
     {ok, S#{mode := {coil, Text ++ [C], At}, msg := ""}};
 coil_key(_, _Text, _At, S) -> {ok, S}.
 
+%%% ------------------------------------------------------------- names
+%%%
+%%% A name the rung just written uses and nothing declares (caned_names) is
+%%% declared for it: `#variable N' where its scope's declarations end, its
+%%% type as the rung assigns it -- one change with the rung, one undo. One
+%%% that may be a declared name mistyped is asked about in the status line:
+%%% ⏎ declares it, Tab writes the declared one in its place, Esc leaves it.
+%%% Declared so, a name is the document's `auto' -- see removing.
+
+declare_new(S = #{access := patch}) -> S;
+declare_new(S = #{doc := D, ln := Ln}) ->
+    case caned_names:unknown(D, Ln) of
+        [] -> S;
+        [N | _] ->
+            case caned_names:near(D, N) of
+                [] -> declare_new(declare_one(S, N));
+                Near -> S#{mode := {declare, N, Near}}
+            end
+    end.
+
+declare_one(S = #{doc := D, ln := Ln}, N) ->
+    {ok, D1, At} = caned_names:declare(D, Ln, N, assigned_type(D, Ln, N)),
+    Ln1 = case At =< Ln of true -> Ln + 1; false -> Ln end,
+    S#{doc := D1#{auto => [N | maps:get(auto, D1, [])]}, ln := Ln1,
+       msg := "declared: " ++ string:trim(caned_doc:line(D1, At))}.
+
+%% What rung Ln gives N: a float, a string, a truth (a width of 1), or
+%% nothing to say (none).
+assigned_type(D, Ln, N) ->
+    {rule, _, As, _} = caned_doc:stmt(D, Ln),
+    case [V || {Op, _, {field, _, {'WORD', _, N1}}, V} <- As, N1 =:= N,
+               Op =:= '=' orelse Op =:= '<-'] of
+        [{'FLT', _, _} | _] -> float;
+        [{'STR', _, _} | _] -> string;
+        [{Op, _, _, _} | _] when Op =:= '&&'; Op =:= '||'; Op =:= '=='; Op =:= '!=';
+                                 Op =:= '<'; Op =:= '>'; Op =:= '<='; Op =:= '>=' -> bit;
+        [{'!', _, _} | _] -> bit;
+        _ -> none
+    end.
+
+declare_key(enter, N, _Near, S) -> {ok, declare_new(declare_one(S#{mode := normal}, N))};
+declare_key(tab, N, [K | _], S = #{doc := D, ln := Ln}) ->
+    case caned_names:rename(D, Ln, N, K) of
+        {ok, D1} -> {ok, declare_new(S#{doc := D1, mode := normal, msg := ""})};
+        {error, M} -> {ok, S#{msg := M}}
+    end;
+declare_key(K, N, Near, S) when K =:= down; K =:= shift_tab; K =:= up ->
+    Near1 = case K of
+                down -> tl(Near) ++ [hd(Near)];
+                _ -> [lists:last(Near) | lists:droplast(Near)]
+            end,
+    {ok, S#{mode := {declare, N, Near1}}};
+declare_key(esc, _N, _Near, S) -> {ok, S#{mode := normal, msg := ""}};
+declare_key(_, _N, _Near, S) -> {ok, S}.
+
+stmt_key(esc, _Text, _At, S) -> {ok, S#{mode := normal, msg := ""}};
+stmt_key(enter, Text, At, S = #{doc := D, undo := Us}) ->
+    case caned_doc:insert_line(D, At, string:trim(Text)) of
+	{ok, D1} ->
+	    {ok, S#{doc := D1, undo := [D | Us], redo := [], ln := At, cur := cur_for(D1, At),
+		    mode := normal, msg := ""}};
+	{error, M} -> {ok, S#{msg := M}}
+    end;
+stmt_key(backspace, "", _At, S) -> {ok, S};
+stmt_key(backspace, Text, At, S) -> {ok, S#{mode := {stmt, lists:droplast(Text), At}}};
+stmt_key(C, Text, At, S) when is_integer(C), C >= $\s ->
+    {ok, S#{mode := {stmt, Text ++ [C], At}, msg := ""}};
+stmt_key(_, _Text, _At, S) -> {ok, S}.
+
 index(T, P) -> index_in(caned_tree:leaves(T), P).
 
 index_in(L, X) -> index_in(L, X, 1).
@@ -859,7 +955,8 @@ nth_leaf(T, I) ->
 %%% --------------------------------------------------------------- writing
 
 start_edit(S = #{doc := D, ln := Ln, cur := coil}) ->
-    S#{mode := {edit_coil, caned_doc:coil_text(D, Ln)}};
+    %% a hole is written over, not after
+    S#{mode := {edit_coil, case caned_doc:coil_text(D, Ln) of "_" -> ""; T -> T end}};
 start_edit(S = #{doc := D, ln := Ln, cur := P}) ->
     Text = case caned_tree:get(tree(D, Ln), P) of
 	       {leaf, {hole, _}} -> "";
@@ -870,13 +967,14 @@ start_edit(S = #{doc := D, ln := Ln, cur := P}) ->
 edit_coil(esc, _Text, S) -> {ok, S#{mode := normal, msg := ""}};
 edit_coil(enter, Text, S = #{doc := D, ln := Ln}) ->
     case caned_doc:set_coil(D, Ln, string:trim(Text)) of
-	{ok, D1} -> {ok, (doc_change(D1, S))#{mode := normal}};
+	{ok, D1} -> {ok, declare_new((doc_change(D1, S))#{mode := normal})};
 	{error, M} -> {ok, S#{msg := M}}
     end;
 edit_coil(backspace, "", S) -> {ok, S};
 edit_coil(backspace, Text, S) -> {ok, S#{mode := {edit_coil, lists:droplast(Text)}}};
 edit_coil(C, Text, S) when is_integer(C), C >= $\s ->
     {ok, S#{mode := {edit_coil, Text ++ [C]}, msg := ""}};
+edit_coil(tab, Text, S) -> {ok, S#{mode := {edit_coil, complete(Text, S)}}};
 edit_coil(_, _Text, S) -> {ok, S}.
 
 edit(esc, _Text, S = #{added := {L0, P0}, undo := [D0 | Us]}) ->
@@ -894,27 +992,52 @@ edit(enter, Text, S = #{doc := D, ln := Ln, cur := P}) ->
 		     #{added := _} -> S#{doc := caned_doc:set_rung(D, Ln, T1), cur := Cur};
 		     _ -> change(T1, Cur, S)
 		 end,
-	    {ok, maps:remove(added, S1#{mode := normal})};
+	    {ok, declare_new(maps:remove(added, S1#{mode := normal}))};
 	{error, M} -> {ok, S#{msg := M}}
     end;
-edit(tab, Text, S) ->
-    case parts_at(Text, S) of
-        none -> {ok, S};
-        {Base, Part, Ps} ->
-            Next = case lists:dropwhile(fun(P) -> P =/= Part end, Ps) of
-                       [_, N | _] -> N;
-                       _ -> case [P || P <- Ps, lists:prefix(Part, P)] of
-                                [P | _] -> P;
-                                [] -> hd(Ps)
-                            end
-                   end,
-            {ok, S#{mode := {edit, Base ++ Next}}}
-    end;
+edit(tab, Text, S) -> {ok, S#{mode := {edit, complete(Text, S)}}};
 edit(backspace, "", S) -> {ok, S};
 edit(backspace, Text, S) -> {ok, S#{mode := {edit, lists:droplast(Text)}}};
 edit(C, Text, S) when is_integer(C), C >= $\s ->
     {ok, S#{mode := {edit, Text ++ [C]}, msg := ""}};
 edit(_, _Text, S) -> {ok, S}.
+
+%% Text with Tab's choice in: the next choice after the one written, or the
+%% first the written part begins; as it was when none is offered or none
+%% fits what is written -- Tab never writes over what was typed.
+complete(Text, S) ->
+    case choices_at(Text, S) of
+        none -> Text;
+        {Base, Part, Ps} ->
+            case {lists:dropwhile(fun(P) -> P =/= Part end, Ps),
+                  [P || P <- Ps, lists:prefix(Part, P)]} of
+                {[_, N | _], _} -> Base ++ N;            % the next one
+                {[_], _} -> Base ++ hd(Ps);              % round again
+                {[], [P | _]} -> Base ++ P;              % the first it begins
+                {[], []} -> Text                         % nothing fits: left as written
+            end
+    end.
+
+%% What may be written at the end of Text: a name's parts after `Name.';
+%% a value after `X =', `X ==', `X !=' or `X <-' (caned_names:values/3 --
+%% State's states, a family of defines). {the text before it, what is
+%% written of it so far, the choices} | none.
+choices_at(Text, S) ->
+    case parts_at(Text, S) of
+        none -> values_at(Text, S);
+        P -> P
+    end.
+
+values_at(Text, #{doc := D, ln := Ln}) ->
+    case re:run(Text, "([A-Za-z][A-Za-z0-9_.]*)\\s*(==|!=|<-|(?<![<>!=])=)\\s*([A-Za-z0-9_]*)$",
+                [{capture, all, list}]) of
+        {match, [_, X, _, Part]} ->
+            case caned_names:values(D, Ln, X) of
+                [] -> none;
+                Vs -> {lists:sublist(Text, length(Text) - length(Part)), Part, Vs}
+            end;
+        nomatch -> none
+    end.
 
 %% `... Name.part' at the end of what is written, Name declared with parts:
 %% {the text up to the dot, the part written so far, the parts} | none.
@@ -1266,6 +1389,14 @@ scroll(S = #{ln := Ln, top := Top}, H) ->
 status(#{mode := {coil, Text, _}, msg := M}) ->
     [{status, " new rung, its coil: "}, {edit, Text ++ "▏"}] ++
 	[{error, "   " ++ M} || M =/= ""];
+status(#{mode := {declare, N, [K | Ks]}}) ->
+    [{status, " " ++ N ++ " is not declared: "}, {help, "⏎ declares it   Tab "},
+     {menu_sel, " " ++ K ++ " "}] ++ [{menu, " " ++ X ++ " "} || X <- Ks] ++
+        [{help, "   Esc leaves it"}];
+status(#{mode := {stmt, Text, _}, msg := M}) ->
+    [{status, " new line: "}, {edit, Text ++ "▏"}] ++ [{error, "   " ++ M} || M =/= ""];
+status(S = #{mode := {edit_coil, Text}, msg := ""}) ->
+    [{status, " coil: "}, {edit, Text ++ "▏"}] ++ offered(Text, S);
 status(#{mode := {edit_coil, Text}, msg := M}) ->
     [{status, " coil: "}, {edit, Text ++ "▏"}] ++ [{error, "   " ++ M} || M =/= ""];
 status(#{mode := {note, _, _, _}}) ->
@@ -1281,11 +1412,7 @@ status(S = #{mode := {field, Key, Typed, Text, _}, msg := M}) ->
          || C <- choices(Key, Typed, S)] ++
         [{error, "   " ++ M} || M =/= ""];
 status(S = #{mode := {edit, Text}, msg := M}) when M =:= "" ->
-    [{status, " write: "}, {edit, Text ++ "▏"}] ++
-        case parts_at(Text, S) of
-            none -> [];
-            {_, _, Ps} -> [{help, "   Tab:"} | [{menu, " " ++ P} || P <- Ps]]
-        end;
+    [{status, " write: "}, {edit, Text ++ "▏"}] ++ offered(Text, S);
 status(#{mode := {edit, Text}, msg := M}) ->
     [{status, " write: "}, {edit, Text ++ "▏"}] ++
 	[{error, "   " ++ M} || M =/= ""];
@@ -1299,6 +1426,20 @@ status(#{file := F, doc := D, msg := M, access := A}) ->
 	    "" -> [{help, ?HELP}];
 	    _ -> [{msg, M}]
 	end.
+
+%% What Tab offers where the text ends, quietly after it on the status
+%% line: the choices the written part begins, the one written lit; none
+%% when nothing is offered or nothing fits -- typing goes on as it was.
+offered(Text, S) ->
+    case choices_at(Text, S) of
+        none -> [];
+        {_, Part, Ps} ->
+            case [P || P <- Ps, lists:prefix(Part, P)] of
+                [] -> [];
+                Fit -> [{help, "   Tab:"} |
+                        [{case P of Part -> menu_sel; _ -> menu end, " " ++ P} || P <- Fit]]
+            end
+    end.
 
 %% No wider than the screen.
 clip(Runs, Cols) -> clip(Runs, Cols, []).

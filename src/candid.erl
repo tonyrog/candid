@@ -107,7 +107,7 @@ run_ui(U, Where, File) ->
 %% Side is #{chat, log, ws}, what outlives it: ws the files open
 %% (candid_file), File's the active one.
 render(U, Where, new, Side = #{ws := Ws}) ->
-    F = candid_file:new(),
+    F = candid_file:starter(),
     render(U, Where, new_file(F), Side#{ws := candid_file:open(Ws, F)});
 render(U, Where, File, Side0) ->
     Side = Side0#{ws := holding(File, maps:get(ws, Side0))},
@@ -205,11 +205,14 @@ load(File, Ws) ->
 	_Error  -> Ws
     end.
 
-%% A file opened takes the place of an empty tab that is the one shown, as
-%% the first one is: it was there to be filled.
+%% A file opened takes the place of a new tab that is the one shown, as
+%% the first one is, while it is as it was made -- empty, or the starter
+%% program not written in: it was there to be filled.
 blank_gone(Ws) ->
+    Starter = maps:get(lines, candid_file:starter()),
     case candid_file:active(Ws) of
-	#{origin := new, lines := [], id := Id} -> candid_file:close(Ws, Id);
+	#{origin := new, lines := Ls, id := Id} when Ls =:= []; Ls =:= Starter ->
+	    candid_file:close(Ws, Id);
 	_ -> Ws
     end.
 
@@ -1761,6 +1764,25 @@ direct_refused(Line) ->
 
 %% The tab shown saved: at its name, or where the person says -- the
 %% renderer's dialog (wse asks in the page and comes back with saveas=Name).
+%% Save and save as with the editor's text in: what it has written is the
+%% file's lines first (it was not, and save wrote the file as it was
+%% read). Saved, the panel is built again from it, as the editor's own s
+%% does; not saved (the dialog cancelled), the lines keep the text.
+save_edited(U, S = #{ws := Ws, code := Code}, How) ->
+    case {csp_code:edit_text(Code), candid_file:active(Ws)} of
+        {{Text, Ln}, F = #{}} ->
+            {ok, F1} = candid_file:set_text(F, Text),
+            S1 = save_ui(U, S#{ws := candid_file:update(Ws, F1)}, How),
+            case candid_file:active(maps:get(ws, S1)) of
+                #{name := P, dirty := false} when P =/= none ->
+                    self() ! {caned_saved, P, Ln};
+                _ -> ok
+            end,
+            S1;
+        _ -> save_ui(U, S, How)
+    end;
+save_edited(U, S, How) -> save_ui(U, S, How).
+
 save_ui(U, S = #{ws := Ws}, How) ->
     case candid_file:active(Ws) of
 	none -> S;
@@ -1833,10 +1855,10 @@ act_ui(U, Link, S, {bar, "new"}) ->
     csp_link:close(Link),
     flush(),
     render(U, maps:get(where, S), new, side(S));
-act_ui(U, Link, S, {bar, "save"}) -> loop(U, Link, save_ui(U, S, save));
-act_ui(U, Link, S, {bar, "saveas"}) -> loop(U, Link, save_ui(U, S, ask));
+act_ui(U, Link, S, {bar, "save"}) -> loop(U, Link, save_edited(U, S, save));
+act_ui(U, Link, S, {bar, "saveas"}) -> loop(U, Link, save_edited(U, S, ask));
 act_ui(U, Link, S, {bar, "saveas=" ++ Name}) ->
-    loop(U, Link, save_ui(U, S, {as, Name}));
+    loop(U, Link, save_edited(U, S, {as, Name}));
 act_ui(U, Link, S, {bar, Tag = "tab=" ++ _}) -> tab_ui(U, Link, S, Tag);
 act_ui(U, Link, S, {bar, Tag = "close=" ++ _}) -> tab_ui(U, Link, S, Tag);
 %% run / pause / step, the target, the views: the bar.

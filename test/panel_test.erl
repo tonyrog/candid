@@ -2237,8 +2237,9 @@ save_check() ->
     T2 = Tabs(Since(C3)),
     Saved = file:read_file(Tmp ++ ".csp"),
     file:delete(Tmp ++ ".csp"),
-    expect("save: save as writes it, .csp added, and the tab is named so",
-	   Saved =:= {ok, <<>>} andalso T2 =:= ["createTextNode saved_new.csp"],
+    expect("save: save as writes it (the starter program), .csp added, and the tab is named so",
+	   Saved =:= {ok, list_to_binary(candid_file:source(candid_file:starter()))}
+	   andalso T2 =:= ["createTextNode saved_new.csp"],
 	   {Saved, T2}),
     Kept = filename:join(os:getenv("TMPDIR", "/tmp"), "candid_settings_test"),
     file:delete(Kept),
@@ -2537,18 +2538,19 @@ lights_check() ->
            L(7, row), L(7, coil), L(3, coil)},
     expect("lights: x > 3 holds, y > 1 not; rule 1 fired; #in S2 not in force",
            Got =:= {true, false, fired, on, off, none, none}, Got),
-    %% The editor in the code view: what it saves is the panel's to do.
+    %% The editor in the code view: what it saves is the panel's to do. It
+    %% starts at the top; Space puts it on the first rung.
     Keys = fun(Ks, Vx) -> lists:foldl(fun(K, Vi) -> csp_code:control(Vi, {key, K}) end,
                                       Vx, Ks) end,
     Acts = fun(Vx) -> element(1, csp_code:actions(Vx)) end,
-    Ve = Keys([$o] ++ "R1" ++ [enter] ++ "y > 7" ++ [enter, $s], csp_code:control(V, "ladder")),
+    Ve = Keys([$\s, $o] ++ "R1" ++ [enter] ++ "y > 7" ++ [enter, $s], csp_code:control(V, "ladder")),
     expect("edit: a rung written and s: the file's text, for the panel to save",
            [T || {edit_save, T, _} <- Acts(Ve)] =:=
                [lists:flatten(["#variable x = 5\n#variable y = 0\n#digital R1 out 13\n"
                                "#states S1 S2\nR1 = 1 ? x > 3 && y > 1\nR1 = y > 7\n#in S2\n"
                                "R1 = 0 ? x > 1\n#end\n"])], Acts(Ve)),
     Vp0 = csp_code:new({?MODULE, ui}, where, {Ast, F}, #{}, #{access => patch, editor => true}),
-    Vp = Keys([$-, $o] ++ "R1" ++ [enter] ++ "y > 7" ++ [enter, $s],
+    Vp = Keys([$\s, $-, $o] ++ "R1" ++ [enter] ++ "y > 7" ++ [enter, $s],
               csp_code:control(csp_code:refresh(Vp0, #{}), "ladder")),
     expect("patch: what was added and switched, as lines and rules to send",
            [P || P = {patch, _, _} <- Acts(Vp)] =:= [{patch, ["R1 = y > 7"], [{true, 1}]}],

@@ -19,6 +19,9 @@ run() ->
     lights(),
     scope(),
     keys(),
+    lines(),
+    names(),
+    values(),
     halt(0).
 
 txt(S) -> {ok, X} = caned_text:expr(S), caned_tree:tree(X).
@@ -180,7 +183,7 @@ ui() ->
     {ok, D} = caned_doc:from_text("#variable x\n#variable y\n#variable z\n"
 				  "#digital R1 out 13\n#digital R2 out 14\n"
 				  "R1 = x+1<y && x>15\nR2 = _\n"),
-    S0 = caned_ui:new(D, "t.csp"),
+    S0 = on_rung(caned_ui:new(D, "t.csp")),
     Keys = fun(Ks, S) -> lists:foldl(fun(K, Si) -> {ok, Sj} = caned_ui:key(K, Si), Sj end,
 				     S, Ks) end,
     Rungs = fun(S) -> [R || R <- caned_ui:plain(S, 12, 80),
@@ -226,7 +229,7 @@ ui() ->
 	   Text(S8) =:= Base ++ "R2 = _\n" andalso maps:get(ln, S8) =:= 6 andalso
 	   Text(Keys([$u], S8)) =:= caned_doc:text(D), Text(S8)),
     {ok, De} = caned_doc:from_text("#variable x\n#digital R out 1\n"),
-    S9 = Keys([down, $o] ++ "R" ++ [enter] ++ "x" ++ [enter], caned_ui:new(De, "e.csp")),
+    S9 = Keys([down, $o] ++ "R" ++ [enter] ++ "x" ++ [enter], on_rung(caned_ui:new(De, "e.csp"))),
     expect("a file with no rung yet: o on the last declaration puts the first one after it",
 	   Text(S9) =:= "#variable x\n#digital R out 1\nR = x\n", Text(S9)),
     %% A rectangle over x > 15 and the branch under it: the OR is selected.
@@ -266,7 +269,7 @@ ui() ->
     %% A rule with no condition: a wire to its coil, written into a guard.
     {ok, Dn} = caned_doc:from_text("#digital Red out 1\n#digital Yellow out 2\n"
 				   "#variable a\nRed = 0, Yellow = 0\nYellow = a > 3\n"),
-    Sn = caned_ui:new(Dn, "n.csp"),
+    Sn = on_rung(caned_ui:new(Dn, "n.csp")),
     expect("Red = 0, Yellow = 0: a rung, a plain wire to its coil",
 	   [R || R <- caned_ui:plain(Sn, 8, 80), string:find(R, "├") =/= nomatch] =:=
 	       ["   1 ├────────────( Red = 0, Yellow = 0 )─┤",
@@ -324,7 +327,7 @@ rungs(S) -> [R || R <- caned_ui:plain(S, 12, 80), string:find(R, "├") =/= noma
 
 rules() ->
     {ok, D} = caned_doc:from_text(?RSRC ++ "#disable 2\n"),
-    S0 = caned_ui:new(D, "r.csp"),
+    S0 = on_rung(caned_ui:new(D, "r.csp")),
     expect("a rung's number is its rule's, ✕ when #disable has it off",
 	   [string:slice(R, 0, 5) || R <- rungs(S0)] =:= ["   1 ", "   2✕", "   3 "] andalso
 	   caned_doc:off(D, 7) andalso text(S0) =:= ?RSRC ++ "#disable 2\n",
@@ -371,7 +374,7 @@ rules() ->
 %% Patch mode: as on a node -- rules added at the end, switched off and on.
 patch() ->
     {ok, D} = caned_doc:from_text(?RSRC),
-    S0 = caned_ui:new(D, "p.csp", patch),
+    S0 = on_rung(caned_ui:new(D, "p.csp", patch)),
     S1 = keys([enter], S0),
     expect("patch: a rule that was there is not written into",
 	   maps:get(mode, S1) =:= normal andalso
@@ -400,7 +403,7 @@ comments() ->
            caned_doc:comments(D) =:= [{3, 4, slash, ["lamps: the first", "and the second"]},
                                       {7, 7, annotate, ["made by caned"]}],
            caned_doc:comments(D)),
-    S0 = caned_ui:new(D, "c.csp"),
+    S0 = on_rung(caned_ui:new(D, "c.csp")),
     P = caned_ui:plain(S0, 12, 90),
     Pad = fun(T) -> "     ║ " ++ T ++ lists:duplicate(77 - length(T), $\s) ++ " ║" end,
     expect("a comment in a box with a double frame, its `//' not shown; a `//' after a "
@@ -448,14 +451,14 @@ comments() ->
     File = filename:join(os:getenv("TMPDIR", "/tmp"), "caned_save_test.csp"),
     {ok, Dp} = caned_doc:from_text(?CSRC, File),
     Sp = keys([$&, $o] ++ "R" ++ [enter] ++ "x == 3" ++ [enter, up, $s],
-              caned_ui:new(Dp, File, patch)),
+              on_rung(caned_ui:new(Dp, File, patch))),
     {ok, Bin} = file:read_file(File),
     expect("patch: saved, the cursor on its rung, an added rule still added",
            binary_to_list(Bin) =:= ?CSRC ++ "R = x == 3\n" andalso
            maps:get(ln, Sp) =:= 8 andalso caned_doc:added(maps:get(doc, Sp), 9),
            {binary_to_list(Bin), maps:get(ln, Sp)}),
     {ok, De} = caned_doc:from_text(?CSRC, File),
-    Se = keys([$&] ++ "x < 9" ++ [enter, $s], caned_ui:new(De, File)),
+    Se = keys([$&] ++ "x < 9" ++ [enter, $s], on_rung(caned_ui:new(De, File))),
     {ok, Bin2} = file:read_file(File),
     expect("saved, the `//' after a rung printed anew goes above it; the cursor stays on it",
            lists:sublist(string:split(binary_to_list(Bin2), "\n", all), 6, 2) =:=
@@ -501,10 +504,10 @@ cards() ->
            maps:get(cur, keys([{select, 2, [{seg, 2}, {seg, 3}]}], S0)) =:= {seg, 2}, nomatch),
     expect("the name is not written on the card",
            maps:get(mode, keys([enter], S0)) =:= normal, nomatch),
-    S5 = keys([$&] ++ "R1." ++ [tab, tab, enter], caned_ui:new(D, "d.csp")),
+    S5 = keys([$&] ++ "R1." ++ [tab, tab, enter], on_rung(caned_ui:new(D, "d.csp"))),
     expect("`R1.' and Tab in a contact: R1's parts, a Tab each",
            lists:nth(4, string:split(text(S5), "\n", all)) =:= "R1 = x > 1 && R1.pin"
-           andalso string:find(lists:last(caned_ui:plain(keys([$&] ++ "R1.", caned_ui:new(D, "d.csp")),
+           andalso string:find(lists:last(caned_ui:plain(keys([$&] ++ "R1.", on_rung(caned_ui:new(D, "d.csp"))),
                                                          8, 120)), "Tab: val pin port") =/= nomatch,
            text(S5)).
 
@@ -516,7 +519,7 @@ lights() ->
     L = fun(5, {contact, E}) ->
                 case Txt(E) of "x > 1" -> true; "y > 2" -> unknown end;
            (5, coil) -> fired; (6, coil) -> next; (6, row) -> off; (_, _) -> none end,
-    S = (caned_ui:new(D, "l.csp"))#{lights => L, cur := coil},
+    S = (on_rung(caned_ui:new(D, "l.csp")))#{lights => L, cur := coil},
     {_, Rows} = caned_ui:screen(S, 10, 80),
     At = maps:from_list([{Where, A} || R <- Rows, {{A, Where}, _} <- R]),
     expect("lit: a contact that holds, one that cannot be known, a fired coil, a rung "
@@ -593,7 +596,7 @@ keys() ->
     Src = lists:append(["#variable x\n#digital R out 1\n" |
                         ["R = x > " ++ integer_to_list(I) ++ " && x < 9\n" || I <- lists:seq(1, 30)]]),
     {ok, D} = caned_doc:from_text(Src),
-    S = (caned_ui:new(D, "k.csp"))#{page => 10},
+    S = (on_rung(caned_ui:new(D, "k.csp")))#{page => 10},
     Go = fun(Ks, S0) -> lists:foldl(fun(Ki, Si) -> {ok, Si1} = caned_ui:key(Ki, Si), Si1 end,
                                     S0, Ks) end,
     #{ln := L0} = S,
@@ -608,6 +611,103 @@ keys() ->
            L1 =:= L0 + 10 andalso L2 =:= L0 andalso Le =:= 32 andalso Ls =:= 1
            andalso Ce =:= coil andalso Cs =:= [1],
            {L0, L1, L2, Le, Ls, Ce, Cs}).
+
+%% # : a new line of any statement after the cursor's node; Esc leaves
+%% none, a line that is no statement is not taken, patch mode takes none.
+lines() ->
+    {ok, D} = caned_doc:from_text("#digital Lamp out 13\nLamp = 1\n"),
+    S = caned_ui:new(D, "n.csp"),
+    Type = fun(Ks, S0) -> lists:foldl(fun(K, Si) -> {ok, Si1} = caned_ui:key(K, Si), Si1 end,
+                                      S0, Ks) end,
+    S1 = Type([$# | "digital Button in 2"] ++ [enter], S#{ln := 1, cur := {seg, 1}}),
+    S2 = Type("#nonsense" ++ [enter], S#{ln := 1, cur := {seg, 1}}),
+    S3 = Type([$# | "x"] ++ [esc], S),
+    {ok, Sp} = caned_ui:key($#, S#{access := patch}),
+    Text = caned_doc:text(maps:get(doc, S1)),
+    expect("#: a declaration written in as a new line after the cursor's; nonsense not "
+           "taken; Esc leaves none; patch mode none",
+           string:find(Text, "#digital Lamp out 13\n#digital Button in 2\nLamp = 1") =/= nomatch
+           andalso maps:get(ln, S1) =:= 2
+           andalso element(1, maps:get(mode, S2)) =:= stmt andalso maps:get(msg, S2) =/= ""
+           andalso caned_doc:text(maps:get(doc, S3)) =:= caned_doc:text(D)
+           andalso maps:get(mode, Sp) =:= normal,
+           {Text, maps:get(mode, S2), maps:get(msg, S2)}).
+
+%% A name nothing declares, written in a rung, is declared for it; one that
+%% may be a declared one mistyped is asked about.
+names() ->
+    Type = fun(Ks, S0) -> lists:foldl(fun(K, Si) -> {ok, Si1} = caned_ui:key(K, Si), Si1 end,
+                                      S0, Ks) end,
+    {ok, D} = caned_doc:from_text("// A new program.\n_ ? _\n"),
+    S0 = on_rung(caned_ui:new(D, "n.csp")),
+    S1 = Type([rung_end, enter] ++ "A = 1.5" ++ [enter], S0),
+    T1 = caned_doc:text(maps:get(doc, S1)),
+    S2 = Type([rung_start, enter] ++ "B > 3 && C" ++ [enter], S1),
+    T2 = caned_doc:text(maps:get(doc, S2)),
+    {ok, S3} = caned_ui:key($u, S2),
+    expect("names: a coil's float declared over the rule, under the comment; a contact's "
+           "two names; one undo takes the rung's writing and its declarations",
+           T1 =:= "// A new program.\n#variable A float\nA = 1.5 ? _\n"
+           andalso T2 =:= "// A new program.\n#variable A float\n#variable B\n#variable C\n"
+                          "A = 1.5 ? B > 3 && C\n"
+           andalso caned_doc:text(maps:get(doc, S3)) =:= T1
+           andalso maps:get(ln, S2) =:= 5,
+           {T1, T2, caned_doc:text(maps:get(doc, S3))}),
+    {ok, Dn} = caned_doc:from_text("#variable Lamp\n_ ? _\n"),
+    Sn = Type([rung_end, enter] ++ "Lmap = 1" ++ [enter], on_rung(caned_ui:new(Dn, "n.csp"))),
+    Sn1 = Type([tab], Sn),
+    expect("names: one a letter from a declared one is asked about; Tab writes the "
+           "declared one",
+           maps:get(mode, Sn) =:= {declare, "Lmap", ["Lamp"]}
+           andalso caned_doc:text(maps:get(doc, Sn1)) =:= "#variable Lamp\nLamp = 1 ? _\n",
+           {maps:get(mode, Sn), caned_doc:text(maps:get(doc, Sn1))}),
+    {ok, Dm} = caned_doc:from_text("#variable G\n#module M\n#local A in\nG = A ? _\n#end\n"
+                                   "#M m0\nG = 1 ? _\n"),
+    Sm = Type([rung_start, enter] ++ "Q" ++ [enter], (on_rung(caned_ui:new(Dm, "m.csp")))),
+    Sg = Type([$\s, rung_start, enter] ++ "R" ++ [enter], on_rung(caned_ui:new(Dm, "m.csp"))),
+    expect("names: in a module after its declarations; outside after the file's",
+           caned_doc:text(maps:get(doc, Sm)) =:=
+               "#variable G\n#module M\n#local A in\n#variable Q\nG = A ? Q\n#end\n#M m0\n"
+               "G = 1 ? _\n"
+           andalso caned_doc:text(maps:get(doc, Sg)) =:=
+               "#variable G\n#variable R\n#module M\n#local A in\nG = A ? _\n#end\n#M m0\n"
+               "G = 1 ? R\n",
+           {caned_doc:text(maps:get(doc, Sm)), caned_doc:text(maps:get(doc, Sg))}).
+
+%% Tab after `X =' / `X ==': State's states, a #digital's 0 and 1, the
+%% family of the defines X is already given; what is written narrows them.
+values() ->
+    Type = fun(Ks, S0) -> lists:foldl(fun(K, Si) -> {ok, Si1} = caned_ui:key(K, Si), Si1 end,
+                                      S0, Ks) end,
+    {ok, D} = caned_doc:from_text("#states S1 S2\n#define PRIO_OFF 0\n#define PRIO_HIGH 2\n"
+                                  "#define OTHER 5\n#variable P\n#digital L out 1\n"
+                                  "P = PRIO_OFF\n_ ? _\n"),
+    S0 = Type([$\s, $\s], caned_ui:new(D, "v.csp")),            % the second rung
+    Mode = fun(S) -> element(2, maps:get(mode, S)) end,
+    Sc = Type([enter] ++ "State == " ++ [tab], S0),
+    Sc2 = Type([tab], Sc),
+    Sp = Type([rung_end, enter] ++ "P = " ++ [tab], S0),
+    Sp2 = Type([tab], Sp),
+    Sh = Type([rung_end, enter] ++ "P = PRIO_H" ++ [tab], S0),
+    Sl = Type([rung_end, enter] ++ "L = " ++ [tab, tab], S0),
+    So = Type([rung_end, enter] ++ "P = OTH" ++ [tab], S0),
+    {_, Rows} = caned_ui:screen(Type([enter] ++ "State == S", S0), 12, 120),
+    Shown = lists:append([T || {_, T} <- lists:last(Rows)]),
+    expect("values: State's states; the PRIO_ family P is given, not OTHER; a written part "
+           "narrows; a #digital's 0 and 1",
+           {Mode(Sc), Mode(Sc2), Mode(Sp), Mode(Sp2), Mode(Sh), Mode(Sl), Mode(So)} =:=
+               {"State == S1", "State == S2", "P = PRIO_OFF", "P = PRIO_HIGH", "P = PRIO_HIGH",
+                "L = 1", "P = OTH"}
+           andalso string:find(Shown, "S1") =/= nomatch andalso string:find(Shown, "INIT") =:= nomatch,
+           {[Mode(X) || X <- [Sc, Sc2, Sp, Sp2, Sh, Sl, So]], Shown}).
+
+%% The editor starts at the top; the tests that write in a rung start on
+%% the first, as Space puts it there.
+on_rung(S = #{doc := D, ln := Ln}) ->
+    case caned_doc:rung(D, Ln) of
+        none -> {ok, S1} = caned_ui:key($\s, S), S1;
+        _ -> S
+    end.
 
 expect(What, true, _)  -> io:format("ok    ~ts~n", [What]);
 expect(What, false, D) ->
