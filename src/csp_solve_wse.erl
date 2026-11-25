@@ -42,6 +42,12 @@ pane(Ws, Title, Ks, K0) ->
     wse:set(Ws, Cl, "onclick",
 	    wse:newf(Ws, "", "{ Wse.notify(" ++ integer_to_list(Ev) ++
 		     ", 'clear='); }")),
+    Ca = el(Ws, Foot, "button", lists:flatten(candid_wse:btn_style(false))),
+    wse:appendChild(Ws, Ca, wse:createTextNode(Ws, "cancel")),
+    wse:set(Ws, Ca, "title", "stop the run; the lines and the answers so far stay"),
+    wse:set(Ws, Ca, "onclick",
+	    wse:newf(Ws, "", "{ Wse.notify(" ++ integer_to_list(Ev) ++
+		     ", 'cancel='); }")),
     Busy = el(Ws, Foot, "span", "color:#fb3;min-width:2em"),
     Res = el(Ws, Box, "div", "flex:1;overflow:auto;padding:4px 8px;"
 	     "white-space:pre;font-size:12px;border-top:1px solid #333"),
@@ -57,6 +63,7 @@ event(#{ev := Id}, {notify, Id, _, "prove=" ++ Data}) ->
     {prove, Text, list_to_integer(K)};
 event(#{ev := Id}, {notify, Id, _, "pick=" ++ I}) -> {pick, list_to_integer(I)};
 event(#{ev := Id}, {notify, Id, _, "clear=" ++ _}) -> clear;
+event(#{ev := Id}, {notify, Id, _, "cancel=" ++ _}) -> cancel;
 event(#{close := Id}, {notify, Id, _, _})         -> close;
 event(_P, _Msg)                                   -> none.
 
@@ -86,8 +93,13 @@ results(Ws, #{res := Res, ev := Ev}, Rows) ->
 %% The lines gone; the answers go by results/3.
 clear(Ws, #{text := Text}) -> wse:set(Ws, Text, "value", "").
 
+%% On: true, false, or how far a run is (csp_solve:progress/2).
 busy(Ws, #{busy := B}, On) ->
-    wse:set(Ws, B, "textContent", case On of true -> "..."; false -> "" end).
+    wse:set(Ws, B, "textContent", case On of
+				      true -> "...";
+				      false -> "";
+				      T -> candid_wse:u(T)
+				  end).
 
 colour("ok")  -> "#7d7";
 colour("bad") -> "#f77";

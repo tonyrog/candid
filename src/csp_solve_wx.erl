@@ -34,10 +34,15 @@ pane(H = #{env := Env}, Title, Ks, K0) ->
     Clear = candid_wx:btn(H, P, "clear",
 			  #{click => fun() -> Pid ! {csp_solve_wx, clear} end}),
     wxWindow:setToolTip(Clear, "the lines and the answers gone, a trace let go"),
-    Busy = wxStaticText:new(P, ?wxID_ANY, "  ", [{size, {40, -1}}]),
+    Cancel = candid_wx:btn(H, P, "cancel",
+			   #{click => fun() -> Pid ! {csp_solve_wx, cancel} end}),
+    wxWindow:setToolTip(Cancel, "stop the run; the lines and the answers so far stay"),
+    Busy = wxStaticText:new(P, ?wxID_ANY, "  "),
     candid_wx:fg(H, Busy, {255, 187, 51}),
     [wxSizer:add(Foot, W, [{flag, ?wxRIGHT bor ?wxALIGN_CENTER_VERTICAL},
-			   {border, 4}]) || W <- [Prove, Sel, Clear, Busy]],
+			   {border, 4}]) || W <- [Prove, Sel, Cancel, Clear]],
+    wxSizer:add(Foot, Busy, [{proportion, 1},
+			     {flag, ?wxRIGHT bor ?wxALIGN_CENTER_VERTICAL}, {border, 4}]),
     wxSizer:add(S, Foot, [{flag, ?wxEXPAND bor ?wxTOP bor ?wxBOTTOM}, {border, 2}]),
     Res = wxScrolledWindow:new(P),
     wxScrolledWindow:setScrollRate(Res, 0, 10),
@@ -56,6 +61,7 @@ event(#{k := K0}, {csp_solve_wx, prove, Text}) ->
 event(_P, {csp_solve_wx, pick, I})      -> {pick, I};
 event(_P, {csp_solve_wx, close})        -> close;
 event(_P, {csp_solve_wx, clear})        -> clear;
+event(_P, {csp_solve_wx, cancel})       -> cancel;
 event(_P, _Msg)                         -> none.
 
 %% A row a line: its number, its kind and condition, the answer. One with a
@@ -96,8 +102,13 @@ rows(H, Res, Rows) ->
 %% The lines gone; the answers go by results/3.
 clear(_H, #{text := Text}) -> wxTextCtrl:setValue(Text, "").
 
+%% On: true, false, or how far a run is (csp_solve:progress/2).
 busy(_H, #{busy := B}, On) ->
-    candid_wx:label(B, case On of true -> "..."; false -> "  " end).
+    candid_wx:label(B, busy_text(On)).
+
+busy_text(true) -> "...";
+busy_text(false) -> "  ";
+busy_text(T) -> T.
 
 colour("ok")  -> {119, 221, 119};
 colour("bad") -> {255, 119, 119};

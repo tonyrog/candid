@@ -64,10 +64,14 @@ loop(S = #{ui := {M, _}, pane := Pane}) ->
 	    loop(results(S#{worker := none}, Results));
 	{csp_solve_line, W, Results} when W =:= map_get(worker, S) ->
 	    loop(results(S, Results));
+	{csp_solve_progress, W, N, P} when W =:= map_get(worker, S) ->
+	    pui(S, busy, [progress(N, P)]),
+	    loop(S);
 	Msg ->
 	    case M:event(Pane, Msg) of
 		close -> loop(show(S, false));
 		clear -> loop(clear(S));
+		cancel -> loop(cancel(S));
 		{prove, Text, K} -> loop(prove(S, Text, K));
 		{pick, I} -> loop(pick(S, I));
 		none -> loop(S)
@@ -90,6 +94,25 @@ clear(S = #{panel := Panel}) ->
     Panel ! {csp_solve, closed},
     S1.
 
+%% The run stopped, what it has answered kept: the lines are still there to
+%% prove again.
+cancel(S = #{worker := none}) -> S;
+cancel(S) ->
+    S1 = stop(S),
+    pui(S1, busy, ["cancelled"]),
+    S1.
+
+%% How far varp is with line N, from its log (candyspeak_varp:bmc/4).
+progress(N, P) ->
+    lists:flatten(
+      [io_lib:format("line ~w", [N]),
+       [io_lib:format("  k=~w", [K]) || K <- [maps:get(k, P, none)], K =/= none],
+       case P of
+	   #{vars := V, bound := B} -> io_lib:format("  vars ~w/~w", [B, V]);
+	   _ -> ""
+       end,
+       [io_lib:format("  clauses ~w", [C]) || C <- [maps:get(clauses, P, none)], C =/= none]]).
+
 prove(S = #{file := none}, _Text, _K) ->
     results(S, [{0, "", "", "bad", "no program to prove", none}]);
 prove(S0, Text, K) ->
@@ -97,18 +120,22 @@ prove(S0, Text, K) ->
     Self = self(),
     File = maps:get(file, S),
     W = spawn_link(fun() ->
+			   Me = self(),
 			   Rs = run(File, parse(Text), K,
-				    fun(Rs) -> Self ! {csp_solve_line, self(), Rs} end),
-			   Self ! {csp_solve_done, self(), Rs}
+				    fun(Rs) -> Self ! {csp_solve_line, Me, Rs} end,
+				    fun(N, P) -> Self ! {csp_solve_progress, Me, N, P} end),
+			   Self ! {csp_solve_done, Me, Rs}
 		   end),
     pui(S, busy, [true]),
     results(S#{worker := W}, []).
 
-%% A run still going is not wanted any more.
+%% A run still going is not wanted any more: told to cancel, it ends varp
+%% and itself (candyspeak_varp:bmc/4); a translation going on finishes
+%% first, and nothing it says is heard.
 stop(S = #{worker := none}) -> S;
 stop(S = #{worker := W}) ->
     unlink(W),
-    exit(W, kill),
+    W ! cancel,
     pui(S, busy, [false]),
     S#{worker := none}.
 
@@ -152,12 +179,15 @@ line(N, Line) ->
 
 %% Each line's answer, in order: {LineNo, Kind, Text, Cls, Answer, Trace},
 %% Cls ok | bad | "" and Trace none or {At, Rows, Model}.
-run(File, Lines, K) -> run(File, Lines, K, fun(_) -> ok end).
+run(File, Lines, K) -> run(File, Lines, K, fun(_) -> ok end, fun(_, _) -> ok end).
 
-run(File, Lines, K, Said) ->
+%% Said(Results) after each line, Prog(LineNo, Progress) while varp works.
+run(File, Lines, K, Said, Prog) ->
     {Rs, _} = lists:foldl(
 		fun(L, {Acc, As}) ->
-			{{N, Ki, T, C, A, Tr}, As1} = one(File, L, K, As),
+			Tell = fun(P) -> Prog(element(1, L), P) end,
+			Tell(#{}),
+			{{N, Ki, T, C, A, Tr}, As1} = one(File, L, K, As, Tell),
 			R = {N, Ki, T, C, lists:flatten(A), Tr},
 			Acc1 = Acc ++ [R],
 			Said(Acc1),
@@ -165,17 +195,17 @@ run(File, Lines, K, Said) ->
 		end, {[], []}, Lines),
     Rs.
 
-one(_File, {N, error, Why}, _K, As) ->
+one(_File, {N, error, Why}, _K, As, _Tell) ->
     {{N, "", "", "bad", Why, none}, As};
 %% Taken as it is, and checked to translate.
-one(File, {N, "assume", T}, _K, As) ->
+one(File, {N, "assume", T}, _K, As, _Tell) ->
     case model(File, "1 == 1", As ++ [T]) of
 	{ok, _} -> {{N, "assume", T, "", "assumed", none}, As ++ [T]};
 	E -> {{N, "assume", T, "bad", why(E), none}, As}
     end;
 %% Every cycle: !(T) is never reached. Proved, it holds for what follows.
-one(File, {N, "invariant", T}, K, As) ->
-    case solve(File, "!(" ++ T ++ ")", K, As) of
+one(File, {N, "invariant", T}, K, As, Tell) ->
+    case solve(File, "!(" ++ T ++ ")", K, As, Tell) of
 	{proved, I} ->
 	    {{N, "invariant", T, "ok",
 	      io_lib:format("holds (~w-induction)", [I]), none}, As ++ [T]};
@@ -188,8 +218,8 @@ one(File, {N, "invariant", T}, K, As) ->
 	      none}, As};
 	E -> {{N, "invariant", T, "bad", why(E), none}, As}
     end;
-one(File, {N, "reach", T}, K, As) ->
-    R = case solve(File, T, K, As) of
+one(File, {N, "reach", T}, K, As, Tell) ->
+    R = case solve(File, T, K, As, Tell) of
 	    {found, At, Rows, M} ->
 		{"ok", io_lib:format("reached in cycle ~w", [At]), {At, Rows, M}};
 	    {proved, I} ->
@@ -208,12 +238,12 @@ model(File, Goal, As) ->
     catch throw:Why -> {error, Why}
     end.
 
-solve(File, Goal, K, As) ->
+solve(File, Goal, K, As, Tell) ->
     case {model(File, Goal, As), candyspeak_varp:varp_cmd()} of
 	{_, none} -> {error, varp};
 	{{ok, M = #{name := Name}}, Sh} ->
 	    case candyspeak_varp:prove(M, "--property " ++ Name ++ "_reach",
-				       K, ?TIMEOUT, Sh) of
+				       K, ?TIMEOUT, Sh, Tell) of
 		{found, At, Rows} -> {found, At, Rows, M};
 		Other -> Other
 	    end;

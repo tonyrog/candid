@@ -104,7 +104,7 @@ init(Owner, {{local, Can}, #{patch := Patch}}, Exe, Files) ->
 			      "--can=" ++ Can, "--exit-on-eof" | Files]},
 		      exit_status, use_stdio, stderr_to_stdout,
 		      {line, 4096}]),
-    port_command(Port, "/pause\n"),
+    cmd(Port, "/pause\n"),
     Owner ! {csp_link, "local csp on " ++ Can ++
 		 case Patch of stored -> ", eeprom patch"; _ -> "" end},
     loop(#{port => Port, owner => Owner, buf => [], run => true,
@@ -143,16 +143,16 @@ loop(S = #{port := Port, owner := Owner, buf := Buf, run := Run,
 	    Owner ! {csp_exit, St};
 	{set, Name, Val} ->
 	    P = case Run andalso lists:member(Name, Pending) of
-		    true -> port_command(Port, "/step 1\n"), [];
+		    true -> cmd(Port, "/step 1\n"), [];
 		    false -> Pending
 		end,
-	    port_command(Port, ["> ", Name, " = ", fmt(Val), "\n"]),
+	    cmd(Port, ["> ", Name, " = ", fmt(Val), "\n"]),
 	    loop(S#{pending := [Name | P]});
 	{raw, Line} ->
-	    port_command(Port, [Line, "\n"]),
+	    cmd(Port, [Line, "\n"]),
 	    loop(S);
 	tick ->
-	    port_command(Port, "/step 1\n"),
+	    cmd(Port, "/step 1\n"),
 	    loop(S#{pending := []});
 	%% Paused already, and stays so: run is the panel ticking.
 	pause ->
@@ -160,13 +160,13 @@ loop(S = #{port := Port, owner := Owner, buf := Buf, run := Run,
 	resume ->
 	    loop(S#{run := true});
 	{step, N} ->
-	    port_command(Port, ["/step ", integer_to_list(N), "\n"]),
+	    cmd(Port, ["/step ", integer_to_list(N), "\n"]),
 	    loop(S#{pending := []});
 	reset ->
-	    port_command(Port, "/reset\n"),
+	    cmd(Port, "/reset\n"),
 	    loop(S#{pending := []});
 	{clock, Ms} ->
-	    port_command(Port, ["/clock ", integer_to_list(Ms), "\n"]),
+	    cmd(Port, ["/clock ", integer_to_list(Ms), "\n"]),
 	    loop(S);
 	close ->
 	    shutdown(Port);
@@ -178,11 +178,17 @@ loop(S = #{port := Port, owner := Owner, buf := Buf, run := Run,
 	    loop(S)
     end.
 
+%% A line to our csp. Gone already -- it exited, and its exit_status is
+%% still in the queue behind what is handled now -- the line goes nowhere:
+%% the exit is told when its message is read, not by a crash here.
+cmd(Port, Data) ->
+    try port_command(Port, Data) catch error:badarg -> ok end.
+
 %% /quit makes csp exit at once (measured: 0 ms), so wait for that rather than
 %% just closing the port. Closing alone leaves it running, and walking away
 %% without sending anything is what left processes behind.
 shutdown(Port) ->
-    port_command(Port, "/quit\n"),
+    cmd(Port, "/quit\n"),
     receive
 	{Port, {exit_status, _}} -> ok
     after 500 ->
