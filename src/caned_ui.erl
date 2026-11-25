@@ -6,7 +6,7 @@
 %%% tree). Keys:
 %%%
 %%%   ← →        the contact before, after      ↑ ↓   the rung above, below
-%%%   ⇧← ⇧→      select from here on            Tab ⇧Tab  the next, the last rung
+%%%   ⇧← ⇧→      select from here on            Tab ⇧Tab  the next, the last cell
 %%%   PgUp PgDn  a page up, down (`page' rows)  Home End  the first, the last line
 %%%   Insert     a new rung after (as o)        (rung_start, rung_end: the first
 %%%                                              contact, the coil -- Emacs's C-a C-e)
@@ -85,8 +85,10 @@
 %%%
 %%% Writing, the rung shows what is typed so far after every key, holes where
 %%% it is not finished (caned_text); ⏎ takes it, Esc leaves it as it was.
-%%% A new rung asks for its coil first, then its condition is written: the
-%%% two are one change, and Esc on either leaves no rung behind.
+%%% A new rung asks for its coil first -- a name, the coil that follows its
+%%% condition, or assignments (`B = 1'), done when it holds -- then its
+%%% condition is written: the two are one change, and Esc on either leaves
+%%% no rung behind.
 
 -module(caned_ui).
 
@@ -198,6 +200,36 @@ go(K, S = #{doc := D, ln := Ln}) ->
          end,
     S#{ln := L1, cur := cur_for(D, L1)}.
 
+%% The cell Dir from the cursor's, over the line's end to the next line's
+%% first cell (the last one's, back).
+cell(_Dir, S = #{ln := 0}) -> S;
+cell(Dir, S = #{doc := D, ln := Ln, cur := C}) ->
+    Cs = cells(D, Ln),
+    I = index_in(Cs, C) + Dir,
+    case I >= 1 andalso I =< length(Cs) andalso lists:member(C, Cs) of
+        true -> S#{cur := lists:nth(I, Cs)};
+        false ->
+            Ns = shown_stops(S),
+            J = index_in(Ns, Ln) + Dir,
+            case J >= 1 andalso J =< length(Ns) of
+                true ->
+                    L1 = lists:nth(J, Ns),
+                    C1 = case Dir of 1 -> hd(cells(D, L1)); -1 -> lists:last(cells(D, L1)) end,
+                    S#{ln := L1, cur := C1};
+                false -> S
+            end
+    end.
+
+%% A line's cells, left to right: a rung's contacts and its coil, a card's
+%% fields, a comment as one.
+cells(D, Ln) ->
+    case {caned_doc:rung(D, Ln), cur_for(D, Ln)} of
+        {none, comment} -> [comment];
+        {none, {seg, _}} -> [{seg, I} || I <- lists:seq(kw_cell(D, Ln),
+                                                         max(1, length(fields(D, Ln))))];
+        {_, _} -> caned_tree:leaves(tree(D, Ln)) ++ [coil]
+    end.
+
 %% The stops in the lines shown.
 shown_stops(S = #{doc := D}) ->
     {F, L} = lines(S),
@@ -234,6 +266,8 @@ first_leaf(D, Ln) -> hd(caned_tree:leaves(tree(D, Ln))).
 %%% ------------------------------------------------------------------ keys
 
 %% {ok, S} | {quit, S}.
+%% Tab going round a menu's choices (complete/3) stops at any other key.
+key(K, S = #{cycle := _}) when K =/= tab, K =/= shift_tab -> key(K, maps:remove(cycle, S));
 key({msg, M}, S) -> {ok, S#{msg := M}};          % what the keys say: `C-x-'
 key(K, S = #{mode := {edit, Text}}) -> edit(K, Text, S);
 key(K, S = #{mode := {edit_coil, Text}}) -> edit_coil(K, Text, S);
@@ -261,6 +295,11 @@ key1($\s, S = #{doc := D, ln := Ln}) ->
         {object, _, _, _, _} -> toggle_open(S, Ln);
         _ -> {ok, maps:without([anchor, free], go(next_rung, S#{msg := "", sel := none}))}
     end;
+%% Tab: the next cell -- contact, coil, a card's field -- and after a
+%% line's last its next line's first; shift_tab back.
+key1(K, S) when K =:= tab; K =:= shift_tab ->
+    Dir = case K of tab -> 1; shift_tab -> -1 end,
+    {ok, maps:without([anchor, free], cell(Dir, S#{msg := "", sel := none}))};
 key1({click, Ln, open}, S) -> toggle_open(S, Ln);
 key1({click, Ln, check}, S) -> key1({dclick, Ln, handle}, S);
 %% A rung shown under an object: the module's own, where it is written.
@@ -478,8 +517,6 @@ normal(left, S)  -> {ok, step(-1, S)};
 normal(K, S) when K =:= shift_right; K =:= shift_left -> {ok, extend(K, S)};
 normal(down, S)  -> {ok, line(1, S)};
 normal(up, S)    -> {ok, line(-1, S)};
-normal(tab, S)   -> {ok, line(1, S)};
-normal(shift_tab, S) -> {ok, line(-1, S)};
 normal(enter, S) -> {ok, start_edit(S)};
 normal($e, S)    -> {ok, start_edit(S)};
 normal(K, S = #{cur := coil}) when K =:= $&; K =:= $|; K =:= $!; K =:= $x; K =:= del ->
@@ -596,9 +633,23 @@ fix_cur(S = #{doc := D, ln := Ln, cur := P}) ->
 %% The fields of the declaration on Ln, the keyword left out: [{Key, Sep, Text}].
 fields(D, Ln) -> tl(caned_decl:segs(caned_doc:stmt(D, Ln))).
 
+%% The keyword is a cell, {seg, 0}, where the declaration can be turned into
+%% another kind (caned_menu:kinds/0): the card's first cell then, 1 else.
+kw_cell(D, Ln) ->
+    case lists:member(element(1, caned_doc:stmt(D, Ln)), caned_menu:kinds()) of
+        true -> 0;
+        false -> 1
+    end.
+
 card_key(K, S = #{doc := D, ln := Ln, cur := {seg, I}}) when K =:= left; K =:= right ->
     N = length(fields(D, Ln)),
-    {ok, S#{cur := {seg, max(1, min(N, I + case K of left -> -1; right -> 1 end))}}};
+    {ok, S#{cur := {seg, max(kw_cell(D, Ln), min(N, I + case K of left -> -1; right -> 1 end))}}};
+%% The keyword: its kind chosen from the kinds, written as one of those.
+card_key(K, S = #{cur := {seg, 0}}) when K =:= enter; K =:= $e ->
+    %% empty: what is typed narrows the kinds, Tab puts one in
+    {ok, S#{mode := {field, kw, "", "", 0}, msg := ""}};
+card_key(K, S = #{cur := {seg, 0}}) when K =:= $x; K =:= del ->
+    {ok, S#{msg := "the kind is changed, not taken off: ⏎"}};
 card_key(K, S = #{doc := D, ln := Ln, cur := {seg, I}}) when K =:= enter; K =:= $e ->
     case lists:nth(I, fields(D, Ln)) of
         {name, _, _} -> {ok, S#{msg := "the name is renamed with its uses -- not yet"}};
@@ -649,6 +700,18 @@ set_fields(Fs, S = #{doc := D, ln := Ln}) ->
 %% Writing field Key (add: a new one): Typed what was typed, the choices
 %% narrowed by it; Text what is in the field; Sel the choice Tab put in.
 field(esc, _, _, _, _, S) -> {ok, S#{mode := normal, msg := ""}};
+field(enter, kw, _, Text, _, S = #{doc := D, ln := Ln}) ->
+    T = string:trim(string:trim(Text), leading, "#"),
+    case T =:= "" orelse lists:member(T, [atom_to_list(K) || K <- caned_menu:kinds()]) of
+        true when T =:= "" -> {ok, S#{mode := normal, msg := ""}};
+        true ->
+            New = caned_decl:convert(caned_doc:stmt(D, Ln), list_to_atom(T)),
+            case caned_doc:set_kind(D, Ln, New) of
+                {ok, D1} -> {ok, (doc_change(D1, S))#{mode := normal, msg := ""}};
+                {error, M} -> {ok, S#{msg := M}}
+            end;
+        false -> {ok, S#{msg := "not a kind: " ++ T}}
+    end;
 field(enter, Key, _, Text, _, S = #{doc := D, ln := Ln, cur := {seg, I}}) ->
     Fs = fields(D, Ln),
     {Fs1, I1} = case {Key, string:trim(Text)} of
@@ -763,7 +826,7 @@ inline_rows(S = #{doc := D}, L, Widths, Nos, Cs) ->
                 true ->
                     S1 = S#{ln := 0, sel := none},
                     lists:append(
-                      [[[{{shade, inline, none}, ""}, {lineno, "     "}, {text, "    "} |
+                      [[[{{shade, inline, none, bands(S, L)}, ""}, {lineno, "     "}, {text, "    "} |
                          [re_key(Run, O) || Run <- tl(R)]]
                         || R <- line_rows(S1, X, maps:get(X, Widths, {0, 0}), Nos, Cs)]
                        || X <- module_rungs(D, M)]);
@@ -929,12 +992,26 @@ declare_key(_, _N, _Near, S) -> {ok, S}.
 
 stmt_key(esc, _Text, _At, S) -> {ok, S#{mode := normal, msg := ""}};
 stmt_key(enter, Text, At, S = #{doc := D, undo := Us}) ->
-    case caned_doc:insert_line(D, At, string:trim(Text)) of
+    %% `none', a place's default, is not written
+    Line = string:join([W || W <- string:lexemes(Text, " "), W =/= "none"], " "),
+    case caned_doc:insert_line(D, At, Line) of
 	{ok, D1} ->
 	    {ok, S#{doc := D1, undo := [D | Us], redo := [], ln := At, cur := cur_for(D1, At),
 		    mode := normal, msg := ""}};
 	{error, M} -> {ok, S#{msg := M}}
     end;
+%% Space on a place left empty: its default, the first of its choices; on
+%% one with none (the name) nothing -- words are a blank apart.
+stmt_key($\s, Text, At, S) ->
+    T1 = case lists:suffix(" ", Text) andalso decl_choices(Text, S) of
+             {_, "", [Default | _]} -> Text ++ Default ++ " ";
+             false -> Text ++ " ";
+             _ -> Text                           % no empty words: one blank apart
+         end,
+    {ok, S#{mode := {stmt, T1, At}, msg := ""}};
+stmt_key(K, Text, At, S) when K =:= tab; K =:= shift_tab ->
+    {T1, S1} = complete(K, Text, S),
+    {ok, S1#{mode := {stmt, T1, At}}};
 stmt_key(backspace, "", _At, S) -> {ok, S};
 stmt_key(backspace, Text, At, S) -> {ok, S#{mode := {stmt, lists:droplast(Text), At}}};
 stmt_key(C, Text, At, S) when is_integer(C), C >= $\s ->
@@ -974,7 +1051,9 @@ edit_coil(backspace, "", S) -> {ok, S};
 edit_coil(backspace, Text, S) -> {ok, S#{mode := {edit_coil, lists:droplast(Text)}}};
 edit_coil(C, Text, S) when is_integer(C), C >= $\s ->
     {ok, S#{mode := {edit_coil, Text ++ [C]}, msg := ""}};
-edit_coil(tab, Text, S) -> {ok, S#{mode := {edit_coil, complete(Text, S)}}};
+edit_coil(K, Text, S) when K =:= tab; K =:= shift_tab ->
+    {T1, S1} = complete(K, Text, S),
+    {ok, S1#{mode := {edit_coil, T1}}};
 edit_coil(_, _Text, S) -> {ok, S}.
 
 edit(esc, _Text, S = #{added := {L0, P0}, undo := [D0 | Us]}) ->
@@ -995,33 +1074,45 @@ edit(enter, Text, S = #{doc := D, ln := Ln, cur := P}) ->
 	    {ok, declare_new(maps:remove(added, S1#{mode := normal}))};
 	{error, M} -> {ok, S#{msg := M}}
     end;
-edit(tab, Text, S) -> {ok, S#{mode := {edit, complete(Text, S)}}};
+edit(K, Text, S) when K =:= tab; K =:= shift_tab ->
+    {T1, S1} = complete(K, Text, S),
+    {ok, S1#{mode := {edit, T1}}};
 edit(backspace, "", S) -> {ok, S};
 edit(backspace, Text, S) -> {ok, S#{mode := {edit, lists:droplast(Text)}}};
 edit(C, Text, S) when is_integer(C), C >= $\s ->
     {ok, S#{mode := {edit, Text ++ [C]}, msg := ""}};
 edit(_, _Text, S) -> {ok, S}.
 
-%% Text with Tab's choice in: the next choice after the one written, or the
-%% first the written part begins; as it was when none is offered or none
-%% fits what is written -- Tab never writes over what was typed.
-complete(Text, S) ->
-    case choices_at(Text, S) of
-        none -> Text;
-        {Base, Part, Ps} ->
-            case {lists:dropwhile(fun(P) -> P =/= Part end, Ps),
-                  [P || P <- Ps, lists:prefix(Part, P)]} of
-                {[_, N | _], _} -> Base ++ N;            % the next one
-                {[_], _} -> Base ++ hd(Ps);              % round again
-                {[], [P | _]} -> Base ++ P;              % the first it begins
-                {[], []} -> Text                         % nothing fits: left as written
-            end
+%% Tab (shift_tab back) on what is written, as a shell completes: the
+%% first choice what was typed begins, then round the ones it begins; the
+%% state's `cycle' {Base, Typed, Choice} keeps what was typed while Tab
+%% goes round. Nothing offered, or nothing fits what was typed: the text as
+%% it was -- Tab never writes over what was typed. {Text, S}.
+complete(K, Text, S) ->
+    Dir = case K of tab -> 1; shift_tab -> -1 end,
+    case {maps:get(cycle, S, none), choices_at(Text, S)} of
+        {{Base, Typed, Cur}, {Base, Cur, Ps}} ->
+            Fit = fits(Typed, Ps),
+            I = index_in(Fit, Cur),
+            Next = lists:nth((I - 1 + Dir + length(Fit)) rem length(Fit) + 1, Fit),
+            {Base ++ Next, S#{cycle => {Base, Typed, Next}}};
+        {_, {Base, Part, Ps}} ->
+            case fits(Part, Ps) of
+                [] -> {Text, S};
+                Fit ->
+                    First = case Dir of 1 -> hd(Fit); -1 -> lists:last(Fit) end,
+                    {Base ++ First, S#{cycle => {Base, Part, First}}}
+            end;
+        _ -> {Text, S}
     end.
+
+fits(Typed, Ps) -> [P || P <- Ps, lists:prefix(Typed, P)].
 
 %% What may be written at the end of Text: a name's parts after `Name.';
 %% a value after `X =', `X ==', `X !=' or `X <-' (caned_names:values/3 --
 %% State's states, a family of defines). {the text before it, what is
 %% written of it so far, the choices} | none.
+choices_at(Text, S = #{mode := {stmt, _, _}}) -> decl_choices(Text, S);
 choices_at(Text, S) ->
     case parts_at(Text, S) of
         none -> values_at(Text, S);
@@ -1037,6 +1128,99 @@ values_at(Text, #{doc := D, ln := Ln}) ->
                 Vs -> {lists:sublist(Text, length(Text) - length(Part)), Part, Vs}
             end;
         nomatch -> none
+    end.
+
+%% The guided card (#): the word being written of a new line. The first is
+%% what the line is (caned_menu:heads/1), the second its name, written
+%% freely; then the options of the groups the kind has and that are not
+%% taken yet, in the groups' order. {Base, Part, Choices} | none.
+decl_choices(Text, #{doc := D}) ->
+    case string:split(Text, " ", all) of
+        ["#" ++ Part] -> {"#", Part, caned_menu:heads(D)};
+        [_, _Name] -> none;
+        ["#" ++ Head | Rest] when length(Rest) >= 2 ->
+            Part = lists:last(Rest),
+            Kind = kind_of_head(Head),
+            case slot(Kind, length(Rest) - 1) of
+                {_, []} -> none;
+                {_, Cs} -> {lists:sublist(Text, length(Text) - length(Part)), Part, Cs};
+                past -> none;
+                groups -> group_choices(Text, Kind, Rest, Part)
+            end;
+        _ -> none
+    end.
+
+%% The words of the groups a kind has and that are not taken yet.
+group_choices(Text, Kind, Rest, Part) ->
+    Taken = [caned_menu:group(W) || W <- lists:droplast(tl(Rest))],
+    case [W || G <- caned_menu:groups_of(Kind), not lists:member(G, Taken),
+               W <- caned_menu:words(G)] of
+        [] -> none;
+        Ws -> {lists:sublist(Text, length(Text) - length(Part)), Part, Ws}
+    end.
+
+%% A #digital's and an #analog's places after the name, in order: {Label,
+%% Choices} for the Ith ([] free: the pin), past after the last -- what
+%% else goes on one (invert, a trigger, ...) the card's + puts on after.
+%% none, first, is the default and is not written. groups: the kind is
+%% written a group at a time instead.
+slot(digital, I) -> nth_slot(I, [{"dir", ["in", "out", "inout"]},
+                                 {"pull", ["none", "pullup", "pulldown"]}, {"pin", []}]);
+slot(analog, I) -> nth_slot(I, [{"dir", ["in", "out", "inout"]},
+                                {"pwm", ["none", "pwm"]}, {"pin", []}]);
+slot(_, _) -> groups.
+
+nth_slot(I, Slots) when I =< length(Slots) -> lists:nth(I, Slots);
+nth_slot(_, _) -> past.
+
+%% The kind a guided card's first word names, none for one that is no
+%% declaration's (an object's module, #states, ...).
+kind_of_head(Head) ->
+    case [K || K <- caned_menu:kinds() ++ [buffer, field], atom_to_list(K) =:= Head] of
+        [K] -> K;
+        [] -> none
+    end.
+
+%% The guided card's status: what is written, and after it what the word
+%% being written can be -- the kinds, or the option groups left, each by
+%% its name, those the word begins, the one Tab puts in lit.
+decl_offered(Text, S = #{doc := _}) ->
+    case string:split(Text, " ", all) of
+        ["#" ++ Head | Rest] when length(Rest) >= 2 ->
+            Kind = kind_of_head(Head),
+            I = length(Rest) - 1,
+            case slot(Kind, I) of
+                groups -> group_offered(Text, S, Kind, Rest);
+                past -> [{help, "   ⏎ -- + on the card adds the rest"}];
+                {Label, Cs} ->
+                    Part = lists:last(Rest),
+                    Lit = lit_choice(Text, S),
+                    Then = [L || J <- lists:seq(I + 1, 3), {L, _} <- [slot(Kind, J)]],
+                    [{help, "   " ++ Label ++ ":"}] ++
+                        [{case C of Lit -> menu_sel; _ -> menu end, " " ++ C}
+                         || C <- Cs, lists:prefix(Part, C)] ++
+                        [{help, "   then " ++ string:join(Then, ", ")} || Then =/= []]
+            end;
+        [_, _] -> [{help, "   the name"}];
+        _ -> offered(Text, S)
+    end.
+
+group_offered(Text, S, Kind, Rest) ->
+    Taken = [caned_menu:group(W) || W <- lists:droplast(tl(Rest))],
+    Part = lists:last(Rest),
+    Lit = lit_choice(Text, S),
+    lists:append(
+      [[{help, "   " ++ atom_to_list(G) ++ ":"} |
+        [{case W of Lit -> menu_sel; _ -> menu end, " " ++ W} || W <- Fit]]
+       || G <- caned_menu:groups_of(Kind), not lists:member(G, Taken),
+          Fit <- [[W || W <- caned_menu:words(G), lists:prefix(Part, W)]], Fit =/= []]).
+
+%% The choice lit: the one Tab put in, going round; else the first fitting.
+lit_choice(Text, S) ->
+    case {maps:get(cycle, S, none), choices_at(Text, S)} of
+        {{Base, _, Cur}, {Base, Cur, _}} -> Cur;
+        {_, {_, Part, Ps}} -> case fits(Part, Ps) of [F | _] -> F; [] -> none end;
+        _ -> none
     end.
 
 %% `... Name.part' at the end of what is written, Name declared with parts:
@@ -1117,7 +1301,8 @@ plain(S, Rows, Cols) ->
     [string:trim(lists:append([T || {_, T} <- R]), trailing) || R <- Rs].
 
 %% Every line's rows, and the row each line starts on.
-body(S = #{doc := D}) ->
+body(S0 = #{doc := D}) ->
+    S = S0#{levels => levels(D)},
     N = caned_doc:nlines(D),
     {L0, L1} = lines(S),
     Widths = widths(S, rungs(D)),
@@ -1188,7 +1373,46 @@ shade(S = #{doc := D, ln := Cur}, L, Cs) ->
 				     end;
 		_ -> none
 	    end,
-    {{shade, Kind, Focus}, ""}.
+    {{shade, Kind, Focus, bands(S, L)}, ""}.
+
+%% LEVELS: how deep in #module, #in and #when a line is, {Depth, Role},
+%% Role open | 'else' | close (the block's own lines, at the depth of the
+%% line that opens it) | body. A line is shown that deep, two characters a
+%% level, whatever its own white space is -- tabs and spaces mixed are no
+%% indentation to go by.
+levels(D) ->
+    {Ls, _} = lists:mapfoldl(
+		fun(L, Dp) ->
+			case caned_doc:stmt(D, L) of
+			    none -> {{L, {Dp, body}}, Dp};
+			    St ->
+				case element(1, St) of
+				    K when K =:= module; K =:= in; K =:= 'when' ->
+					{{L, {Dp, open}}, Dp + 1};
+				    'else' -> {{L, {max(0, Dp - 1), 'else'}}, Dp};
+				    'end' -> {{L, {max(0, Dp - 1), close}}, max(0, Dp - 1)};
+				    _ -> {{L, {Dp, body}}, Dp}
+				end
+			end
+		end, 0, lists:seq(1, caned_doc:nlines(D))),
+    maps:from_list(Ls).
+
+%% A line's indentation, by its level; its own white space where there are
+%% no levels (a line shown by itself).
+ind(S, L, Own) ->
+    case maps:find(L, maps:get(levels, S, #{})) of
+	{ok, {Dp, _}} -> lists:duplicate(2 * Dp, $\s);
+	error -> Own
+    end.
+
+%% The band a line's rows lie in: {Levels, Role} -- the block's own lines in
+%% the block's band, its body as deep as it is.
+bands(S, L) ->
+    case maps:find(L, maps:get(levels, S, #{})) of
+	{ok, {Dp, body}} -> {Dp, body};
+	{ok, {Dp, R}} -> {Dp + 1, R};
+	error -> {0, body}
+    end.
 
 %% A comment being written, as it will be saved, the caret in it: in place
 %% of the comment's lines, or above line At for a new one. none elsewhere.
@@ -1219,6 +1443,20 @@ note_rows(S = #{mode := {note, Text, At, Where}, doc := D}, L) ->
 	    end;
 	_ -> none
     end;
+%% The guided card being written, in its place: a line of its own above
+%% line At, what is written so far.
+note_rows(S = #{mode := {stmt, Text, At}, doc := D}, L) when L =:= At ->
+    Ls = maps:get(lines, D),
+    Ref = case L > 1 andalso L - 1 =< length(Ls) of
+              true -> lists:nth(L - 1, Ls);
+              false -> ""
+          end,
+    Indent = lists:takewhile(fun(C) -> C =:= $\s orelse C =:= $\t end, Ref),
+    [[{lineno, "     "}, {text, Indent}, {field_edit, Text ++ "▏"}]] ++
+        case L > length(Ls) of
+            true -> [];
+            false -> line_rows(S#{mode := normal}, L)
+        end;
 note_rows(_, _) -> none.
 
 %% A comment as a box with a double frame, as wide as its lines are let be
@@ -1266,14 +1504,16 @@ line_rows(S = #{doc := D, ln := Cur}, L, {Width, CoilW}, Nos, Cs) ->
 			{Cur, comment} -> frame_cur;
 			_ -> frame
 		    end,
-	    Indent = indent(lists:nth(F, maps:get(lines, D))),
-	    W = box_width(Indent, Ts),
-	    Box = box(Indent, W, Frame, comment, {F, comment}),
+	    Own = indent(lists:nth(F, maps:get(lines, D))),
+	    W = box_width(Own, Ts),
+	    Box = box(ind(S, F, Own), W, Frame, comment, {F, comment}),
 	    [Box(top) || L =:= F] ++ [Box({text, lists:nth(L - F + 1, Ts)})] ++
 		[Box(bottom) || L =:= La];
 	none ->
 	    case caned_doc:stmt(D, L) of
-		none -> [[{NoA, No}, {text, caned_doc:line(D, L)}]];
+		none ->
+		    Txt = caned_doc:line(D, L),
+		    [[{NoA, No}, {text, ind(S, L, indent(Txt)) ++ string:trim(Txt, leading)}]];
 		St -> [[{NoA, No} | card_row(S, L, St)]]
 	    end;
 	{_, _} ->
@@ -1294,7 +1534,8 @@ line_rows(S = #{doc := D, ln := Cur}, L, {Width, CoilW}, Nos, Cs) ->
 			none -> [];
 			C -> [{comment, "  " ++ C}]
 		    end,
-	    [[{{NoA, {L, handle}}, No} | Row1] ++ Trail | [[{lineno, "     "} | R] || R <- More]]
+	    Ind = {text, ind(S, L, "")},
+	    [[{{NoA, {L, handle}}, No}, Ind | Row1] ++ Trail | [[{lineno, "     "}, Ind | R] || R <- More]]
     end.
 
 %% A declaration as its card: the keyword, each field on its own; the one
@@ -1303,7 +1544,7 @@ card_row(S = #{doc := D, ln := Cur, mode := Mode}, L, St) ->
     [{kw, Kw} | _] = [{kw, T} || {kw, _, T} <- caned_decl:segs(St)],
     Fs = tl(caned_decl:segs(St)),
     Line = caned_doc:line(D, L),
-    Indent = lists:takewhile(fun(C) -> C =:= $\s orelse C =:= $\t end, Line),
+    Indent = ind(S, L, indent(Line)),
     CI = case {L, maps:get(cur, S)} of
              {Cur, {seg, I}} -> I;
              _ -> none
@@ -1329,7 +1570,13 @@ card_row(S = #{doc := D, ln := Cur, mode := Mode}, L, St) ->
                        end}];
                  _ -> []
              end,
-    [{text, Indent} | Opener] ++ [{kw, Kw}] ++
+    KwCell = case {kw_cell(D, L), Edit} of
+                 {1, _} -> {kw, Kw};
+                 {0, {kw, Te}} -> {{field_edit, {L, {seg, 0}}}, "#" ++ Te ++ "▏"};
+                 {0, _} when CI =:= 0 -> {{field_cur, {L, {seg, 0}}}, Kw};
+                 {0, _} -> {{kw, {L, {seg, 0}}}, Kw}
+             end,
+    [{text, Indent} | Opener] ++ [KwCell] ++
         lists:append([[{text, Sep} || Sep =/= ""] ++ [Field(I, Key, T)]
                       || {I, {Key, Sep, T}} <- lists:enumerate(Fs)]) ++
         case {Edit, CI} of
@@ -1387,12 +1634,14 @@ scroll(S = #{ln := Ln, top := Top}, H) ->
     S#{top := Top1}.
 
 status(#{mode := {coil, Text, _}, msg := M}) ->
-    [{status, " new rung, its coil: "}, {edit, Text ++ "▏"}] ++
+    [{status, " new rung, its coil (B, or B = 1): "}, {edit, Text ++ "▏"}] ++
 	[{error, "   " ++ M} || M =/= ""];
 status(#{mode := {declare, N, [K | Ks]}}) ->
     [{status, " " ++ N ++ " is not declared: "}, {help, "⏎ declares it   Tab "},
      {menu_sel, " " ++ K ++ " "}] ++ [{menu, " " ++ X ++ " "} || X <- Ks] ++
         [{help, "   Esc leaves it"}];
+status(S = #{mode := {stmt, Text, _}, msg := ""}) ->
+    [{status, " new line: "}, {edit, Text ++ "▏"}] ++ decl_offered(Text, S);
 status(#{mode := {stmt, Text, _}, msg := M}) ->
     [{status, " new line: "}, {edit, Text ++ "▏"}] ++ [{error, "   " ++ M} || M =/= ""];
 status(S = #{mode := {edit_coil, Text}, msg := ""}) ->
@@ -1404,6 +1653,7 @@ status(#{mode := {note, _, _, _}}) ->
 status(S = #{mode := {field, Key, Typed, Text, _}, msg := M}) ->
     Name = case Key of
                add -> "add";
+               kw -> "kind";
                {opt, _} -> "option";
                _ -> atom_to_list(Key)
            end,
@@ -1428,16 +1678,24 @@ status(#{file := F, doc := D, msg := M, access := A}) ->
 	end.
 
 %% What Tab offers where the text ends, quietly after it on the status
-%% line: the choices the written part begins, the one written lit; none
-%% when nothing is offered or nothing fits -- typing goes on as it was.
+%% line: the choices what was typed begins, lit the one Tab puts in (or
+%% has put in, going round); none when nothing is offered or nothing fits
+%% -- typing goes on as it was.
 offered(Text, S) ->
-    case choices_at(Text, S) of
+    {Typed, Lit} = case {maps:get(cycle, S, none), choices_at(Text, S)} of
+                       {{Base, T, Cur}, {Base, Cur, Ps0}} -> {T, {Cur, Ps0}};
+                       {_, {_, Part, Ps0}} -> {Part, {first, Ps0}};
+                       _ -> {"", none}
+                   end,
+    case Lit of
         none -> [];
-        {_, Part, Ps} ->
-            case [P || P <- Ps, lists:prefix(Part, P)] of
+        {Sel, Ps} ->
+            case fits(Typed, Ps) of
                 [] -> [];
-                Fit -> [{help, "   Tab:"} |
-                        [{case P of Part -> menu_sel; _ -> menu end, " " ++ P} || P <- Fit]]
+                Fit = [F | _] ->
+                    On = case Sel of first -> F; _ -> Sel end,
+                    [{help, "   Tab:"} |
+                     [{case P of On -> menu_sel; _ -> menu end, " " ++ P} || P <- Fit]]
             end
     end.
 

@@ -29,8 +29,8 @@
 	 solve_view/0]).
 -export([clear/2, built/1, message/3, chooser/3, panel/3, event/2, open_file/2,
 	 save_file/4, tabs/3, connect/2]).
--export([status/3, trace_view/3, theme/2, view_buttons/4, pane_button/4, mode/3]).
--export([tc/3, is_light/1, theme_hook/3]).
+-export([print/3, status/3, trace_view/3, theme/2, view_buttons/4, pane_button/4, mode/3]).
+-export([tc/3, paper/2, is_light/1, theme_hook/3]).
 -export([rich/3, rich_add/4, rich_trim/3, rich_clear/2]).
 -export([btn/4, btn_on/3, btn_enable/3, btn_label/3, btn_group/3, menu_btn/5]).
 -export([paint/3, trace_clear/2, trace_column/3, plot/4]).
@@ -112,14 +112,26 @@ solve_view() -> csp_solve_wx.
 
 %% The window emptied for a rebuild, and a fresh root to build in. The dock
 %% stays.
-%% Frozen from here until built/1: what is made is not drawn, piece by
-%% piece as it comes -- the page shows when it is all there.
+%% The new root frozen from here until built/1: what is made is not drawn,
+%% piece by piece as it comes -- the page shows when it is all there. Not
+%% the frame: a frozen one is not drawn at all, black until it thaws; the
+%% frame shows the theme's ground meanwhile.
 clear(H, Frame) ->
-    wxWindow:isFrozen(Frame) orelse wxWindow:freeze(Frame),
     wx:batch(fun() -> clear1(H, Frame) end).
 
-built(#{frame := Frame}) ->
-    wxWindow:isFrozen(Frame) andalso wxWindow:thaw(Frame),
+%% The code view on paper: a preview, its print button the printer's.
+print(H, Title, Ops) -> csp_code_wx:print(H, Title, Ops).
+
+built(H) ->
+    case lookup(H, theme_root) of
+	{ok, Root} -> wxWindow:isFrozen(Root) andalso wxWindow:thaw(Root);
+	error -> ok
+    end,
+    %% the keys to the code view: the editor, to start writing in
+    case lookup(H, code_canvas) of
+	{ok, {Canvas, _}} -> wxWindow:setFocus(Canvas);
+	error -> ok
+    end,
     ok.
 
 clear1(H = #{ids := Ids, dock := Dock}, Frame) ->
@@ -127,6 +139,9 @@ clear1(H = #{ids := Ids, dock := Dock}, Frame) ->
     %% of their own, and one registering a button while this runs keeps it
     %% (it was lost between a read of all and a delete of all).
     [ets:delete(Ids, K) || {K, _, _} <- ets:tab2list(Ids), not outlives(K, Dock)],
+    %% what shows while the page is torn down and built again: the theme's
+    %% ground, not the toolkit's black
+    bg(H, Frame, ?BG),
     Fs = wxBoxSizer:new(?wxVERTICAL),
     wxWindow:setSizer(Frame, Fs),
     [wxWindow:destroy(W) || W <- wxWindow:getChildren(Frame),
@@ -138,6 +153,7 @@ clear1(H = #{ids := Ids, dock := Dock}, Frame) ->
     wxSizer:add(Fs, Root, [{proportion, 1}, {flag, ?wxEXPAND}]),
     wxSizer:add(Fs, Dock, [{flag, ?wxEXPAND}]),
     register(H, theme_root, Root),
+    wxWindow:freeze(Root),
     Root.
 
 %% What a rebuild leaves: the theme, and what the dock's panes coloured.
@@ -233,6 +249,7 @@ chooser1(H, Root, Spec = #{period := Now, periods := Periods, views := Views,
     Button(File, "new", "new"),
     Button(File, "save", "save"),
     Button(File, "save as\x{2026}", "saveas"),
+    Button(File, "print\x{2026}", "print"),
     %% Where it runs: a dialog (connect/2), the tab says where it is.
     Button(File, "connect\x{2026}", "connect"),
     Run = {RBox, RIn} = Group(Row1, "run"),
@@ -1017,6 +1034,10 @@ tc(H, C, Which) ->
 	true -> light_fg(C);
 	false -> C
     end.
+
+%% A colour on paper: the light theme's, whatever the screen's is.
+paper(C, bg) -> light(C);
+paper(C, _) -> light_fg(C).
 
 is_light(#{ids := Ids}) ->
     case ets:lookup(Ids, theme) of

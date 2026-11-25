@@ -46,7 +46,7 @@ focus(Rows, #{ch := Ch}) ->
 
 %% The rows the cursor's node is on, in pixels: {Y0, Y1, cur | idle} | none.
 node_rows(Rows, Ch) ->
-    Ys = [{I * Ch, F} || {I, [{{shade, _, F}, _} | _]} <- lists:enumerate(0, Rows),
+    Ys = [{I * Ch, F} || {I, [{{shade, _, F, _}, _} | _]} <- lists:enumerate(0, Rows),
                          F =/= none],
     case Ys of
         [] -> none;
@@ -54,6 +54,8 @@ node_rows(Rows, Ch) ->
     end.
 
 lighter({R, G, B}) -> {R + 10, G + 10, B + 10}.
+
+lift({R, G, B}, K) -> {R + 6 * K, G + 6 * K, B + 6 * K}.
 
 width(M) -> maps:get(w, M, 4000).
 
@@ -116,14 +118,30 @@ run(K, A, T, X, Y, #{cw := Cw, ch := Ch}) when K =:= always; K =:= always_cur; K
 run(K, A, T, X, Y, M = #{cw := Cw}) when K =:= frame; K =:= frame_cur; K =:= frame_edit ->
     {frames(T, X, Y, colour(K), M), hit(A, X, Y, Cw * length(T), maps:get(ch, M))};
 %% Wires: each box-drawing character the lines it stands for.
-%% The shade a row lies on, by what the line is: the whole width.
-run({shade, Kind, F}, _A, _T, _X, Y, M = #{ch := Ch}) ->
-    case {shade(Kind), F} of
-        {none, none} -> {[], []};
-        {none, _} -> {[{rect, 0, Y, width(M), Ch, 0, {28, 28, 28}, none, false}], []};
-        {C, none} -> {[{rect, 0, Y, width(M), Ch, 0, C, none, false}], []};
-        {C, _} -> {[{rect, 0, Y, width(M), Ch, 0, lighter(C), none, false}], []}
-    end;
+%% The shade a row lies on, by what the line is: the whole width. Over it
+%% its block's BANDS, one a level, each from where that level's lines start
+%% (after the rule numbers, two characters a level), a shade lighter than
+%% the one outside it: what is in a block lies on one ground. A faint line
+%% over a block's head and its #else, under its #end -- what is left of the
+%% bands on paper.
+run({shade, Kind, F, {B, Role}}, _A, _T, _X, Y, M = #{cw := Cw, ch := Ch}) ->
+    Base = case {shade(Kind), F} of
+               {none, none} -> ?BG;
+               {none, _} -> {28, 28, 28};
+               {C, none} -> C;
+               {C, _} -> lighter(C)
+           end,
+    X = fun(K) -> Cw * (5 + 2 * (K - 1)) end,
+    Ground = [{rect, 0, Y, width(M), Ch, 0, Base, none, false} || Base =/= ?BG] ++
+        [{rect, X(K), Y, width(M) - X(K), Ch, 0, lift(Base, K), none, false}
+         || K <- lists:seq(1, B)],
+    Rule = case Role of
+               open -> [{line, X(B), Y, width(M), Y, colour(level), 1, false}];
+               'else' -> [{line, X(B), Y, width(M), Y, colour(level), 1, false}];
+               close -> [{line, X(B), Y + Ch - 1, width(M), Y + Ch - 1, colour(level), 1, false}];
+               body -> []
+           end,
+    {Ground ++ Rule, []};
 %% A rung's number, its handle: and in its second cell the rule's switch, a
 %% box filled while the rule is on (#disable empties it); a click on it
 %% switches.
@@ -260,6 +278,7 @@ colour(sel) -> {200, 225, 255};
 colour(hole) -> {204, 170, 68};
 colour(coil) -> {136, 200, 220};
 colour(lineno) -> {90, 90, 90};
+colour(level) -> {70, 70, 70};
 colour(comment) -> {120, 165, 110};
 colour(frame) -> {80, 120, 75};
 colour(frame_cur) -> {255, 204, 68};

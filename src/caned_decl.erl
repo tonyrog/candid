@@ -17,9 +17,48 @@
 
 -module(caned_decl).
 
--export([print/1, segs/1, join/1]).
+-export([print/1, segs/1, join/1, convert/2]).
 
 print(S) -> join(segs(S)).
+
+%% Declaration S as one of kind K (caned_menu:kinds/0), as text: its name
+%% kept, and of the rest what K has -- an array size, a width, the options
+%% of K's groups, the pins, a value. A value K must have and S had none of
+%% is a hole: `#constant N = _'. A #digital or #analog without pins is left
+%% so; they go on as any field does.
+convert(S, K) ->
+    Segs = segs(S),
+    F = fun(Key) -> case lists:keyfind(Key, 1, Segs) of
+                        {_, _, T} -> T;
+                        false -> ""
+                    end
+        end,
+    Name = F(name),
+    Arr = case lists:member(K, [digital, analog, variable, constant]) of
+              true -> F(arr);
+              false -> ""
+          end,
+    Res = case {lists:member(K, [analog, variable, constant, param, local]), F(res)} of
+              {true, R} when R =/= "" -> ":" ++ R;
+              _ -> ""
+          end,
+    Gs = caned_menu:groups_of(K),
+    Opts = [[" ", T] || {{opt, _}, _, T} <- Segs, lists:member(caned_menu:group(T), Gs)],
+    Value = case {F(init), F(period)} of
+                {"", ""} -> "";
+                {"", P} -> P;
+                {I, _} -> I
+            end,
+    Hole = fun("") -> "_"; (V) -> V end,
+    Tail = case K of
+               digital -> [[" ", F(pins)] || F(pins) =/= ""];
+               analog -> [[" ", F(pins)] || F(pins) =/= ""];
+               constant -> [" = ", Hole(Value)];
+               timer -> [" ", Hole(Value)];
+               define -> [" ", Hole(Value)];
+               _ -> [[" = ", Value] || Value =/= ""]
+           end,
+    lists:flatten(["#", atom_to_list(K), " ", Name, Arr, Res, Opts, Tail]).
 
 join(Segs) -> lists:flatten([[Sep, T] || {_, Sep, T} <- Segs]).
 

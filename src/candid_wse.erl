@@ -12,7 +12,7 @@
 
 -module(candid_wse).
 
--export([start/2, code_view/0, chat_view/0, log_view/0, solve_view/0]).
+-export([print/3, start/2, code_view/0, chat_view/0, log_view/0, solve_view/0]).
 -export([clear/2, built/1, message/3, chooser/3, panel/3, event/2, save_file/4,
 	 tabs/3]).
 -export([status/3, trace_view/3, theme/2, view_buttons/4, pane_button/4, mode/3]).
@@ -170,6 +170,9 @@ clear(Ws, Where) ->
 %% The page is all there (candid_wx thaws what clear/2 froze); here it
 %% shows as it is made.
 built(_Ws) -> ok.
+
+%% Printing is the browser's own (its print menu prints the page).
+print(_Ws, _Title, _Ops) -> ok.
 
 message(Ws, Root, Str) ->
     text(Ws, Root, Str).

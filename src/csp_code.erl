@@ -63,7 +63,7 @@
 
 -module(csp_code).
 
--export([new/4, new/5, edit_text/1, source/2, disabled/2, refresh/2, fired/2, infer/5, tick/1, control/2, trace/2, actions/1]).
+-export([new/4, new/5, edit_text/1, print_ops/1, source/2, disabled/2, refresh/2, fired/2, infer/5, tick/1, control/2, trace/2, actions/1]).
 -export([look/1]).
 -export([assign/1, bind/1, chain/2, cols/1, tr_id/2, col_name/1,
 	 signed/3]).                                     % for the renderers
@@ -467,6 +467,26 @@ edit_open(V = #{ed := none, file := File, access := A}) ->
 	{error, {L, M}} -> {error, io_lib:format("~s:~w: ~s", [File, L, M])}
     end;
 edit_open(V) -> {ok, V}.
+
+%% The whole program for paper, as ops: the editor's text as written, not
+%% saved yet too, or the file's when it is not open -- every line, linear,
+%% and nothing of editing on it: no cursor, no selection, no lights.
+print_ops(V = #{file := File, access := A, metrics := M0}) ->
+    Ed0 = case V of
+	      #{ed := E = #{}} -> {ok, E};
+	      _ -> caned_ui:open(File, A)
+	  end,
+    case Ed0 of
+	{ok, E0} ->
+	    Ed = (caned_ui:set_scope(E0, all))#{ln := 0, sel := none, mode := normal},
+	    M = M0#{ch := maps:get(ch, M0) + 6, w => round(maps:get(cw, M0) * ?EDIT_COLS)},
+	    {Ops, _} = caned_ops:ops(lists:droplast(caned_ui:all(Ed)), M),
+	    [case Op of
+		 {text, X, Y, T, C, B} -> {text, X, Y + 3, T, C, B};
+		 _ -> Op
+	     end || Op <- Ops];
+	_ -> []
+    end.
 
 %% The editor's screen, the whole document, its status line first, as ops
 %% on the canvas; the canvas sized again only when the picture's size moved.

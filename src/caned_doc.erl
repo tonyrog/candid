@@ -46,7 +46,7 @@
 -export([stmts/1, stmt/2, rung/2, set_rung/3, print_rule/1, line_of/1]).
 -export([nlines/1, line/2, dirty/1]).
 -export([new_rung/3, delete_line/2, last_line/1]).
--export([coil_text/2, set_coil/3, set_stmt/3, set_decl/3]).
+-export([coil_text/2, set_coil/3, set_stmt/3, set_decl/3, set_kind/3]).
 -export([numbers/1, off/2, set_off/3, added/2, move_line/3, insert_stmt/3, insert_line/3]).
 -export([saved_line/2, saved/1]).
 -export([comments/1, comment_at/2, set_comment/3, new_comment/3, delete_lines/3,
@@ -275,6 +275,16 @@ set_decl(D = #{stmts := Ss, dirty := Dy}, Ln, Text) ->
         {error, {_, M}} -> {error, M}
     end.
 
+%% The declaration on Ln written anew as Text, of any kind but a rule: a
+%% #variable turned into a #digital (caned_decl:convert/2).
+set_kind(D = #{stmts := Ss, dirty := Dy}, Ln, Text) ->
+    case parse(Text ++ "\n") of
+        {ok, [S]} when element(1, S) =/= rule ->
+            {ok, D#{stmts := Ss#{Ln => S}, dirty := Dy#{Ln => true}}};
+        {ok, _} -> {error, "not one declaration: " ++ Text};
+        {error, {_, M}} -> {error, M}
+    end.
+
 %% A rule caned can print back: not a pack or an unpack (csp_code shows
 %% those as `<<= ...').
 printable({rule, _, As, _}) ->
@@ -290,25 +300,44 @@ print_rule({rule, _, As, G}) ->
 
 %%% ------------------------------------------------------------- new lines
 
-%% A new rung `Coil = _' as line At (what was At on is one further down), on
-%% the indentation of the line before it. {ok, Doc} | {error, Message}: Coil
-%% has to be something a rule can write.
+%% A new rung as line At (what was At on is one further down), on the
+%% indentation of the line before it: `Coil = _' for a name, the coil that
+%% follows its condition; `B = 1, C = 0 ? _' for assignments, done when the
+%% condition holds. {ok, Doc} | {error, Message}: Coil has to be something a
+%% rule can write.
 new_rung(D = #{lines := Ls}, At, Coil) ->
-    case from_text(Coil ++ " = _\n") of
+    Text = case is_assign(Coil) of
+	       true -> Coil ++ " ? _\n";
+	       false -> Coil ++ " = _\n"
+	   end,
+    case from_text(Text) of
 	{ok, D1} ->
 	    case stmts(D1) of
 		[{rule, _, [{'=', _, {field, _, _}, {hole, _}}], undefined} = R] ->
-		    Prev = case At > 1 of true -> lists:nth(At - 1, Ls); false -> "" end,
-		    Indent = lists:takewhile(fun(C) -> C =:= $\s orelse C =:= $\t end, Prev),
-		    D2 = shift(D, At, 1),
-		    #{lines := Ls2, stmts := Ss, dirty := Dy} = D2,
-		    {A, B} = lists:split(At - 1, Ls2),
-		    {ok, mark_added(D2#{lines := A ++ [Indent | B], stmts := Ss#{At => R},
-					dirty := Dy#{At => true}}, At)};
+		    {ok, new_line(D, Ls, At, R)};
+		[{rule, _, As, {hole, _}} = R] when As =/= [] ->
+		    case lists:all(fun(A) -> element(1, A) =:= '=' end, As) of
+			true -> {ok, new_line(D, Ls, At, R)};
+			false -> {error, "not a name a rule can write: " ++ Coil}
+		    end;
 		_ -> {error, "not a name a rule can write: " ++ Coil}
 	    end;
 	{error, {_, M}} -> {error, M}
     end.
+
+%% `B = 1' and not `B == 1': an assignment in what is written.
+is_assign(T) ->
+    string:find(re:replace(T, "[=!<>]=", "", [global, {return, list}]), "=") =/= nomatch.
+
+%% R as a new line At, marked added.
+new_line(D, Ls, At, R) ->
+    Prev = case At > 1 of true -> lists:nth(At - 1, Ls); false -> "" end,
+    Indent = lists:takewhile(fun(C) -> C =:= $\s orelse C =:= $\t end, Prev),
+    D2 = shift(D, At, 1),
+    #{lines := Ls2, stmts := Ss, dirty := Dy} = D2,
+    {A, B} = lists:split(At - 1, Ls2),
+    mark_added(D2#{lines := A ++ [Indent | B], stmts := Ss#{At => R},
+		   dirty := Dy#{At => true}}, At).
 
 %% A whole rule from its text as line At, on the indentation of the line
 %% before it. {ok, Doc} | {error, Message}.

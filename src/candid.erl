@@ -1856,6 +1856,9 @@ act_ui(U, Link, S, {bar, "new"}) ->
     flush(),
     render(U, maps:get(where, S), new, side(S));
 act_ui(U, Link, S, {bar, "save"}) -> loop(U, Link, save_edited(U, S, save));
+act_ui(U, Link, S, {bar, "print"}) ->
+    ui(U, print, [filename:basename(maps:get(file, S)), csp_code:print_ops(maps:get(code, S))]),
+    loop(U, Link, S);
 act_ui(U, Link, S, {bar, "saveas"}) -> loop(U, Link, save_edited(U, S, ask));
 act_ui(U, Link, S, {bar, "saveas=" ++ Name}) ->
     loop(U, Link, save_edited(U, S, {as, Name}));

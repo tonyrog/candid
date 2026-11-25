@@ -162,6 +162,15 @@ run() ->
     timer:sleep(?SETTLE),
     expect("save as redraws the tabs and leaves no dead ones behind",
 	   Btns() =:= B0, {B0, Btns()}),
+    %% The preview counts its pages where it has a printer's DC; its tool
+    %% bar asks for pages where there is none, and measuring there was a
+    %% segfault.
+    P ! {candid_wx, {bar, "print"}},
+    timer:sleep(?SETTLE),
+    Preview = wxWindow:findWindowByLabel("print wx_saved.csp"),
+    expect("print: a preview of the code view, and wx still up",
+	   is_process_alive(P) andalso not wx:is_null(Preview), Preview),
+    wx:is_null(Preview) orelse wxWindow:destroy(Preview),
     P ! {candid_wx, {bar, "new"}},
     timer:sleep(?SETTLE),
     expect("new after save as, the solver open: no crash", is_process_alive(P),

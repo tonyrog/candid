@@ -22,6 +22,8 @@ run() ->
     lines(),
     names(),
     values(),
+    kinds(),
+    guided(),
     halt(0).
 
 txt(S) -> {ok, X} = caned_text:expr(S), caned_tree:tree(X).
@@ -300,9 +302,11 @@ ui() ->
 	   "Yellow = a > 3\nYellow = a > 3\n" andalso
 	   Text(Scut) =:= "#digital Red out 1\n#digital Yellow out 2\n#variable a\n"
 	   "Red = 0, Yellow = 0\n", {maps:get(clip, Sr), Text(Sp2), Text(Scut)}),
-    expect("Tab and ⇧Tab: the next rung, the last",
-	   maps:get(ln, Keys([tab], Sn)) =:= 5 andalso
-	   maps:get(ln, Keys([tab, shift_tab], Sn)) =:= 4, nomatch),
+    Cell = fun(Ks) -> St = Keys(Ks, Sn), {maps:get(ln, St), maps:get(cur, St)} end,
+    expect("Tab and ⇧Tab: the next cell, the coil, over the line's end; back",
+	   {Cell([tab]), Cell([tab, tab]), Cell([tab, tab, tab]), Cell([tab, tab, shift_tab])}
+	   =:= {{4, coil}, {5, []}, {5, coil}, {4, coil}},
+	   {Cell([tab]), Cell([tab, tab]), Cell([tab, tab, tab]), Cell([tab, tab, shift_tab])}),
     {Sw, _} = caned_ui:screen(Keys([{scroll, 3}], S0), 6, 80),
     {Sw2, _} = caned_ui:screen(Keys([down], Sw), 6, 80),
     expect("the wheel scrolls the view and it stays; the cursor moved, it follows",
@@ -691,6 +695,12 @@ values() ->
     Sh = Type([rung_end, enter] ++ "P = PRIO_H" ++ [tab], S0),
     Sl = Type([rung_end, enter] ++ "L = " ++ [tab, tab], S0),
     So = Type([rung_end, enter] ++ "P = OTH" ++ [tab], S0),
+    Sb = Type([rung_end, enter] ++ "P = " ++ [tab, tab, shift_tab], S0),
+    {_, RowsC} = caned_ui:screen(Type([rung_end, enter] ++ "P = " ++ [tab, tab], S0), 12, 120),
+    expect("values: ⇧Tab goes back round; lit in the status line, the choice put in",
+           Mode(Sb) =:= "P = PRIO_OFF" andalso
+           [T || {menu_sel, T} <- lists:last(RowsC)] =:= [" PRIO_HIGH"],
+           {Mode(Sb), lists:last(RowsC)}),
     {_, Rows} = caned_ui:screen(Type([enter] ++ "State == S", S0), 12, 120),
     Shown = lists:append([T || {_, T} <- lists:last(Rows)]),
     expect("values: State's states; the PRIO_ family P is given, not OTHER; a written part "
@@ -700,6 +710,57 @@ values() ->
                 "L = 1", "P = OTH"}
            andalso string:find(Shown, "S1") =/= nomatch andalso string:find(Shown, "INIT") =:= nomatch,
            {[Mode(X) || X <- [Sc, Sc2, Sp, Sp2, Sh, Sl, So]], Shown}).
+
+%% A declaration's keyword is a cell: ⏎, what is typed narrows the kinds,
+%% Tab puts one in, ⏎ turns the declaration into it; one undo.
+kinds() ->
+    Type = fun(Ks, S0) -> lists:foldl(fun(K, Si) -> {ok, Si1} = caned_ui:key(K, Si), Si1 end,
+                                      S0, Ks) end,
+    {ok, D} = caned_doc:from_text("#variable A:8 unsigned = 3\nA = 1 ? _\n"),
+    S0 = caned_ui:new(D, "k.csp"),
+    Sk = Type([left, enter] ++ "dig", S0),
+    {_, Rows} = caned_ui:screen(Sk, 6, 100),
+    S1 = Type([tab, enter], Sk),
+    S2 = Type([enter] ++ "cons" ++ [tab, enter], S1),
+    {ok, S3} = caned_ui:key($u, S2),
+    Line1 = fun(S) -> hd(string:split(caned_doc:text(maps:get(doc, S)), "\n")) end,
+    expect("kinds: the keyword a cell left of the name; typed narrows, Tab, ⏎ turns it; "
+           "the width and type go where they do not belong, a value a constant must have "
+           "is a hole; one undo",
+           maps:get(cur, Type([left], S0)) =:= {seg, 0}
+           andalso [T || {menu, T} <- lists:last(Rows)] ++ [T || {menu_sel, T} <- lists:last(Rows)]
+                   =/= []
+           andalso Line1(S1) =:= "#digital A"
+           andalso Line1(S2) =:= "#constant A = _"
+           andalso Line1(S3) =:= "#digital A",
+           {Line1(S1), Line1(S2), Line1(S3), lists:last(Rows)}).
+
+%% # : the guided card. A word at a time: what the line is (Tab from the
+%% kinds and the modules), the name, then a #digital's places -- dir, pull,
+%% pin; Space on an empty one its default, none not written; shown in its
+%% place while written.
+guided() ->
+    Type = fun(Ks, S0) -> lists:foldl(fun(K, Si) -> {ok, Si1} = caned_ui:key(K, Si), Si1 end,
+                                      S0, Ks) end,
+    {ok, D} = caned_doc:from_text("// x\n#module Cnt\n#local A in\n#end\n_ ? _\n"),
+    S0 = Type([doc_end], caned_ui:new(D, "g.csp")),
+    Sa = Type([$#] ++ "dig" ++ [tab] ++ " Lamp ", S0),
+    {_, Ra} = caned_ui:screen(Sa, 10, 160),
+    Status = lists:append([T || {_, T} <- lists:last(Ra)]),
+    Sb = Type("o" ++ [tab] ++ " pullu" ++ [tab] ++ " 13" ++ [enter], Sa),
+    Sc = Type([$#] ++ "Cn" ++ [tab], S0),
+    expect("guided card: the kind by Tab, the name, then dir, pull, pin, each a Tab or "
+           "Space for the default; "
+           "shown in place; a module's name is a head too",
+           string:find(Status, "dir:") =/= nomatch andalso string:find(Status, "then pull, pin") =/= nomatch
+           andalso lists:member("#digital Fan in 7", string:split(caned_doc:text(maps:get(doc,
+                    Type([$#] ++ "dig" ++ [tab] ++ " Fan " ++ "  7" ++ [enter], S0))), "\n", all))
+           andalso lists:any(fun(Row) -> lists:append([T || {_, T} <- Row]) =:= "     #digital Lamp ▏"
+                             end, Ra)
+           andalso lists:member("#digital Lamp out pullup 13",
+                                string:split(caned_doc:text(maps:get(doc, Sb)), "\n", all))
+           andalso maps:get(mode, Sc) =:= {stmt, "#Cnt", 6},
+           {Status, maps:get(mode, Sc), caned_doc:text(maps:get(doc, Sb))}).
 
 %% The editor starts at the top; the tests that write in a rung start on
 %% the first, as Space puts it there.

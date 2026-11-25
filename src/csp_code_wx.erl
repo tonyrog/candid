@@ -13,7 +13,7 @@
 
 -export([zoom_at/5, wheel/4, ops/1, ops/3, paint_ops/3]).   % the tests, the bench
 -export([new/4, metrics/2, shown/3, rungs/6, draw/3, paint/4, answer/5]).
--export([edit_status/3, see/4]).
+-export([edit_status/3, see/4, print/3]).
 
 -define(BG, {18, 18, 18}).
 -define(ZOOMS, [2.0, 1.0, 0.75, 0.5, 0.25]).   % the zoom menu's
@@ -566,12 +566,16 @@ metrics(_H, #{canvas := C}) ->
     #{cw => W / 10, ch => Ht}.
 
 %% What the editor says -- a field being written and its choices, a
-%% message -- over the canvas; hidden when it says nothing.
+%% message -- over the canvas; an empty row when it says nothing.
 edit_status(_H, #{ed_status := T, tabs_panel := P}, Text) ->
     %% `&' in a label is the key it is reached by; the editor's `& series'
     %% means an ampersand.
-    wxStaticText:setLabel(T, lists:flatten(string:replace(Text, "&", "&&", all))),
-    wxWindow:show(T, [{show, Text =/= ""}]),          % nothing said, no room taken
+    %% Always its row, said or not: shown only while something is said, the
+    %% canvas under it went down a row and up again at every word.
+    wxStaticText:setLabel(T, case Text of
+                                 "" -> " ";
+                                 _ -> lists:flatten(string:replace(Text, "&", "&&", all))
+                             end),
     candid_wx:relayout_up(P).
 
 %% Rows Y0..Y1 of the picture (its own pixels) scrolled into sight, with a
@@ -643,7 +647,7 @@ op(H, DC, {line, X1, Y1, X2, Y2, C, W, D}, T0, _F, _B) ->
 op(H, DC, {text, X, Y, Txt, C, Bold}, T0, Font, BoldF) ->
     T1 = set(T0, font, Bold, fun() -> wxDC:setFont(DC, case Bold of true -> BoldF; false -> Font end),
 				      T0 end),
-    T2 = set(T1, fg, C, fun() -> wxDC:setTextForeground(DC, candid_wx:tc(H, C, fg)), T1 end),
+    T2 = set(T1, fg, C, fun() -> wxDC:setTextForeground(DC, tc(H, C, fg)), T1 end),
     wxDC:drawText(DC, Txt, {X, Y}),
     T2.
 
@@ -658,7 +662,7 @@ brush(_H, none, T) -> {?wxTRANSPARENT_BRUSH, T};
 brush(H, C, T) ->
     case maps:find({brush, C}, T) of
 	{ok, B} -> {B, T};
-	error   -> B = wxBrush:new(candid_wx:tc(H, C)), {B, T#{{brush, C} => B}}
+	error   -> B = wxBrush:new(tc(H, C, bg)), {B, T#{{brush, C} => B}}
     end.
 
 pen(_H, none, _W, _D, T) -> {?wxTRANSPARENT_PEN, T};
@@ -668,9 +672,179 @@ pen(H, C, W, D, T) ->
 	{ok, P} -> {P, T};
 	error ->
 	    Style = case D of true -> ?wxPENSTYLE_SHORT_DASH; false -> ?wxPENSTYLE_SOLID end,
-	    P = wxPen:new(candid_wx:tc(H, C, fg), [{width, W}, {style, Style}]),
+	    P = wxPen:new(tc(H, C, fg), [{width, W}, {style, Style}]),
 	    {P, T#{K => P}}
     end.
+
+%% A colour as the theme has it -- or, on paper, as the light theme does:
+%% paper is white whatever the screen is, and printed in black and grey:
+%% no ground but the paper, what is drawn as dark as the light theme has it.
+tc(#{paper := true}, _C, bg) -> {255, 255, 255};
+tc(#{paper := true}, C, Which) ->
+    {R, G, B} = candid_wx:paper(C, Which),
+    Y = round(0.3 * R + 0.59 * G + 0.11 * B),
+    {Y, Y, Y};
+tc(H, C, Which) -> candid_wx:tc(H, C, Which).
+
+%%% ------------------------------------------------------------ printing
+
+%%% The program on paper (csp_code:print_ops/1): the code view's ops, in
+%%% black and grey, as wide as the page allows and no wider than
+%%% on the screen, cut into pages between rungs. A preview first, with the
+%%% print button on it; the printer's dialog from there.
+
+-define(MARGIN, 48).                    % screen pixels, half an inch
+-define(HEAD, 36).                      % the title line and its gap
+-define(MIN_SCALE, 0.7).                % smaller is not read: cut instead
+
+print(H = #{frame := Frame}, Title, Ops0) ->
+    %% not the ground: paper is white, and a ground the size of everything
+    %% would make the picture that size
+    case [Op || Op <- Ops0, not ground(Op)] of
+	[] -> ok;
+	Ops ->
+	    {ok, {Canvas, _}} = candid_wx:lookup(H, code_canvas),
+	    {Cw, _, _, _} = wxWindow:getTextExtent(Canvas, "M"),
+	    Pic = extent(Ops, Cw),
+	    New = fun() -> printout(H#{paper => true}, Title, Ops, Pic) end,
+	    Preview = wxPrintPreview:new(New(), [{printoutForPrinting, New()}]),
+	    F = wxPreviewFrame:new(Preview, Frame, [{title, "print " ++ Title},
+						    {size, {900, 1000}}]),
+	    wxPreviewFrame:initialize(F),
+	    wxFrame:show(F),
+	    ok
+    end.
+
+ground({rect, _, _, W, _, _, _, _, _}) -> W >= 100000;
+ground(_) -> false.
+
+printout(H, Title, Ops, Pic) ->
+    %% The page count from onPreparePrinting, the one call with a DC to
+    %% measure the page: hasPage comes from the preview's tool bar too,
+    %% where there is none, and measuring there took wx down. The printer
+    %% asks before that, for the dialog's range: as many as there may be,
+    %% cut to the count when it is known. hasPage answers 1 or 0: wx reads
+    %% the answer as an integer, and true is not one -- it then prints
+    %% page 1 alone.
+    Count = atomics:new(1, []),
+    wxPrintout:new(Title,
+		   fun(P, N) -> print_page(H, P, Title, Ops, Pic, N) end,
+		   [{onPreparePrinting, fun(P) -> atomics:put(Count, 1, length(pages(P, Pic, Ops))) end},
+		    {getPageInfo, fun(_) ->
+					  case atomics:get(Count, 1) of
+					      0 -> {1, 9999, 1, 9999};
+					      M -> {1, M, 1, M}
+					  end
+				  end},
+		    {hasPage, fun(_, N) -> case N =< atomics:get(Count, 1) of true -> 1; false -> 0 end end}]).
+
+print_page(H, P, Title, Ops, Pic = {X0, _, X1, _}, N) ->
+    Ps = pages(P, Pic, Ops),
+    {Top, Bot} = lists:nth(N, Ps),
+    {K, {Lx, Ly, Lw, _}} = geometry(P, Pic),
+    DC = wxPrintout:getDC(P),
+    Font = candid_wx:font(H),
+    Bold = wxFont:new(wxFont:getPointSize(Font), ?wxFONTFAMILY_TELETYPE,
+		      ?wxFONTSTYLE_NORMAL, ?wxFONTWEIGHT_BOLD),
+    %% the title line, at the scale of the screen
+    wxDC:setFont(DC, Font),
+    wxDC:setTextForeground(DC, {0, 0, 0}),
+    Page = lists:flatten(io_lib:format("~w / ~w", [N, length(Ps)])),
+    {Pw, _} = wxDC:getTextExtent(DC, Page),
+    wxDC:drawText(DC, Title, {Lx + ?MARGIN, Ly + ?MARGIN}),
+    wxDC:drawText(DC, Page, {Lx + Lw - ?MARGIN - Pw, Ly + ?MARGIN}),
+    %% the rows Top..Bot under it, scaled by K, moved there, clipped there
+    {Sx, Sy} = wxDC:getUserScale(DC),
+    wxDC:setUserScale(DC, Sx * K, Sy * K),
+    {Ax, Ay} = {(Lx + ?MARGIN) / K, (Ly + ?MARGIN + ?HEAD) / K},
+    {Dx, Dy} = {Ax - X0, Ay - Top},
+    Cut = min(X1 - X0, (Lw - 2 * ?MARGIN) / K),
+    wxDC:setClippingRegion(DC, {round(Ax), round(Ay), round(Cut) + 1, round(Bot - Top)}),
+    Tools = lists:foldl(fun(Op, T) -> op(H, DC, move(Op, Dx, Dy), T, Font, Bold) end,
+			#{font => false}, [Op || Op <- Ops, crosses(Op, Top, Bot)]),
+    wxDC:destroyClippingRegion(DC),
+    wxDC:setUserScale(DC, Sx, Sy),
+    %% The DC outlives the page, a screen's does not: nothing it holds may
+    %% be destroyed under it.
+    wxDC:setPen(DC, ?wxBLACK_PEN),
+    wxDC:setBrush(DC, ?wxTRANSPARENT_BRUSH),
+    wxDC:setFont(DC, Font),
+    [case Kd of
+	 {pen, _, _, _} -> wxPen:destroy(X);
+	 {brush, _}     -> wxBrush:destroy(X);
+	 _              -> ok
+     end || {Kd, X} <- maps:to_list(Tools)],
+    wxFont:destroy(Bold),
+    true.
+
+move({rect, X, Y, W, Ht, R, F, S, D}, Dx, Dy) ->
+    {rect, round(X + Dx), round(Y + Dy), W, Ht, R, F, S, D};
+move({line, Xa, Ya, Xb, Yb, C, W, D}, Dx, Dy) ->
+    {line, round(Xa + Dx), round(Ya + Dy), round(Xb + Dx), round(Yb + Dy), C, W, D};
+move({text, X, Y, Txt, C, B}, Dx, Dy) -> {text, round(X + Dx), round(Y + Dy), Txt, C, B}.
+
+%% {the scale from the picture to the page, the page in screen pixels}: no
+%% wider than the page, no larger than on the screen -- and no smaller than
+%% ?MIN_SCALE: a row wider than that is cut at the margin.
+geometry(P, {X0, _, X1, _}) ->
+    wxPrintout:mapScreenSizeToPage(P),
+    R = {_, _, Lw, _} = wxPrintout:getLogicalPageRect(P),
+    {max(?MIN_SCALE, min(1.0, (Lw - 2 * ?MARGIN) / max(1, X1 - X0))), R}.
+
+%% The pages, [{Top, Bottom}] in the picture's rows: each as tall as fits,
+%% cut where nothing is cut through -- between rungs.
+pages(P, Pic = {_, Y0, _, Y1}, Ops) ->
+    {K, {_, _, _, Lh}} = geometry(P, Pic),
+    Ph = max(?BAND, (Lh - 2 * ?MARGIN - ?HEAD) / K),
+    cut(Y0, Y1, Ph, solid(Ops, Ph)).
+
+cut(Top, Y1, _Ph, _S) when Top >= Y1 -> [];
+cut(Top, Y1, Ph, _S) when Top + Ph >= Y1 -> [{Top, Y1}];
+cut(Top, Y1, Ph, S) ->
+    %% the last gap between solid things on this page, or a full page
+    Gaps = [G || {E, Next} <- gaps(S), E > Top + Ph / 4, G <- [(E + Next) / 2],
+		 G =< Top + Ph],
+    Bot = case Gaps of
+	      [] -> Top + Ph;
+	      _ -> lists:max(Gaps)
+	  end,
+    [{Top, Bot} | cut(Bot, Y1, Ph, S)].
+
+%% The rows something occupies, merged: a box, a text, a line shorter than
+%% a page (a rail down the whole program is cut, it is not a rung).
+solid(Ops, Ph) ->
+    Is = lists:sort([I || Op <- Ops, I <- span_of(Op, Ph)]),
+    merge_spans(Is).
+
+span_of({rect, _, Y, _, Ht, _, _, _, _}, _) -> [{Y, Y + Ht}];
+span_of({text, _, Y, _, _, _}, _) -> [{Y, Y + 18}];
+span_of({line, _, Ya, _, Yb, _, _, _}, Ph) when abs(Yb - Ya) < Ph / 2 ->
+    [{min(Ya, Yb), max(Ya, Yb)}];
+span_of(_, _) -> [].
+
+merge_spans([{A, B}, {C, D} | T]) when C =< B -> merge_spans([{A, max(B, D)} | T]);
+merge_spans([I | T]) -> [I | merge_spans(T)];
+merge_spans([]) -> [].
+
+gaps([{_, E}, N = {S, _} | T]) -> [{E, S} | gaps([N | T])];
+gaps(_) -> [].
+
+crosses({rect, _, Y, _, Ht, _, _, _, _}, T, B) -> Y < B andalso Y + Ht > T;
+crosses({line, _, Ya, _, Yb, _, _, _}, T, B) -> min(Ya, Yb) < B andalso max(Ya, Yb) > T;
+crosses({text, _, Y, _, _, _}, T, B) -> Y < B andalso Y + 18 > T.
+
+%% The box round all of it, {X0, Y0, X1, Y1}. A row's fill from the left
+%% edge -- a box with no line round it -- is as wide as the window, not as
+%% the program, and is not measured: the clip cuts it where the rest ends.
+extent(Ops, Cw) ->
+    Bs = [case Op of
+	      {rect, X, Y, _, Ht, _, _, none, _} when X =< 0 -> {0, Y, 0, Y + Ht};
+	      {rect, X, Y, W, Ht, _, _, _, _} -> {X, Y, X + W, Y + Ht};
+	      {line, Xa, Ya, Xb, Yb, _, _, _} -> {min(Xa, Xb), min(Ya, Yb), max(Xa, Xb), max(Ya, Yb)};
+	      {text, X, Y, Txt, _, _} -> {X, Y, X + Cw * string:length(Txt), Y + 18}
+	  end || Op <- Ops],
+    {lists:min([A || {A, _, _, _} <- Bs]), lists:min([B || {_, B, _, _} <- Bs]),
+     lists:max([C || {_, _, C, _} <- Bs]), lists:max([D || {_, _, _, D} <- Bs])}.
 
 %%% ------------------------------------------------------------ painting
 

@@ -10,7 +10,8 @@
 
 -module(caned_menu).
 
--export([field/3, add/2, parts/1, kind_of/2, group/1]).
+-export([field/3, add/2, parts/1, kind_of/2, group/1, kinds/0, groups_of/1, words/1,
+         heads/1]).
 
 -define(GROUPS, #{digital => [dir, pull, trig, invert],
                   analog => [dir, type, pwm, trig],
@@ -41,12 +42,28 @@ field(S, Key, D) ->
                 _ -> words(group_of(lists:nth(I, Os1)))
             end;
         transport -> ?TRANSPORTS;
+        kw -> [atom_to_list(Ki) || Ki <- kinds()];
         res -> widths(K);
         period -> ["100", "500", "1000", "10000"];
         frame -> [N ++ "[0..7]" || N <- names(D, buffer)];
         init when K =:= param; K =:= variable; K =:= constant; K =:= local -> ["0", "1"];
         _ -> []
     end.
+
+%% The kinds a declaration can be turned into, one into another
+%% (caned_decl:convert/2).
+kinds() -> [variable, digital, analog, constant, param, local, timer, define].
+
+%% What a new line can begin with after `#' (caned_ui's guided card): the
+%% declarations, the objects of D's modules (`#Cnt c0'), then the rest.
+heads(D) ->
+    [atom_to_list(K) || K <- kinds()] ++ ["buffer", "field"] ++
+        [M || {module, _, {'WORD', _, M}} <- caned_doc:stmts(D)] ++
+        [M || {module, _, {'WORD', _, M}, _} <- caned_doc:stmts(D)] ++
+        ["module", "states", "import", "annotate", "route", "in", "when", "else", "end"].
+
+%% The option groups that mean something on a declaration of kind K.
+groups_of(K) -> maps:get(K, ?GROUPS, []).
 
 %% What `+' can put on S: an option of a group it has not got, a width when
 %% it has none, a transport on a #buffer with none.
