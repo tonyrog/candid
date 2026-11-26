@@ -1,0 +1,52 @@
+This is a fictitious system which nevertheless
+exhibits some problems appearing in realistic
+applications.
+Modeling: The climatic chamber specification
+prescribes the functionality of the controller
+for regulating the chamber temperature by
+means of a heater and a fan. Figure 8 [fig8.png] illustrates
+the system and its environment.
+
+
+The system consists of a chamber with a given
+volume. Outside air flows through the system
+via the inlet and leaves the chamber from the
+outlet. The aim is to ventilate the chamber
+using the heater and the fan. The actual
+temperature and actual flow are to be kept
+close to operator-selected values for
+temperature and flow. A condensed description
+of the system specification is:
+
+1. Primarily the functionality is specified
+around five system states: off, wait, solution
+(sol), work and block. These correspond to
+different operating modes: wait for
+initialisation, solution for stabilization, work
+for normal operation, and block for emergency
+stop.
+
+2. Initially the system starts from the off-state
+in which all variables are given pre-defined
+values.
+
+3. Some variables are treated as constants;
+either because they are fixed in a particular
+design (e.g. thresholds), or because they are
+not controlled by the system (being determined
+by the environment at any given instance).
+
+4. Transitions from one state to another are
+governed by the difference between the
+selected (set) temperature and the actual
+temperature. Depending on the size and/or the
+duration of a temperature discrepancy different
+state transitions are specified.
+
+5. All state transitions are accompanied with
+different types of actions, for example resetting
+time to zero or switching on some warning
+indication.
+
+6. The specification includes boundaries for
+rate of temperature change and rate of flow.

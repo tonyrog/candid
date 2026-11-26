@@ -193,6 +193,17 @@ holding(File, Ws) ->
 	[] -> load(File, Ws)
     end.
 
+%% File as the chat has just written it: the tab that holds it read again,
+%% in its place. Kept as it was read, the tab's lines were what save wrote
+%% back over the chat's program.
+reread(File, Side = #{ws := Ws}) ->
+    Ws1 = holding(File, Ws),
+    case {candid_file:active(Ws1), candid_file:load({disk, File})} of
+	{#{id := Id, origin := {disk, _}}, {ok, F}} ->
+	    Side#{ws := candid_file:update(Ws1, F#{id := Id})};
+	_ -> Side#{ws := Ws1}
+    end.
+
 holds(#{origin := {node, Dev}}, File) -> node_file(Dev) =:= File;
 holds(#{origin := new, id := Id}, File) -> new_path(Id) =:= File;
 holds(#{name := none}, _File) -> false;
@@ -378,22 +389,23 @@ widgets(Ast) ->
 	       {K, N, W} <- Decls(Body)],
     [apply_ann(W, Ann) || W <- Decls(Main) ++ Objs].
 
-%% The inputs pulled up, named as widgets/1 names them: a button to ground,
-%% 1 while nobody presses it.
-pullups(Ast) ->
+%% The inputs declared invert, named as widgets/1 names them: a button
+%% pressed is 1 and let go 0, pullup or pulldown alike -- they model the
+%% wiring, not what the panel sends -- unless invert turns it over.
+inverts(Ast) ->
     {Main, Mods} = csp_code:split(Ast),
     P = fun(Ds) -> [N || {digital, _, {'WORD', _, N}, scalar, _, Opts, _} <- Ds,
 			 proplists:get_value(dir, Opts, in) =:= in,
-			 proplists:get_value(pull, Opts) =:= pullup]
+			 lists:member(invert, Opts)]
 	end,
     P(Main) ++ [O ++ "." ++ N
 		|| {object, _, {'WORD', _, M}, {'WORD', _, O}, _} <- Main,
 		   {ok, Body} <- [maps:find(M, Mods)], N <- P(Body)].
 
-%% A pulled-up input's look says so: its widget sends 0 while held and shows
+%% An inverted input's look says so: its widget sends 0 while held and shows
 %% it lit when it is not at rest.
-idle(Looks, Pulled) ->
-    maps:map(fun(N, L) -> case lists:member(N, Pulled) of
+idle(Looks, Inverted) ->
+    maps:map(fun(N, L) -> case lists:member(N, Inverted) of
 			      true  -> L#{idle => 1};
 			      false -> L
 			  end
@@ -654,7 +666,7 @@ rgb565(V) ->
 %%% the count, and the readout beside it says what that is in the world.
 
 looks(Ast) ->
-    idle(looks(widgets(Ast), annotations(Ast), ranges(Ast)), pullups(Ast)).
+    idle(looks(widgets(Ast), annotations(Ast), ranges(Ast)), inverts(Ast)).
 
 looks(Widgets, Ann, Rng) ->
     maps:from_list([{N, look(W, kv(N, Ann), Rng)} || W = {_, N, _} <- Widgets]).
@@ -1122,7 +1134,7 @@ build(U, Where, Root, File, Widgets0, Ast, Side = #{chat := Chat, log := Log}) -
     warn_annotations(Ast),
     Ann = annotations(Ast),
     Rng = ranges(Ast),
-    Looks = idle(looks(Widgets0, Ann, Rng), pullups(Ast)),
+    Looks = idle(looks(Widgets0, Ann, Rng), inverts(Ast)),
     [warn_misplaced(W, Ann) || W <- Widgets0],
     %% hidden: no row, no trace, not a channel of any plot. csp still has it;
     %% the panel just does not show it.
@@ -1532,7 +1544,7 @@ wait_for_pick(U, Where, File, W) ->
 	{chat_tool, From, Ref, <<"load_file">> = Name, Args} ->
 	    {load, File1, Reply} = csp_chat:panel_tool(Name, Args, #{}),
 	    From ! {Ref, Reply},
-	    render(U, Where, File1, Side);
+	    render(U, Where, File1, reread(File1, Side));
 	{chat_tool, From, Ref, _Name, _Args} ->
 	    From ! {Ref, {error, "nothing runs in the panel: an empty "
 			  "program, or one that cannot be read"}},
@@ -1724,7 +1736,7 @@ loop(U, Link, S) ->
 		    From ! {Ref, Reply},
 		    csp_link:close(Link),
 		    flush(),
-		    render(U, maps:get(where, S), File, side(S));
+		    render(U, maps:get(where, S), File, reread(File, side(S)));
 		{control, Tag, Reply} ->
 		    From ! {Ref, Reply},
 		    loop(U, Link, control(U, Link, S, Tag));
@@ -2065,6 +2077,13 @@ control(_U, Link, S, "step=1") ->
 	run  -> ok
     end,
     S;
+
+control(U, Link, S, "reset=1") ->
+    %% Only meaningful while stopped; in run mode the program is already going
+    %% and a step would be indistinguishable from the tick.
+    csp_link:reset(Link),
+    update(U, S, []);
+
 %% A new tick takes effect on the NEXT one: the timer already in flight is left
 %% to arrive, so changing the rate cannot drop a tick or run two at once.
 control(U, _Link, S, "trace=" ++ V) -> view(U, S, "trace", V);

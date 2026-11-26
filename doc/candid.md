@@ -82,9 +82,11 @@ Variables, constants and rules do not get widgets yet.
 | `pixel`   | a colour swatch, decoded as RGB565   | hover for the name              | (none)                |
 | `plot`    | one channel of an XY picture         | drag on the canvas (inputs only)| `X = <count>` per axis|
 
-An input declared `pullup` is a button to ground: it rests at 1, so `toggle`
-and `push` show it lit when it is **0**, and `push` sends `X = 0` while held and
-`X = 1` on release.
+A `push` sends `X = 1` while held and `X = 0` on release, whether the input
+is declared `pullup`, `pulldown` or neither: those describe the wiring, not
+what a press means. An input declared `invert` is the other way round: it
+rests at 1, `toggle` and `push` show it lit when it is **0**, and `push` sends
+`X = 0` while held and `X = 1` on release.
 
 `action` is for outputs that *do* something, like a siren, a pump or a valve. A
 small dot does not tell you "the pump is running"; a word does.

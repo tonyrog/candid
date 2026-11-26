@@ -82,10 +82,10 @@ load({disk, Path}) ->
 
 %% The program a node runs, as csp_link lists it off the node's image (Text)
 %% and the image and patch it read (Dumps, csp_node:dumps/1's form).
-%% A rule the node has switched off is listed `// 3 E!', as /list lists it.
+%% Listed as source (csp_list's source => true): no /list tags, the rules the
+%% node has switched off a #disable line at the end, read as a file's is.
 from_node(Device, Text, Dumps) ->
-    {Ls, Offs0} = marks(lines(Text)),
-    Offs = lists:usort(Offs0 ++ listed_off(Ls)),
+    {Ls, Offs} = marks(lines(Text)),
     F = (new())#{origin => {node, Device}, mode => patch, lines => Ls,
 		 image => image_of(Dumps),
 		 %% what /dump info said of the node (csp_node:info/1), if it did
@@ -94,11 +94,6 @@ from_node(Device, Text, Dumps) ->
 	{ok, F1} -> F1;
 	_ -> F
     end.
-
-listed_off(Ls) ->
-    [list_to_integer(N) || #{text := T} <- Ls,
-			   {match, [N]} <- [re:run(T, "  // ([0-9]+) [A-Z]!$",
-						   [{capture, [1], list}])]].
 
 %% Saved at Path, which is its name from then on, and where it comes from --
 %% unless it is a node's: that one keeps coming from the node, still patched

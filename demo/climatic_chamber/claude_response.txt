@@ -1,0 +1,97 @@
+  · manual [<<>>]
+  · program
+  · list_files [<<"examples">>]
+  · manual [<<"States">>]
+  · read_file [<<"examples/traffic.csp">>]
+  · read_file [<<"examples/pid.csp">>]
+  · manual [<<"Timer Functions">>]
+  · manual [<<"Built-in Functions">>]
+  · manual [<<"Execution Model">>]
+  · manual [<<"rules outside #in block every state">>]
+  · manual [<<"annotate varp invariant">>]
+  · check
+  · load klimatkammare
+  · set [<<"Start">>,1]
+  · prove reach State == block && Heat' != 0
+  · state
+  · step [3]
+  · set [<<"Start">>,1]
+  · resume
+  · state
+  · state
+  · state
+Jag har skrivit en modell av klimatkammaren och laddat den i panelen som **klimatkammare.csp**. Den kompilerar och går att köra. Hittills har jag bara sett att den går från off till wait och att fläkten börjar rampa upp. Övergångarna till sol, work och block har jag inte provat. Figur 8 kan jag inte se, och specen är kortfattad. Därför har jag själv valt trösklar, tider och vad varje tillstånd gör. Ändra dem om originalet säger något annat.
+
+**Struktur, punkt för punkt**
+1. **Tillstånd** (`#states off wait sol work block`):
+   - **off:** startvärden. Värme och fläkt av, varningar nollställda. Går till wait på `Start`.
+   - **wait:** initiering i 5 s. Fläkten rampar upp och värmen är av.
+   - **sol:** stabilisering. Går till work när avvikelsen |Tset−Tact| ≤ 1,0 °C. Går till block om det inte har skett inom 60 s.
+   - **work:** normal drift. Om avvikelsen ligger över 1,0 °C i 10 s i sträck går systemet tillbaka till sol och `Warn` tänds. Över 5,0 °C går det direkt till block.
+   - **block:** nödstopp. Värme och fläkt av och `Alarm` tänds. Går tillbaka till off först på `Reset`.
+   - **Stop:** går till off från wait, sol och work.
+2. **Startvärden:** programmet startar i off, och variablerna har värden redan när de deklareras.
+3. **Konstanter:**
+   - Trösklarna i designen är `#constant`: `D1`, `D2`, `RMAX`, `DH`, `DF`, `FMIN`, `FMAX`.
+   - Värden som omgivningen bestämmer är vanliga variabler som du sätter själv: `Tact`, `Fact`, `Tout`.
+4. **Avvikelsens storlek och varaktighet:** storleken jämförs med `D1` och `D2`. Varaktigheten mäts med timern `Tdev`, som startas om så länge allt är bra och alltså bara löper ut efter 10 s avvikelse i sträck.
+5. **Åtgärder vid övergångar:** varje övergång gör sina åtgärder i samma regel. Den startar om en timer, sätter `Warn` eller `Alarm`, eller nollar `Heat` och `Fan`.
+6. **Gränser för ändringstakt:**
+   - Värmeeffekten ändras högst `DH` per sekund och fläktflödet högst `DF` per sekund, och flödet hålls inom `FMIN..FMAX`.
+   - Om temperaturen ändras mer än 1,0 °C/s går systemet till block.
+
+**Övrigt**
+- Enheterna är heltal: 0,1 °C, 0,1 m³/min och procent för värmen.
+- Regleringen är en enkel integrerande regulator.
+- Jag lade till en enkel modell av kammaren (styrs av `Sim = 1`) så att `Tact` och `Fact` ändras när du kör i panelen. Med `Sim = 0` sätter du dem själv.
+- Ordningen i filen spelar roll: om två regler skriver samma variabel i samma cykel vinner den sista. Övergångarnas `Heat = 0` ligger därför efter regleringen.
+
+**Om beviset:** jag frågade varp om block någonsin kan ha `Heat ≠ 0`. Den hittade ett fall, men det är troligen falskt: varp kan inte översätta `Heat`, `Tact`, `Fan` och `Fact` och behandlar dem som fria, så de kan anta vilket värde som helst. Det beror nog på divisionerna i kammarmodellen. Svaret säger alltså inget om programmet. Om du vill bevisa egenskaper i tillståndsmaskinen är det bättre att bevisa med `Sim = 0` och utan den modellen.
+
+**Prova:** `Start = 1` startar förloppet. Sätt sedan till exempel `Tset = 300` (30,0 °C) för att se att work går till block, eller använd `Stop` och `Reset`.
+
+Vill du att jag lägger in de exakta trösklarna och övergångarna från originalspecifikationen, om du har dem?
+
+------------------------------------------------------------------------------
+> Kan du upddatera klimatkammare så att utsignaler blir digital/analog(pwm) och att insignaler blir digital/analog där det behövs.
+  · program
+  · state
+  · manual [<<"#digital">>]
+  · manual [<<"#analog pwm">>]
+  · manual [<<"I/O declarations">>]
+  · manual [<<"#analog in">>]
+  · manual [<<"analog resolution scaling value range">>]
+  · list_files [<<"examples">>]
+  · read_file [<<"examples/ain.csp">>]
+  · read_file [<<"examples/pid.csp">>]
+  · list_files [<<"boards">>]
+  · manual [<<"writing to an input">>]
+  · check
+  · load klimatkammare
+  · set [<<"Start">>,1]
+  · state
+  · step [3]
+  · state
+Let me look up how #digital/#analog and PWM are declared.
+Jag har uppdaterat klimatkammaren. Programmet kompilerar och är laddat i panelen som `klimatkammare.csp` i chattkatalogen. Originalet i `demo/climatic_chamber/` är orört. Jag har däremot inte kunnat köra det: panelen stod kvar på cykel 0 även efter att jag stegat, och `Start` visade 0 trots att jag satt den till 1.
+
+**Insignaler**
+- `Start`, `Stop` och `Reset` är digitala ingångar på pinne 2, 3 och 4.
+- Givarna är analoga ingångar med 10 bitar (0..1023): `TactIn` på pinne 14, `FactIn` på 15 och `ToutIn` på 16.
+  - Temperaturerna räknas som `rå + TOFS` med `TOFS = -200`. Det ger −20,0..82,3 °C i 0,1 °C.
+  - Flödet räknas som `rå * 100 / 1023`, alltså 0..10,0 m³/min.
+- `Tset` och `Fset` är kvar som variabler som operatören sätter i panelen. Jag tyckte inte att de behövde vara hårdvara, men de kan bli potentiometrar på samma sätt.
+
+**Utsignaler**
+- `HeatOut` på pinne 9 och `FanOut` på pinne 10 är 8-bitars PWM (0..255). De räknas om från `Heat` (0..100 %) och `Fan` (0..`FMAX`) varje cykel.
+- `Warn` på pinne 7 och `Alarm` på pinne 8 är digitala utgångar.
+
+**Simuleringen**
+- `Sim = 1` (standard): kammarmodellen räknar fram `Tact` och `Fact` precis som förut, och `Tout` står kvar på 15,0 °C.
+- `Sim = 0`: värdena läses i stället från givarna.
+
+Regleringen och tillståndsmaskinen är oförändrade.
+
+**Att kontrollera mot din hårdvara**
+- Pinnummer, upplösning och skalning är mina antaganden (en Arduino-liknande kortlayout med A0 = 14). Ändra dem så att de stämmer med kortet och givarna.
+- `Stop` är en vanlig ingång där 1 betyder stopp. Om stoppknappen är en brytande nödstoppskrets bör den deklareras med `pullup`/`invert` så att en trasig kabel ger stopp.

@@ -16,6 +16,7 @@
 #annotate panel Red    color=red
 #annotate panel Yellow color=yellow
 #annotate panel Green  color=green
+#annotate varp inputs "B1 B2 B3: low, down <= 1, events <= 1"
 
 Red    = B1 || B2 || B3
 Yellow = B1 + B2 + B3 == 1

@@ -256,6 +256,7 @@ chooser1(H, Root, Spec = #{period := Now, periods := Periods, views := Views,
     RunB = Button(Run, "go", "mode=run"),
     PauseB = Button(Run, "pause", "mode=step"),
     OneB = Button(Run, "step", "step=1"),
+    ResetB = Button(Run, "reset", "reset=1"),
     RIn(text(H, RBox, "  tick ", ?DIM)),
     Ps = lists:usort([Now | Periods]),
     RIn(menu_btn(H, RBox, [integer_to_list(P) ++ " ms" || P <- Ps],
@@ -280,6 +281,7 @@ chooser1(H, Root, Spec = #{period := Now, periods := Periods, views := Views,
 					       {border, 4}]),
     relayout(Root),
     {pick, #{event => bar, run => RunB, pause => PauseB, one => OneB,
+	     reset => ResetB,
 	     views => maps:from_list(Vs), panes => maps:from_list(PBs),
 	     tabs => {Root, Row0, Pid}}}.
 
@@ -530,11 +532,12 @@ pane_button(H, #{panes := Ps}, P, On) ->
 	_ -> ok
     end.
 
-mode(H, #{run := RunB, pause := PauseB, one := OneB}, Step) ->
+mode(H, #{run := RunB, pause := PauseB, one := OneB, reset := ResetB}, Step) ->
     btn_on(H, RunB, not Step),
     btn_on(H, PauseB, Step),
     %% the step button is only live while stopped
-    btn_enable(H, OneB, Step).
+    btn_enable(H, OneB, Step),
+    btn_enable(H, ResetB, true).
 
 paint(H, Node, V) ->
     paint1(H, Node, V).
@@ -740,7 +743,7 @@ switch(H, Left, Row, Name, Look = #{colour := Hue}) ->
     {switch, B, Hue, Idle}.
 
 %% Held down rather than latched: the pressed level while held, the resting
-%% one on release -- 1 and 0, or 0 and 1 for a button to ground.
+%% one on release -- 1 and 0, or 0 and 1 for an input declared invert.
 push(H, Left, Row, Name, Look = #{colour := Hue}) ->
     Idle = maps:get(idle, Look, 0),
     Pid = self(),

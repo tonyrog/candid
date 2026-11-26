@@ -414,8 +414,8 @@ program(Owner, Ds, St = #{target := T}) ->
 	    St#{want := none}
     end.
 
-listing([{rom, Rom}]) -> csp_list:image(Rom);
-listing([{rom, Rom}, {_, Patch}]) -> csp_list:patch(Rom, Patch).
+listing([{rom, Rom}]) -> csp_list:image(Rom, #{source => true});
+listing([{rom, Rom}, {_, Patch}]) -> csp_list:patch(Rom, Patch, #{source => true}).
 
 patched([_, {patch, _}])  -> " + the patch running";
 patched([_, {eeprom, _}]) -> " + the patch stored";

@@ -2109,11 +2109,11 @@ file_check() ->
 					       {patch, <<1, 2, 3>>}]) andalso
 	       not candid_file:same_image(D, Dumps),
 	   nomatch),
-    Lst = candid_file:from_node("n", "#digital B in 2  // F\n"
-				"Led = 1 ? B  // 1 F\nLed = 0 ? !B  // 2 E!\n", []),
-    expect("file: a rule the node has off, listed `!', is off here too",
-	   candid_file:rules(Lst) =:= {ok, [{1, 2, "Led = 1 ? B  // 1 F", false},
-					    {2, 3, "Led = 0 ? !B  // 2 E!", true}]},
+    Lst = candid_file:from_node("n", "#digital B in 2\n"
+				"Led = 1 ? B\nLed = 0 ? !B\n#disable 2\n", []),
+    expect("file: a rule the node has off, listed in #disable, is off here too",
+	   candid_file:rules(Lst) =:= {ok, [{1, 2, "Led = 1 ? B", false},
+					    {2, 3, "Led = 0 ? !B", true}]},
 	   candid_file:rules(Lst)),
     Esp = <<"JAM\n", 0:(52 * 8), 16#abcd:16, "rest">>,
     expect("file: a node's floats read as the node says (/dump info): an "
@@ -2257,6 +2257,30 @@ save_check() ->
 	   element(1, K) =:= ok andalso
 	       lists:member({theme, light}, element(2, K)) andalso Alive,
 	   {K, Alive}),
+    %% The chat writes a program open in a tab and loads it: the tab is read
+    %% again, so save writes the chat's program, not the one first read.
+    Chatted = filename:join(os:getenv("TMPDIR", "/tmp"), "chatted.csp"),
+    V1 = <<"#digital A in 2\n#digital L out 13\nL = A\n">>,
+    V2 = <<"#digital A in 2\n#analog L:8 out 13\nL = A * 7\n">>,
+    ok = file:write_file(Chatted, V1),
+    {Sel2, _} = Events(Since(C2)),
+    C5 = calls(),
+    P2 ! {notify, Sel2, local, Chatted},
+    timer:sleep(?SETTLE),
+    _ = Since(C5),
+    ok = file:write_file(Chatted, V2),
+    C6 = calls(),
+    Ref = make_ref(),
+    P2 ! {chat_tool, self(), Ref, <<"load_file">>, #{<<"file">> => list_to_binary(Chatted)}},
+    receive {Ref, _} -> ok after 2000 -> ok end,
+    timer:sleep(?SETTLE),
+    {_, B3} = Events(Since(C6)),
+    P2 ! {notify, B3, local, "save"},
+    timer:sleep(?SETTLE),
+    AfterSave = file:read_file(Chatted),
+    file:delete(Chatted),
+    expect("save: a program the chat loaded is saved as the chat wrote it",
+	   AfterSave =:= {ok, V2}, AfterSave),
     %% The file dialogs open where the last one was left, next run too --
     %% and not in a directory that has gone since.
     Here = filename:join(os:getenv("TMPDIR", "/tmp"), "candid_dir_test"),
@@ -2455,27 +2479,30 @@ capture(Acc) ->
 	{done, Pid} -> Pid ! {said, lists:append(lists:reverse(Acc))}
     end.
 
-%% A button to ground (pullup) rests at 1: its look says so, and its push
-%% sends 0 while held and 1 on release; one pulled down is the other way.
+%% A button sends 1 pressed and 0 let go, pullup or pulldown alike; one
+%% declared invert is the other way, and rests at 1.
 pullup_check() ->
     F = "/tmp/csp_pullup_panel.csp",
     ok = file:write_file(F, "#digital K in pullup 2\n#digital J in pulldown 3\n"
+			 "#digital I in pullup invert 4\n"
 			 "#annotate panel K kind=push\n"
-			 "#annotate panel J kind=push\n"),
+			 "#annotate panel J kind=push\n"
+			 "#annotate panel I kind=push\n"),
     {ok, A} = candyspeak:parse(F),
     L = candid:looks(A),
-    expect("a pullup input's look rests at 1, a pulldown's has no idle",
-	   maps:get(idle, maps:get("K", L), 0) =:= 1 andalso
+    expect("an inverted input's look rests at 1, pullup and pulldown have no idle",
+	   maps:get(idle, maps:get("I", L), 0) =:= 1 andalso
+	   not maps:is_key(idle, maps:get("K", L)) andalso
 	   not maps:is_key(idle, maps:get("J", L)), L),
     Before = calls(),
     _ = candid_wse:panel(fake_ws, root,
-			 #{rows => [{{push, N, 1}, maps:get(N, L)} || N <- ["K", "J"]],
+			 #{rows => [{{push, N, 1}, maps:get(N, L)} || N <- ["K", "J", "I"]],
 			   pixels => [], plots => [], traces => []}),
     New = calls() -- Before,
     Has = fun(T) -> lists:any(fun(C) -> string:find(C, T) =/= nomatch end, New) end,
-    expect("a pullup push sends K=0 held and K=1 released, a pulldown J=1 and J=0",
-	   Has("'K=0'") andalso Has("'K=1'") andalso Has("'J=1'") andalso
-	   Has("'J=0'"), New).
+    expect("a push sends 1 held and 0 released (K, J), an inverted one I=0 and I=1",
+	   Has("'K=1'") andalso Has("'K=0'") andalso Has("'J=1'") andalso
+	   Has("'J=0'") andalso Has("'I=0'") andalso Has("'I=1'"), New).
 
 calls() ->
     wse_log ! {calls, self()},

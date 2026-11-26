@@ -590,7 +590,7 @@ slider(Ws, Row, Name, Look = #{min := Min, max := Max, colour := {On, _}}) ->
     {slider, S, Out, Look}.
 
 %% Held down rather than latched: mousedown sends the pressed level, mouseup
-%% the resting one -- 1 and 0, or 0 and 1 for a button to ground (pullup).
+%% the resting one -- 1 and 0, or 0 and 1 for an input declared invert.
 %% Reuses the slider wire format (Name=Value) rather than inventing a second.
 push(Ws, Row, Name, Look = #{colour := Hue}) ->
     Idle = maps:get(idle, Look, 0),

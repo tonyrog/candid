@@ -1,0 +1,123 @@
+// Klimatkammare: regulator för temperatur (värmare) och flöde (fläkt)
+// Enheter: temperatur i 0,1 °C, flöde i 0,1 m3/min, effekt i %.
+#states off wait sol work block
+
+// --- Operatörens val (insignaler) ---
+#digital Start in 2             // tryckknapp start
+#digital Stop  in 3             // tryckknapp stopp
+#digital Reset in 4             // återställning efter block
+#variable Tset = 200          // vald temperatur 20,0 °C
+#variable Fset = 50           // valt flöde
+
+// --- Givare (analoga insignaler, 10 bitar 0..1023) ---
+#analog TactIn:10 in 14       // kammartemperatur
+#analog FactIn:10 in 15       // flöde
+#analog ToutIn:10 in 16       // uteluftens temperatur
+#constant TOFS = -200         // temp = rå + TOFS: 0..1023 -> -20,0..82,3 °C
+#constant FNUM = 100          // flöde = rå * FNUM / 1023 -> 0..10,0 m3/min
+
+// --- Omgivningen (bestäms inte av systemet) ---
+#variable Tact = 150          // verklig temperatur
+#variable Fact = 0            // verkligt flöde
+#variable Tout = 150          // uteluftens temperatur
+#param    Sim:1 = 1           // 1 = enkel kammarmodell räknar Tact/Fact, 0 = givarna
+
+// --- Konstanter i designen (trösklar) ---
+#constant D1 = 10             // liten avvikelse 1,0 °C: sol -> work
+#constant D2 = 50             // stor avvikelse 5,0 °C: work -> block
+#constant RMAX = 10           // max temperaturändring 1,0 °C/s -> block
+#constant DH = 10             // max ändring av värmeeffekt per s
+#constant DF = 5              // max ändring av flöde per s
+#constant FMIN = 10
+#constant FMAX = 100
+#constant HMAX = 100
+
+#timer Tick 1000              // samplingsperiod 1 s
+#timer Twait 5000             // initiering i wait
+#timer Tsol 60000             // längsta tid för stabilisering
+#timer Tdev 10000             // tillåten tid med avvikelse > D1 i work
+
+// --- Utsignaler ---
+#analog HeatOut:8 out pwm 9   // värmare, PWM 0..255
+#analog FanOut:8 out pwm 10   // fläkt, PWM 0..255
+#digital Warn  out 7
+#digital Alarm out 8
+
+// --- Interna värden ---
+#variable Heat = 0            // värmare 0..100 %
+#variable Fan = 0             // fläktens börflöde 0..FMAX
+#variable Tprev = 150
+#variable Rate = 0            // temperaturändring per s
+
+#local Dev = Tset - Tact
+#local ADev = abs(Tset - Tact)
+
+#in INIT
+    State = off, Tick = 1
+#end
+
+// --- reglering (står först: övergångarnas Heat = 0 skrivs sist och vinner) ---
+#in wait sol work
+    // 6. flödet rampas mot valt värde, högst DF per s, inom FMIN..FMAX
+    Fan = clip(Fan + clip(clip(Fset, FMIN, FMAX) - Fan, -DF, DF), 0, FMAX) ? timeout(Tick)
+#end
+#in sol work
+    // integrerande regulator, värmeeffektens ändring begränsad till DH per s
+    Heat = clip(Heat + clip(Dev / 2, -DH, DH), 0, HMAX) ? timeout(Tick)
+#end
+
+// 2. off: fördefinierade värden
+#in off
+    Heat = 0, Fan = 0, Warn = 0, Alarm = 0
+    State = wait, Twait = 1 ? Start
+#end
+
+// wait: initiering, fläkten startar, ingen värme
+#in wait
+    Heat = 0
+    State = sol, Tsol = 1 ? timeout(Twait)
+#end
+
+// sol: stabilisering
+#in sol
+    State = work, Warn = 0, Tdev = 1 ? ADev <= D1
+    State = block, Alarm = 1, Heat = 0, Fan = 0 ? timeout(Tsol)
+#end
+
+// work: normal drift
+#in work
+    Tdev = 1 ? ADev <= D1                      // avvikelsetiden nollställs så länge allt är bra
+    State = sol, Warn = 1, Tsol = 1 ? timeout(Tdev)
+    State = block, Alarm = 1, Heat = 0, Fan = 0 ? ADev > D2
+#end
+
+// block: nödstopp
+#in block
+    Heat = 0, Fan = 0, Alarm = 1
+    State = off ? Reset
+#end
+
+// gemensamt
+#in off wait sol work block
+    Tick = 1 ? timeout(Tick)
+    Rate = Tact - Tprev, Tprev = Tact ? timeout(Tick)
+#end
+#in wait sol work
+    State = block, Alarm = 1, Heat = 0, Fan = 0 ? abs(Rate) > RMAX
+    State = off, Heat = 0, Fan = 0 ? Stop
+#end
+
+// --- utsignaler: % -> PWM ---
+HeatOut = clip(Heat, 0, HMAX) * 255 / HMAX
+FanOut  = clip(Fan, 0, FMAX) * 255 / FMAX
+
+// --- givare (Sim = 0) ---
+Tact = TactIn + TOFS        ? !Sim
+Fact = FactIn * FNUM / 1023 ? !Sim
+Tout = ToutIn + TOFS        ? !Sim
+
+// --- enkel kammarmodell (miljön), stäng av med Sim = 0 ---
+#in off wait sol work block
+    Fact = Fact + (Fan - Fact) / 2 ? Sim && timeout(Tick)
+    Tact = Tact + Heat / 20 - (Tact - Tout) * Fact / 1000 ? Sim && timeout(Tick)
+#end
