@@ -10,6 +10,11 @@
 #digital Yellow out 12
 #digital Green  out 13
 
+#variable F1:1
+#variable F2:1
+#variable F3:1
+#variable F4:1
+
 #annotate panel B1 kind=toggle
 #annotate panel B2 kind=toggle
 #annotate panel B3 kind=toggle
@@ -18,11 +23,16 @@
 #annotate panel Green  color=green
 #annotate varp inputs "B1 B2 B3: low, down <= 1, events <= 1"
 
-Red    = B1 || B2 || B3
-Yellow = B1 + B2 + B3 == 1
-Green  = B1 && B2 && B3
+F1 = 1 ? B1 || B2 || B3
+F2 = 1 ? B1 + B2 + B3 == 1
+F3 = 1 ? B1 && B2 && B3
+F4 = 1 ? (B1 || B3) && !(B1 && B2)
+
+Red    =  F1
+Yellow =  F2
+Green  =  F3
 
 // blå: B1 eller B3, men inte när B1 och B2 är höga samtidigt
 #digital Blue out 14
 #annotate panel Blue color=blue
-Blue   = (B1 || B3) && !(B1 && B2)
+Blue   = F4

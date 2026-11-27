@@ -71,8 +71,9 @@ pause(L)          -> L ! pause, ok.
 resume(L)         -> L ! resume, ok.
 step(L)           -> step(L, 1).
 step(L, N)        -> L ! {step, N}, ok.
-%% Back to the initial values, State INIT, cycle 0. Prints no dump: the next
-%% step's dump says what differs from the last one printed.
+%% Back to the initial values, State INIT, cycle 0. A local csp says so at
+%% once, paused or not: a dump of what differs at cycle 0, nothing fired and
+%% {clock,0,0}; a node is asked until it is at cycle 0.
 reset(L)          -> L ! reset, ok.
 clock(L, Ms)      -> L ! {clock, Ms}, ok.
 

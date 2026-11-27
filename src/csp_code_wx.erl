@@ -528,12 +528,21 @@ index(H) ->
     {ok, T} = candid_wx:lookup(H, code_index),
     T.
 
+%% A new table each picture, put in place whole: a paint runs in a process
+%% of its own, and one that came between emptying the table and filling it
+%% again found nothing and painted the canvas blank -- a blink now and then.
+%% The one before stays a picture longer, for a paint still reading it.
 store(H, Ops) ->
-    T = index(H),
-    ets:delete_all_objects(T),
+    T = ets:new(code_index, [ordered_set, public]),
     ets:insert(T, [{{B, I}, Op} || {I, Op} <- lists:enumerate(Ops),
                                    {Y0, Y1} <- [span(Op)],
-                                   B <- lists:seq(stripe(Y0), stripe(Y1))]).
+                                   B <- lists:seq(stripe(Y0), stripe(Y1))]),
+    case candid_wx:lookup(H, code_index_old) of
+        {ok, Older} -> ets:delete(Older);
+        error -> ok
+    end,
+    candid_wx:register(H, code_index_old, index(H), perm),
+    candid_wx:register(H, code_index, T, perm).
 
 span({rect, _, Y, _, Ht, _, _, _, _}) -> {Y, Y + Ht};
 span({line, _, Ya, _, Yb, _, _, _}) -> {min(Ya, Yb), max(Ya, Yb)};
